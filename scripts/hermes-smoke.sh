@@ -3,14 +3,23 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 HERMES_COMMIT=3ef6bbd201263d354fd83ec55b3c306ded2eb72a
-PROVIDER_PORT=${MODEL_GATEWAY_SMOKE_PROVIDER_PORT:-39001}
-GATEWAY_PORT=${MODEL_GATEWAY_SMOKE_GATEWAY_PORT:-39002}
+PROVIDER_PORT=${MODEL_GATEWAY_SMOKE_PROVIDER_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')}
+GATEWAY_PORT=${MODEL_GATEWAY_SMOKE_GATEWAY_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')}
+if [ "$GATEWAY_PORT" = "$PROVIDER_PORT" ]; then
+    GATEWAY_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+fi
 STATE=$(mktemp -d)
 HERMES_HOME="$STATE/hermes"
 
 cleanup() {
+    status=$?
+    if [ "$status" -ne 0 ] && [ -f "$STATE/gateway.log" ]; then
+        printf '%s\n' 'Gateway log after smoke failure:' >&2
+        cat "$STATE/gateway.log" >&2
+    fi
     kill "${GATEWAY_PID:-}" "${PROVIDER_PID:-}" 2>/dev/null || true
     rm -rf "$STATE"
+    exit "$status"
 }
 trap cleanup EXIT
 
@@ -59,6 +68,7 @@ MODEL_GATEWAY_CONFIG="$STATE/gateway.toml" \
 GATEWAY_PID=$!
 
 for _ in $(seq 1 50); do
+    kill -0 "$GATEWAY_PID" "$PROVIDER_PID"
     if curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/health/ready" >/dev/null; then
         break
     fi
@@ -66,13 +76,15 @@ for _ in $(seq 1 50); do
 done
 curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/health/ready" >/dev/null
 
-curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/models" \
-    | python3 -c 'import json,sys; assert json.load(sys.stdin)["data"][0]["id"] == "smoke"'
+MODELS=$(curl --silent --show-error --fail --retry 3 \
+    "http://127.0.0.1:${GATEWAY_PORT}/v1/models")
+python3 -c 'import json,sys; assert json.loads(sys.argv[1])["data"][0]["id"] == "smoke"' "$MODELS"
 
-curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
+NON_STREAMING=$(curl --silent --show-error --fail --retry 3 \
+    "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
-    -d '{"model":"smoke","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"fixture"}}]}' \
-    | python3 -c 'import json,sys; assert json.load(sys.stdin)["choices"][0]["message"]["content"] == "smoke-ok"'
+    -d '{"model":"smoke","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"fixture"}}]}')
+python3 -c 'import json,sys; assert json.loads(sys.argv[1])["choices"][0]["message"]["content"] == "smoke-ok"' "$NON_STREAMING"
 
 curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
