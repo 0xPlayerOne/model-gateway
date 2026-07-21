@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::rejection::BytesRejection;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -16,7 +17,6 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
-use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::config::{Config, ProviderConfig, TargetConfig};
 use crate::secrets::{SecretError, SecretResolver};
@@ -79,9 +79,6 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
     for (name, provider) in &config.providers {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(provider.connect_timeout_seconds))
-            .timeout(Duration::from_secs(
-                provider.response_header_timeout_seconds,
-            ))
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("model-gateway/0.1")
             .build()
@@ -117,9 +114,7 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
         .route("/health/ready", get(health_ready))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
-        .layer(RequestBodyLimitLayer::new(
-            state.config.server.max_body_bytes,
-        ))
+        .layer(DefaultBodyLimit::max(state.config.server.max_body_bytes))
         .with_state(state))
 }
 
@@ -173,7 +168,8 @@ async fn health_live() -> impl IntoResponse {
 }
 
 async fn health_ready(State(state): State<AppState>) -> impl IntoResponse {
-    Json(json!({"status": "ready", "providers": state.providers.len()}))
+    let _ = state;
+    Json(json!({"status": "ready"}))
 }
 
 async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
@@ -189,10 +185,31 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
 async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let request_id = request_id(&headers);
-    let mut request: Value = match serde_json::from_slice::<Value>(&body) {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                request_id,
+                "request body exceeded the configured limit",
+                "invalid_request_error",
+                Some("body_too_large"),
+            );
+        }
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                request_id,
+                "request body could not be read",
+                "invalid_request_error",
+                Some("invalid_body"),
+            );
+        }
+    };
+    let request: Value = match serde_json::from_slice::<Value>(&body) {
         Ok(value) if value.is_object() => value,
         Ok(_) => {
             return error_response(
@@ -203,11 +220,11 @@ async fn chat_completions(
                 Some("invalid_request"),
             );
         }
-        Err(error) => {
+        Err(_) => {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 request_id,
-                &format!("invalid JSON body: {error}"),
+                "invalid JSON body",
                 "invalid_request_error",
                 Some("invalid_json"),
             );
@@ -225,6 +242,19 @@ async fn chat_completions(
             );
         }
     };
+    let is_stream = match request.get("stream") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                request_id,
+                "field 'stream' must be a boolean",
+                "invalid_request_error",
+                Some("stream"),
+            );
+        }
+    };
     let targets = match resolve_targets(&state, &model) {
         Ok(targets) => targets,
         Err((status, message, code)) => {
@@ -237,33 +267,35 @@ async fn chat_completions(
             );
         }
     };
+    let global_permit = match timeout(
+        Duration::from_millis(state.config.server.admission_timeout_ms),
+        state.global_permits.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            return admission_error(
+                request_id,
+                "gateway is at capacity",
+                state.config.server.admission_timeout_ms,
+            );
+        }
+    };
     let mut attempts = 0usize;
     let mut last_error = None;
     for target in targets {
         attempts += 1;
+        let mut target_request = request.clone();
+        target_request["model"] = Value::String(target.model.clone());
         let Some(provider) = state.providers.get(&target.provider) else {
             last_error = Some((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("provider '{}' is not configured", target.provider),
+                HeaderMap::new(),
+                Bytes::new(),
+                target.provider.clone(),
             ));
             continue;
-        };
-        let global_permit = match timeout(
-            Duration::from_millis(state.config.server.admission_timeout_ms),
-            state.global_permits.clone().acquire_owned(),
-        )
-        .await
-        {
-            Ok(Ok(permit)) => permit,
-            _ => {
-                return error_response(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    request_id,
-                    "gateway is at capacity",
-                    "server_error",
-                    Some("admission"),
-                );
-            }
         };
         let provider_permit = match timeout(
             Duration::from_millis(state.config.server.admission_timeout_ms),
@@ -273,21 +305,18 @@ async fn chat_completions(
         {
             Ok(Ok(permit)) => permit,
             _ => {
-                return error_response(
-                    StatusCode::TOO_MANY_REQUESTS,
+                return admission_error(
                     request_id,
                     "provider is at capacity",
-                    "server_error",
-                    Some("admission"),
+                    state.config.server.admission_timeout_ms,
                 );
             }
         };
-        request["model"] = Value::String(target.model.clone());
         let url = format!(
             "{}/chat/completions",
             provider.config.base_url.trim_end_matches('/')
         );
-        let mut upstream = provider.client.post(url).json(&request);
+        let mut upstream = provider.client.post(url).json(&target_request);
         if let Some(api_key) = &provider.api_key {
             upstream = upstream.bearer_auth(api_key);
         }
@@ -302,20 +331,18 @@ async fn chat_completions(
         .await
         {
             Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
+            Ok(Err(_)) => {
                 drop(provider_permit);
-                drop(global_permit);
                 return error_response(
                     StatusCode::BAD_GATEWAY,
                     request_id,
-                    &format!("upstream request failed: {error}"),
+                    "upstream request failed",
                     "upstream_error",
                     None,
                 );
             }
             Err(_) => {
                 drop(provider_permit);
-                drop(global_permit);
                 return error_response(
                     StatusCode::GATEWAY_TIMEOUT,
                     request_id,
@@ -327,65 +354,82 @@ async fn chat_completions(
         };
         let status = response.status();
         let response_headers = response.headers().clone();
-        if request
-            .get("stream")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-            && status.is_success()
-        {
-            return streaming_response(
+        if status.is_success() {
+            return relay_response(
                 response,
+                status,
                 response_headers,
                 StreamContext {
                     request_id,
+                    alias: model,
                     provider: target.provider.clone(),
                     attempts,
                     idle_timeout_seconds: provider.config.stream_idle_timeout_seconds,
+                    is_stream,
                     global_permit,
                     provider_permit,
                 },
             );
         }
-        let response_body = match read_bounded(response).await {
+        let response_body = match read_bounded(
+            response,
+            Duration::from_secs(provider.config.stream_idle_timeout_seconds),
+        )
+        .await
+        {
             Ok(body) => body,
-            Err(error) => {
+            Err(_) if is_fallback_status(status) => Bytes::new(),
+            Err(_) => {
                 drop(provider_permit);
-                drop(global_permit);
-                return error_response(
+                return selected_error_response(
                     StatusCode::BAD_GATEWAY,
                     request_id,
-                    &format!("upstream response failed: {error}"),
-                    "upstream_error",
-                    None,
+                    "upstream response body failed",
+                    &model,
+                    &target.provider,
+                    attempts,
                 );
             }
         };
         drop(provider_permit);
-        drop(global_permit);
-        if status.is_success() {
-            return upstream_response(
+        if !is_fallback_status(status) {
+            return upstream_error_response(
                 status,
                 response_headers,
                 response_body,
                 request_id,
+                &model,
                 &target.provider,
                 attempts,
             );
         }
-        if !is_fallback_status(status) {
-            return upstream_error_response(status, response_headers, response_body, request_id);
-        }
         last_error = Some((
             status,
-            format!(
-                "upstream provider '{}' returned HTTP {status}",
-                target.provider
-            ),
+            response_headers,
+            response_body,
+            target.provider.clone(),
         ));
     }
-    let (status, message) =
-        last_error.unwrap_or((StatusCode::BAD_GATEWAY, "no route was available".to_owned()));
-    error_response(status, request_id, &message, "upstream_error", None)
+    match last_error {
+        Some((status, headers, body, provider)) if !body.is_empty() => upstream_error_response(
+            status, headers, body, request_id, &model, &provider, attempts,
+        ),
+        Some((status, _, _, provider)) => selected_error_response(
+            status,
+            request_id,
+            "upstream provider returned an error",
+            &model,
+            &provider,
+            attempts,
+        ),
+        None => error_response(
+            StatusCode::BAD_GATEWAY,
+            request_id,
+            "no route was available",
+            "upstream_error",
+            None,
+        ),
+    }
 }
 
 #[allow(clippy::single_match)]
@@ -415,11 +459,19 @@ fn resolve_targets(
     ))
 }
 
-async fn read_bounded(response: reqwest::Response) -> Result<Bytes, String> {
+async fn read_bounded(
+    response: reqwest::Response,
+    idle_timeout: Duration,
+) -> Result<Bytes, String> {
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| error.to_string())?;
+    loop {
+        let chunk = match timeout(idle_timeout, stream.next()).await {
+            Ok(Some(Ok(chunk))) => chunk,
+            Ok(Some(Err(_))) => return Err("upstream response body failed".to_owned()),
+            Ok(None) => break,
+            Err(_) => return Err("upstream response body was idle".to_owned()),
+        };
         if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
             return Err("upstream response exceeded the gateway response limit".to_owned());
         }
@@ -441,23 +493,28 @@ fn is_fallback_status(status: StatusCode) -> bool {
 
 struct StreamContext {
     request_id: String,
+    alias: String,
     provider: String,
     attempts: usize,
     idle_timeout_seconds: u64,
+    is_stream: bool,
     global_permit: tokio::sync::OwnedSemaphorePermit,
     provider_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
-fn streaming_response(
+fn relay_response(
     response: reqwest::Response,
+    status: StatusCode,
     upstream_headers: HeaderMap,
     context: StreamContext,
 ) -> Response {
     let idle_timeout = Duration::from_secs(context.idle_timeout_seconds);
     let StreamContext {
         request_id,
+        alias,
         provider,
         attempts,
+        is_stream,
         global_permit,
         provider_permit,
         ..
@@ -485,33 +542,20 @@ fn streaming_response(
         drop(global_permit);
     };
     let mut response = Response::new(Body::from_stream(stream));
-    copy_safe_headers(&upstream_headers, response.headers_mut());
-    add_gateway_headers(
-        response.headers_mut(),
-        request_id,
-        &provider,
-        attempts.saturating_sub(1),
-    );
-    response
-}
-
-fn upstream_response(
-    status: StatusCode,
-    upstream_headers: HeaderMap,
-    body: Bytes,
-    request_id: String,
-    provider: &str,
-    attempts: usize,
-) -> Response {
-    let mut response = Response::new(body.into());
     *response.status_mut() = status;
     copy_safe_headers(&upstream_headers, response.headers_mut());
     add_gateway_headers(
         response.headers_mut(),
         request_id,
-        provider,
+        &alias,
+        &provider,
         attempts.saturating_sub(1),
     );
+    if is_stream {
+        response
+            .headers_mut()
+            .insert("x-accel-buffering", HeaderValue::from_static("no"));
+    }
     response
 }
 
@@ -520,19 +564,27 @@ fn upstream_error_response(
     headers: HeaderMap,
     body: Bytes,
     request_id: String,
+    alias: &str,
+    provider: &str,
+    attempts: usize,
 ) -> Response {
     let mut response = Response::new(body.into());
     *response.status_mut() = status;
     copy_safe_headers(&headers, response.headers_mut());
-    response
-        .headers_mut()
-        .insert(REQUEST_ID_HEADER, header_value(&request_id));
+    add_gateway_headers(
+        response.headers_mut(),
+        request_id,
+        alias,
+        provider,
+        attempts.saturating_sub(1),
+    );
     response
 }
 
 fn copy_safe_headers(source: &HeaderMap, target: &mut HeaderMap) {
     for name in [
         "content-type",
+        "content-length",
         "cache-control",
         "retry-after",
         "x-request-id",
@@ -549,15 +601,51 @@ fn copy_safe_headers(source: &HeaderMap, target: &mut HeaderMap) {
 fn add_gateway_headers(
     headers: &mut HeaderMap,
     request_id: String,
+    alias: &str,
     provider: &str,
     fallbacks: usize,
 ) {
     headers.insert(REQUEST_ID_HEADER, header_value(&request_id));
+    headers.insert("x-model-gateway-alias", header_value(alias));
     headers.insert("x-model-gateway-provider", header_value(provider));
     headers.insert(
         "x-model-gateway-fallbacks",
         header_value(&fallbacks.to_string()),
     );
+}
+
+fn admission_error(request_id: String, message: &str, admission_timeout_ms: u64) -> Response {
+    let mut response = error_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        request_id,
+        message,
+        "server_error",
+        Some("admission"),
+    );
+    let retry_after = admission_timeout_ms.div_ceil(1000).max(1);
+    response
+        .headers_mut()
+        .insert("retry-after", header_value(&retry_after.to_string()));
+    response
+}
+
+fn selected_error_response(
+    status: StatusCode,
+    request_id: String,
+    message: &str,
+    alias: &str,
+    provider: &str,
+    attempts: usize,
+) -> Response {
+    let mut response = error_response(status, request_id.clone(), message, "upstream_error", None);
+    add_gateway_headers(
+        response.headers_mut(),
+        request_id,
+        alias,
+        provider,
+        attempts.saturating_sub(1),
+    );
+    response
 }
 
 fn request_id(headers: &HeaderMap) -> String {
