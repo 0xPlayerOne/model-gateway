@@ -1,5 +1,8 @@
 //! Local model gateway library.
 
+pub mod config;
+pub mod secrets;
+
 /// Returns the package version for the binary and tests.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

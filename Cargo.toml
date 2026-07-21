@@ -15,5 +15,11 @@ name = "model-gateway"
 path = "src/main.rs"
 
 [dependencies]
+keyring = { version = "3.6", features = ["apple-native", "linux-native"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.9"
+url = "2"
 
 [dev-dependencies]
+tempfile = "3"
