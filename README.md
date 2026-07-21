@@ -1,4 +1,4 @@
-# free-model-gateway
+# model-gateway
 
 Local Rust model gateway for routing OpenAI-compatible clients to configured
 model providers. It is designed for one developer running locally, not as a

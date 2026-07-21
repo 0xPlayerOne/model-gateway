@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "A local OpenAI-compatible model gateway"
 readme = "README.md"
+repository = "https://github.com/0xPlayerOne/model-gateway"
 
 [lib]
 name = "model_gateway"
