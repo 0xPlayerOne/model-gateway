@@ -7,10 +7,13 @@ RUN cargo build --release
 
 FROM debian:bookworm-slim
 
-RUN groupadd --system --gid 10001 model-gateway \
-    && useradd --system --uid 10001 --gid 10001 --create-home model-gateway \
+ARG MODEL_GATEWAY_UID=10001
+ARG MODEL_GATEWAY_GID=10001
+
+RUN if ! getent group "$MODEL_GATEWAY_GID" >/dev/null; then groupadd --gid "$MODEL_GATEWAY_GID" model-gateway; fi \
+    && useradd --uid "$MODEL_GATEWAY_UID" --gid "$MODEL_GATEWAY_GID" --create-home model-gateway \
     && mkdir -p /app/state /run/model-gateway/secrets \
-    && chown -R model-gateway:model-gateway /app /run/model-gateway
+    && chown -R "$MODEL_GATEWAY_UID:$MODEL_GATEWAY_GID" /app /run/model-gateway
 
 COPY --from=builder /src/target/release/model-gateway /usr/local/bin/model-gateway
 COPY gateway.example.toml /app/gateway.example.toml

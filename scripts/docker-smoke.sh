@@ -38,7 +38,11 @@ EOF
 cat > "$STATE/compose.yml" <<EOF
 services:
   gateway:
-    build: "$ROOT"
+    build:
+      context: "$ROOT"
+      args:
+        MODEL_GATEWAY_UID: "$(id -u)"
+        MODEL_GATEWAY_GID: "$(id -g)"
     environment:
       MODEL_GATEWAY_CONFIG: /app/state/config.toml
       MODEL_GATEWAY_CONTAINER_MODE: "1"
@@ -51,7 +55,11 @@ services:
       - "$STATE/state:/app/state:ro"
       - secrets:/run/model-gateway/secrets:ro
   setup:
-    build: "$ROOT"
+    build:
+      context: "$ROOT"
+      args:
+        MODEL_GATEWAY_UID: "$(id -u)"
+        MODEL_GATEWAY_GID: "$(id -g)"
     profiles: ["setup"]
     environment:
       MODEL_GATEWAY_CONFIG: /app/state/config.toml

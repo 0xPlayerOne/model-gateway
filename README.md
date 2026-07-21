@@ -34,6 +34,8 @@ Create the ignored state directory, then run the interactive setup container:
 
 ```bash
 mkdir -p .model-gateway
+export MODEL_GATEWAY_UID="$(id -u)"
+export MODEL_GATEWAY_GID="$(id -g)"
 docker compose --profile setup run --rm setup
 docker compose up --build gateway
 ```
