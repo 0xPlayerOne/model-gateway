@@ -278,9 +278,7 @@ fn validate_provider(
             "provider '{name}' timeouts must be greater than zero"
         )));
     }
-    if let Some(limit) = provider.max_in_flight
-        && limit == 0
-    {
+    if provider.max_in_flight == Some(0) {
         return Err(ConfigError::Invalid(format!(
             "provider '{name}' max_in_flight must be greater than zero"
         )));

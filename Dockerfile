@@ -18,7 +18,6 @@ COPY gateway.example.toml /app/gateway.example.toml
 USER model-gateway
 WORKDIR /app
 ENV MODEL_GATEWAY_CONFIG=/app/config.toml \
-    MODEL_GATEWAY_SECRET_DIR=/run/model-gateway/secrets \
     RUST_LOG=info
 
 ENTRYPOINT ["model-gateway"]

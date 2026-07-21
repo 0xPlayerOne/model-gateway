@@ -388,6 +388,7 @@ async fn chat_completions(
     error_response(status, request_id, &message, "upstream_error", None)
 }
 
+#[allow(clippy::single_match)]
 fn resolve_targets(
     state: &AppState,
     model: &str,
@@ -395,14 +396,17 @@ fn resolve_targets(
     if let Some(config) = state.config.models.get(model) {
         return Ok(config.targets.clone());
     }
-    if let Some((provider_name, upstream_model)) = model.split_once('/')
-        && let Some(provider) = state.config.providers.get(provider_name)
-        && provider.allow_model_passthrough
-    {
-        return Ok(vec![TargetConfig {
-            provider: provider_name.to_owned(),
-            model: upstream_model.to_owned(),
-        }]);
+    match model.split_once('/') {
+        Some((provider_name, upstream_model)) => match state.config.providers.get(provider_name) {
+            Some(provider) if provider.allow_model_passthrough => {
+                return Ok(vec![TargetConfig {
+                    provider: provider_name.to_owned(),
+                    model: upstream_model.to_owned(),
+                }]);
+            }
+            _ => {}
+        },
+        None => {}
     }
     Err((
         StatusCode::NOT_FOUND,

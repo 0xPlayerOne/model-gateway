@@ -185,9 +185,11 @@ impl SecretResolver {
         if let Some(value) = self.environment.get(name)? {
             return Ok(Some(value));
         }
-        if let Some(files) = &self.files
-            && let Some(value) = files.get(name)?
-        {
+        let file_value = match &self.files {
+            Some(files) => files.get(name)?,
+            None => None,
+        };
+        if let Some(value) = file_value {
             return Ok(Some(value));
         }
         match &self.keychain {
@@ -200,15 +202,19 @@ impl SecretResolver {
         if self.environment.get(name)?.is_some() {
             return Ok(Some(self.environment.source()));
         }
-        if let Some(files) = &self.files
-            && files.get(name)?.is_some()
-        {
-            return Ok(Some(files.source()));
+        let file_source = match &self.files {
+            Some(files) if files.get(name)?.is_some() => Some(files.source()),
+            _ => None,
+        };
+        if let Some(source) = file_source {
+            return Ok(Some(source));
         }
-        if let Some(keychain) = &self.keychain
-            && keychain.get(name)?.is_some()
-        {
-            return Ok(Some(keychain.source()));
+        let keychain_source = match &self.keychain {
+            Some(keychain) if keychain.get(name)?.is_some() => Some(keychain.source()),
+            _ => None,
+        };
+        if let Some(source) = keychain_source {
+            return Ok(Some(source));
         }
         Ok(None)
     }
