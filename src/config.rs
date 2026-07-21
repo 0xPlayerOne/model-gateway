@@ -154,6 +154,14 @@ impl Config {
     }
 
     pub fn validate(&self, secrets: &SecretResolver) -> Result<(), ConfigError> {
+        self.validate_inner(Some(secrets))
+    }
+
+    pub fn validate_structure(&self) -> Result<(), ConfigError> {
+        self.validate_inner(None)
+    }
+
+    fn validate_inner(&self, secrets: Option<&SecretResolver>) -> Result<(), ConfigError> {
         validate_server(&self.server)?;
         if self.providers.is_empty() {
             return Err(ConfigError::Invalid(
@@ -272,7 +280,7 @@ fn validate_server(server: &ServerConfig) -> Result<(), ConfigError> {
 fn validate_provider(
     name: &str,
     provider: &ProviderConfig,
-    secrets: &SecretResolver,
+    secrets: Option<&SecretResolver>,
 ) -> Result<(), ConfigError> {
     let url = Url::parse(&provider.base_url)
         .map_err(|error| ConfigError::Invalid(format!("provider '{name}' URL: {error}")))?;
@@ -328,10 +336,13 @@ fn validate_provider(
     }
     if let Some(secret) = &provider.api_key_secret {
         validate_secret_name(secret)?;
-        if secrets.get(secret)?.is_none() {
-            return Err(ConfigError::MissingSecret {
-                name: secret.clone(),
-            });
+        match secrets {
+            Some(resolver) if resolver.get(secret)?.is_none() => {
+                return Err(ConfigError::MissingSecret {
+                    name: secret.clone(),
+                });
+            }
+            _ => {}
         }
     }
     Ok(())

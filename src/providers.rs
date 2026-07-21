@@ -26,12 +26,15 @@ impl BuiltinProvider {
         }
     }
 
-    pub fn default_base_url(self) -> &'static str {
-        match self {
-            Self::Custom => "http://localhost:8000/v1",
-            Self::OpenRouter => "https://openrouter.ai/api/v1",
-            Self::Ollama => "http://localhost:11434/v1",
-            Self::LmStudio => "http://localhost:1234/v1",
+    pub fn default_base_url(self, docker: bool) -> &'static str {
+        match (self, docker) {
+            (Self::Custom, true) => "http://host.docker.internal:8000/v1",
+            (Self::Ollama, true) => "http://host.docker.internal:11434/v1",
+            (Self::LmStudio, true) => "http://host.docker.internal:1234/v1",
+            (Self::Custom, false) => "http://localhost:8000/v1",
+            (Self::OpenRouter, _) => "https://openrouter.ai/api/v1",
+            (Self::Ollama, false) => "http://localhost:11434/v1",
+            (Self::LmStudio, false) => "http://localhost:1234/v1",
         }
     }
 
@@ -49,12 +52,55 @@ impl BuiltinProvider {
     }
 
     pub fn config(self, base_url: String, api_key_secret: Option<String>) -> ProviderConfig {
+        let allow_insecure_http = base_url.starts_with("http://host.docker.internal");
         ProviderConfig {
             adapter: AdapterKind::OpenaiChat,
             base_url,
             api_key_secret,
+            allow_insecure_http,
             ..ProviderConfig::default()
         }
+    }
+
+    pub fn validate_and_fetch_models(
+        self,
+        provider: &ProviderConfig,
+        api_key: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        if self == Self::OpenRouter {
+            validate_openrouter_key(provider, api_key)?;
+        }
+        fetch_models(provider, api_key)
+    }
+}
+
+fn client(provider: &ProviderConfig) -> Result<Client, String> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(provider.connect_timeout_seconds))
+        .timeout(Duration::from_secs(
+            provider.response_header_timeout_seconds,
+        ))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+fn validate_openrouter_key(provider: &ProviderConfig, api_key: Option<&str>) -> Result<(), String> {
+    let api_key = api_key.ok_or_else(|| "OpenRouter API key is required".to_owned())?;
+    let endpoint = format!("{}/auth/key", provider.base_url.trim_end_matches('/'));
+    let response = client(provider)?
+        .get(endpoint)
+        .bearer_auth(api_key)
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|error| error.to_string())?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "OpenRouter rejected the API key with HTTP {}",
+            response.status()
+        ))
     }
 }
 
@@ -63,15 +109,9 @@ pub fn fetch_models(
     api_key: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let endpoint = format!("{}/models", provider.base_url.trim_end_matches('/'));
-    let client = Client::builder()
-        .connect_timeout(Duration::from_secs(provider.connect_timeout_seconds))
-        .timeout(Duration::from_secs(
-            provider.response_header_timeout_seconds,
-        ))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| error.to_string())?;
-    let mut request = client.get(endpoint).header("Accept", "application/json");
+    let mut request = client(provider)?
+        .get(endpoint)
+        .header("Accept", "application/json");
     if let Some(api_key) = api_key {
         request = request.bearer_auth(api_key);
     }
@@ -103,7 +143,7 @@ mod tests {
     fn core_profiles_have_expected_defaults() {
         assert_eq!(BuiltinProvider::all().len(), 4);
         assert_eq!(
-            BuiltinProvider::Ollama.default_base_url(),
+            BuiltinProvider::Ollama.default_base_url(false),
             "http://localhost:11434/v1"
         );
         assert!(BuiltinProvider::OpenRouter.needs_api_key());

@@ -1,12 +1,13 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::io::{self, Write};
 
 use clap::{Args, Parser, Subcommand};
 use dialoguer::{Confirm, Input, Password, Select};
 
-use model_gateway::config::{Config, Exposure, ModelConfig, TargetConfig};
+use model_gateway::config::{Config, ConfigError, Exposure, ModelConfig, TargetConfig};
 use model_gateway::gateway::run_server;
-use model_gateway::providers::{BuiltinProvider, fetch_models};
+use model_gateway::providers::BuiltinProvider;
 use model_gateway::secrets::SecretResolver;
 
 #[derive(Debug, Parser)]
@@ -80,12 +81,14 @@ async fn serve() -> Result<(), Box<dyn Error>> {
 fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
     let config_path = Config::default_path();
     let resolver = SecretResolver::default();
-    let mut config = if config_path.exists() {
+    let original = if config_path.exists() {
         println!("Editing {}", config_path.display());
-        Config::read(&config_path).unwrap_or_default()
+        Some(Config::read(&config_path)?)
     } else {
-        Config::default()
+        None
     };
+    let mut config = original.clone().unwrap_or_default();
+    let mut pending_secrets = BTreeMap::new();
     config.server.exposure = if args.docker {
         Exposure::LocalContainer
     } else {
@@ -120,9 +123,15 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
             .interact_text()?;
         let base_url: String = Input::new()
             .with_prompt("Base URL")
-            .default(profile.default_base_url().to_owned())
+            .default(profile.default_base_url(args.docker).to_owned())
             .interact_text()?;
-        let secret_name = if profile.needs_api_key() {
+        let needs_api_key = profile.needs_api_key()
+            || (matches!(profile, BuiltinProvider::Custom | BuiltinProvider::LmStudio)
+                && Confirm::new()
+                    .with_prompt("Does this provider require an API key?")
+                    .default(false)
+                    .interact()?);
+        let secret_name = if needs_api_key {
             let secret_name: String = Input::new()
                 .with_prompt("API key secret name")
                 .default(format!(
@@ -131,30 +140,45 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
                 ))
                 .interact_text()?;
             let value = Password::new()
-                .with_prompt("API key")
+                .with_prompt("API key (leave empty to keep an available stored value)")
+                .allow_empty_password(true)
                 .interact()?
                 .trim()
                 .to_owned();
             if value.is_empty() {
-                return Err("an API key is required for this provider".into());
+                if resolver.get(&secret_name)?.is_none() {
+                    return Err("an API key is required for this provider".into());
+                }
+            } else {
+                pending_secrets.insert(secret_name.clone(), value);
             }
-            resolver.set_preferred(&secret_name, &value)?;
             Some(secret_name)
         } else {
             None
         };
         let provider = profile.config(base_url, secret_name);
         if !args.offline {
-            let key = provider
-                .api_key_secret
-                .as_deref()
-                .and_then(|name| resolver.get(name).ok().flatten());
-            match fetch_models(&provider, key.as_deref()) {
+            let key = provider.api_key_secret.as_deref().and_then(|name| {
+                pending_secrets
+                    .get(name)
+                    .cloned()
+                    .or_else(|| resolver.get(name).ok().flatten())
+            });
+            match profile.validate_and_fetch_models(&provider, key.as_deref()) {
                 Ok(models) if !models.is_empty() => {
                     println!("Discovered {} model(s)", models.len());
                 }
                 Ok(_) => println!("Provider returned no models; enter one manually."),
-                Err(error) => println!("Model discovery skipped: {error}"),
+                Err(error) => {
+                    eprintln!("Provider validation failed: {error}");
+                    if !Confirm::new()
+                        .with_prompt("Save this provider explicitly in offline mode?")
+                        .default(false)
+                        .interact()?
+                    {
+                        return Err("provider validation failed".into());
+                    }
+                }
             }
         }
         config.providers.insert(name.clone(), provider);
@@ -185,24 +209,61 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    config.validate(&resolver)?;
-    if config_path.exists()
-        && !Confirm::new()
-            .with_prompt("Replace the existing configuration atomically?")
-            .default(false)
-            .interact()?
+    config.validate_structure()?;
+    println!("Proposed non-secret configuration diff:");
+    println!("{}", config_diff(original.as_ref(), &config)?);
+    if !Confirm::new()
+        .with_prompt("Apply the proposed configuration and credential changes?")
+        .default(false)
+        .interact()?
     {
         return Err("configuration was not changed".into());
     }
+    for (name, value) in pending_secrets {
+        resolver.set_preferred(&name, &value)?;
+    }
+    config.validate(&resolver)?;
     config.save_atomic(&config_path)?;
     println!("Saved {}", config_path.display());
     println!(
         "Aliases: {}",
         config.models.keys().cloned().collect::<Vec<_>>().join(", ")
     );
-    println!("Hermes endpoint: http://localhost:11434/v1");
-    println!("curl http://localhost:11434/health/live");
+    let endpoint = "http://127.0.0.1:11434/v1";
+    let default_alias = config.models.keys().next().expect("validated alias");
+    println!("Hermes custom-endpoint YAML:");
+    println!("model:");
+    println!("  provider: custom");
+    println!("  base_url: {endpoint}");
+    println!("  default: {default_alias}");
+    println!("curl http://127.0.0.1:11434/health/live");
+    println!("curl http://127.0.0.1:11434/v1/models");
     Ok(())
+}
+
+fn config_diff(before: Option<&Config>, after: &Config) -> Result<String, ConfigError> {
+    let before = before.map(Config::to_toml).transpose()?.unwrap_or_default();
+    let after = after.to_toml()?;
+    let before_lines = before.lines().collect::<BTreeSet<_>>();
+    let after_lines = after.lines().collect::<BTreeSet<_>>();
+    let mut output = Vec::new();
+    output.extend(
+        before
+            .lines()
+            .filter(|line| !after_lines.contains(line))
+            .map(|line| format!("- {line}")),
+    );
+    output.extend(
+        after
+            .lines()
+            .filter(|line| !before_lines.contains(line))
+            .map(|line| format!("+ {line}")),
+    );
+    if output.is_empty() {
+        Ok("  (no configuration changes)".to_owned())
+    } else {
+        Ok(output.join("\n"))
+    }
 }
 
 fn config_check() -> Result<(), Box<dyn Error>> {
@@ -230,7 +291,14 @@ fn credentials(command: CredentialCommand) -> Result<(), Box<dyn Error>> {
             println!("Removed {name} from writable secret stores");
         }
         CredentialCommand::List => {
-            let config = Config::read(Config::default_path())?;
+            let config = match Config::read(Config::default_path()) {
+                Ok(config) => config,
+                Err(ConfigError::Missing(_)) => {
+                    println!("No configured credentials");
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
             let names = config
                 .providers
                 .values()
@@ -244,4 +312,29 @@ fn credentials(command: CredentialCommand) -> Result<(), Box<dyn Error>> {
     }
     io::stdout().flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use model_gateway::config::{Config, ModelConfig, TargetConfig};
+
+    use super::config_diff;
+
+    #[test]
+    fn config_diff_contains_no_secret_values() {
+        let mut after = Config::default();
+        after.models.insert(
+            "public-alias".to_owned(),
+            ModelConfig {
+                targets: vec![TargetConfig {
+                    provider: "provider".to_owned(),
+                    model: "upstream".to_owned(),
+                }],
+            },
+        );
+        let diff = config_diff(None, &after).expect("diff");
+        assert!(diff.contains("public-alias"));
+        assert!(!diff.contains("password"));
+        assert!(!diff.contains("Bearer"));
+    }
 }
