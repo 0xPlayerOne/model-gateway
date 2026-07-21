@@ -14,6 +14,10 @@ cargo run -- serve
 `setup` stores provider keys in the macOS Keychain or Linux Secret Service and
 writes only non-secret routing configuration under
 `~/.config/model-gateway/config.toml`. Use `--offline` to skip catalog checks.
+Set `MODEL_GATEWAY_SECRET_STORE=file` to explicitly use protected `0700`/`0600`
+storage, or `MODEL_GATEWAY_SECRET_STORE=environment` for environment-only
+resolution. The gateway never silently falls back when a keychain is
+unavailable.
 
 Hermes can use the gateway as a custom endpoint:
 
@@ -50,11 +54,15 @@ curl http://127.0.0.1:11434/health/live
 curl http://127.0.0.1:11434/v1/models
 ```
 
+Set `MODEL_GATEWAY_LOG_FORMAT=json` for structured logs. Both text and JSON
+formats contain fixed request metadata only; prompts, responses, tools,
+credentials, and arbitrary upstream errors are never logged.
+
 ## Development
 
 ```bash
 cargo test
-cargo run
+cargo run -- --help
 ```
 
 ## License

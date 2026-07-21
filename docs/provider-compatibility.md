@@ -7,10 +7,10 @@ not gateway providers.
 
 | Provider group | Canonical Hermes IDs | Wire/auth family | Gateway status |
 | --- | --- | --- | --- |
-| Custom endpoint | `custom` | OpenAI Chat / configured secret | Contract-tested in initial gateway |
-| OpenRouter | `openrouter` | OpenAI Chat / API key | Built-in profile; contract-tested |
-| Ollama | custom endpoint | OpenAI Chat / local | Built-in profile; contract-tested |
-| LM Studio | `lmstudio` | OpenAI Chat / optional local key | Built-in profile; contract-tested |
+| Custom endpoint | `custom` | OpenAI Chat / configured secret | Live-tested with Hermes v0.19.0 and deterministic local provider |
+| OpenRouter | `openrouter` | OpenAI Chat / API key | Built-in profile; authenticated validation contract-tested |
+| Ollama | custom endpoint | OpenAI Chat / local | Built-in profile; profile and OpenAI wire contract-tested |
+| LM Studio | `lmstudio` | OpenAI Chat / optional local key | Built-in profile; profile and OpenAI wire contract-tested |
 | OpenAI API | `openai-api` | OpenAI Chat / API key | Planned profile |
 | Fireworks, Novita, z.ai | `fireworks`, `novita`, `zai` | OpenAI-compatible / API key | Planned profiles |
 | Kimi, MiniMax, Alibaba | `kimi-coding`, `minimax`, `alibaba` and regional variants | OpenAI-compatible or native variant / API key | Planned profiles/adapters |
