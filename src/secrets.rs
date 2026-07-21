@@ -127,11 +127,19 @@ impl KeychainSecretStore {
     }
 }
 
+fn is_missing_keychain_error(error: &keyring::Error) -> bool {
+    let message = error.to_string().to_lowercase();
+    message.contains("no entry")
+        || message.contains("not found")
+        || message.contains("could not be found")
+        || message.contains("no such")
+}
+
 impl SecretStore for KeychainSecretStore {
     fn get(&self, name: &str) -> Result<Option<String>, SecretError> {
         match Self::entry(name)?.get_password() {
             Ok(value) => Ok(Some(value)),
-            Err(error) if error.to_string().to_lowercase().contains("no entry") => Ok(None),
+            Err(error) if is_missing_keychain_error(&error) => Ok(None),
             Err(error) => Err(SecretError::Keychain(error.to_string())),
         }
     }
@@ -145,7 +153,7 @@ impl SecretStore for KeychainSecretStore {
     fn remove(&self, name: &str) -> Result<(), SecretError> {
         match Self::entry(name)?.delete_credential() {
             Ok(()) => Ok(()),
-            Err(error) if error.to_string().to_lowercase().contains("no entry") => Ok(()),
+            Err(error) if is_missing_keychain_error(&error) => Ok(()),
             Err(error) => Err(SecretError::Keychain(error.to_string())),
         }
     }

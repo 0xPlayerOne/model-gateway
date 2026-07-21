@@ -1,6 +1,7 @@
 //! Local model gateway library.
 
 pub mod config;
+pub mod providers;
 pub mod secrets;
 
 /// Returns the package version for the binary and tests.

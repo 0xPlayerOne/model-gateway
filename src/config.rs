@@ -87,6 +87,23 @@ pub struct ProviderConfig {
     pub stream_idle_timeout_seconds: u64,
 }
 
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            adapter: AdapterKind::OpenaiChat,
+            base_url: "http://localhost:8000/v1".to_owned(),
+            api_key_secret: None,
+            extra_headers: BTreeMap::new(),
+            allow_model_passthrough: false,
+            allow_insecure_http: false,
+            max_in_flight: None,
+            connect_timeout_seconds: default_connect_timeout_seconds(),
+            response_header_timeout_seconds: default_response_header_timeout_seconds(),
+            stream_idle_timeout_seconds: default_stream_idle_timeout_seconds(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AdapterKind {
@@ -120,12 +137,16 @@ impl Default for ServerConfig {
 }
 
 impl Config {
-    pub fn load(path: impl AsRef<Path>, secrets: &SecretResolver) -> Result<Self, ConfigError> {
+    pub fn read(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         if !path.exists() {
             return Err(ConfigError::Missing(path.to_path_buf()));
         }
-        let config: Self = toml::from_str(&fs::read_to_string(path)?)?;
+        Ok(toml::from_str(&fs::read_to_string(path)?)?)
+    }
+
+    pub fn load(path: impl AsRef<Path>, secrets: &SecretResolver) -> Result<Self, ConfigError> {
+        let config = Self::read(path)?;
         config.validate(secrets)?;
         Ok(config)
     }

@@ -1,0 +1,22 @@
+[server]
+bind = "127.0.0.1:11434"
+exposure = "loopback"
+max_body_bytes = 33554432
+max_in_flight = 64
+admission_timeout_ms = 250
+shutdown_grace_seconds = 30
+
+[providers.openrouter]
+adapter = "openai_chat"
+base_url = "https://openrouter.ai/api/v1"
+api_key_secret = "OPENROUTER_API_KEY"
+allow_model_passthrough = false
+allow_insecure_http = false
+connect_timeout_seconds = 10
+response_header_timeout_seconds = 300
+stream_idle_timeout_seconds = 180
+
+[models.fast-code]
+[[models.fast-code.targets]]
+provider = "openrouter"
+model = "anthropic/claude-sonnet-4.6"
