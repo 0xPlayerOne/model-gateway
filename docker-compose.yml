@@ -3,7 +3,7 @@ services:
     build: .
     command: ["serve"]
     environment:
-      MODEL_GATEWAY_CONFIG: /app/config.toml
+      MODEL_GATEWAY_CONFIG: /app/state/config.toml
       MODEL_GATEWAY_SECRET_DIR: /run/model-gateway/secrets
       MODEL_GATEWAY_CONTAINER_MODE: "1"
       RUST_LOG: info
@@ -12,7 +12,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./.model-gateway/config.toml:/app/config.toml:ro
+      - ./.model-gateway:/app/state:ro
       - model-gateway-secrets:/run/model-gateway/secrets:ro
 
   setup:
@@ -20,13 +20,14 @@ services:
     profiles: ["setup"]
     command: ["setup", "--docker"]
     environment:
-      MODEL_GATEWAY_CONFIG: /app/config.toml
+      MODEL_GATEWAY_CONFIG: /app/state/config.toml
       MODEL_GATEWAY_SECRET_DIR: /run/model-gateway/secrets
+      MODEL_GATEWAY_CONTAINER_MODE: "1"
       RUST_LOG: info
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./.model-gateway/config.toml:/app/config.toml
+      - ./.model-gateway:/app/state
       - model-gateway-secrets:/run/model-gateway/secrets
 
 volumes:

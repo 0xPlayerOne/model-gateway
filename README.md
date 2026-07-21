@@ -26,11 +26,10 @@ model:
 
 ## Docker quickstart
 
-Create the ignored config mount, then run the interactive setup container:
+Create the ignored state directory, then run the interactive setup container:
 
 ```bash
 mkdir -p .model-gateway
-touch .model-gateway/config.toml
 docker compose --profile setup run --rm setup
 docker compose up --build gateway
 ```
