@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -118,10 +118,44 @@ pub async fn run_server(
     secrets: &SecretResolver,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bind: std::net::SocketAddr = config.server.bind.parse()?;
+    let shutdown_grace = Duration::from_secs(config.server.shutdown_grace_seconds);
     let app = build_app(config, secrets)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    axum::serve(listener, app).await?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = axum::serve(listener, app).with_graceful_shutdown(async {
+        let _ = shutdown_rx.await;
+    });
+    let mut task = tokio::spawn(server.into_future());
+    tokio::select! {
+        result = &mut task => {
+            result??;
+        }
+        _ = shutdown_signal() => {
+            let _ = shutdown_tx.send(());
+            if tokio::time::timeout(shutdown_grace, &mut task).await.is_err() {
+                task.abort();
+            }
+        }
+    }
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let ctrl_c = tokio::signal::ctrl_c();
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 async fn health_live() -> impl IntoResponse {
@@ -181,19 +215,6 @@ async fn chat_completions(
             );
         }
     };
-    if request
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            request_id,
-            "streaming is not available until the streaming milestone",
-            "invalid_request_error",
-            Some("stream"),
-        );
-    }
     let targets = match resolve_targets(&state, &model) {
         Ok(targets) => targets,
         Err((status, message, code)) => {
@@ -264,9 +285,14 @@ async fn chat_completions(
             upstream = upstream.header(name, value);
         }
         upstream = upstream.header("x-request-id", request_id.clone());
-        let response = match upstream.send().await {
-            Ok(response) => response,
-            Err(error) => {
+        let response = match timeout(
+            Duration::from_secs(provider.config.response_header_timeout_seconds),
+            upstream.send(),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
                 drop(provider_permit);
                 drop(global_permit);
                 return error_response(
@@ -277,9 +303,39 @@ async fn chat_completions(
                     None,
                 );
             }
+            Err(_) => {
+                drop(provider_permit);
+                drop(global_permit);
+                return error_response(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    request_id,
+                    "upstream response headers timed out",
+                    "upstream_error",
+                    None,
+                );
+            }
         };
         let status = response.status();
         let response_headers = response.headers().clone();
+        if request
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && status.is_success()
+        {
+            return streaming_response(
+                response,
+                response_headers,
+                StreamContext {
+                    request_id,
+                    provider: target.provider.clone(),
+                    attempts,
+                    idle_timeout_seconds: provider.config.stream_idle_timeout_seconds,
+                    global_permit,
+                    provider_permit,
+                },
+            );
+        }
         let response_body = match read_bounded(response).await {
             Ok(body) => body,
             Err(error) => {
@@ -367,6 +423,62 @@ fn is_fallback_status(status: StatusCode) -> bool {
             | StatusCode::REQUEST_TIMEOUT
             | StatusCode::TOO_MANY_REQUESTS
     ) || status.is_server_error()
+}
+
+struct StreamContext {
+    request_id: String,
+    provider: String,
+    attempts: usize,
+    idle_timeout_seconds: u64,
+    global_permit: tokio::sync::OwnedSemaphorePermit,
+    provider_permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+fn streaming_response(
+    response: reqwest::Response,
+    upstream_headers: HeaderMap,
+    context: StreamContext,
+) -> Response {
+    let idle_timeout = Duration::from_secs(context.idle_timeout_seconds);
+    let StreamContext {
+        request_id,
+        provider,
+        attempts,
+        global_permit,
+        provider_permit,
+        ..
+    } = context;
+    let mut upstream = response.bytes_stream();
+    let stream = async_stream::stream! {
+        loop {
+            match timeout(idle_timeout, upstream.next()).await {
+                Ok(Some(Ok(chunk))) => yield Ok::<Bytes, std::io::Error>(chunk),
+                Ok(Some(Err(error))) => {
+                    yield Err(std::io::Error::other(error));
+                    break;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    yield Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "upstream stream was idle",
+                    ));
+                    break;
+                }
+            }
+        }
+        drop(provider_permit);
+        drop(global_permit);
+    };
+    let mut response = Response::new(Body::from_stream(stream));
+    copy_safe_headers(&upstream_headers, response.headers_mut());
+    add_gateway_headers(
+        response.headers_mut(),
+        request_id,
+        &provider,
+        attempts.saturating_sub(1),
+    );
+    response
 }
 
 fn upstream_response(
