@@ -1,0 +1,19 @@
+[package]
+name = "model-gateway"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A local OpenAI-compatible model gateway"
+readme = "README.md"
+
+[lib]
+name = "model_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "model-gateway"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]

@@ -1,0 +1,12 @@
+.DS_Store
+.kilo/
+.env
+.env.*
+!.env.example
+.model-gateway/
+/target/
+__pycache__/
+*.pyc
+
+# Local developer state
+*.log
