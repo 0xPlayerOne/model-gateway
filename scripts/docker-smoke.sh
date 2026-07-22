@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 STATE=$(mktemp -d)
-PROVIDER_PORT=${MODEL_GATEWAY_SMOKE_PROVIDER_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')}
+PROVIDER_PORT=${MODEL_GATEWAY_SMOKE_PROVIDER_PORT:-39001}
 GATEWAY_PORT=${MODEL_GATEWAY_SMOKE_GATEWAY_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')}
 if [ "$GATEWAY_PORT" = "$PROVIDER_PORT" ]; then
     GATEWAY_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
