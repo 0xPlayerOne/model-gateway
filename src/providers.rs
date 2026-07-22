@@ -223,6 +223,28 @@ pub const PROFILE_DEFINITIONS: &[ProfileDefinition] = &[
         suggested_model: "auto",
         connection_check: ConnectionCheck::OpenAiModels,
     },
+    ProfileDefinition {
+        id: ProviderProfileId::OllamaCloud,
+        config_key: "ollama-cloud",
+        display_name: "Ollama Cloud",
+        adapter: AdapterKind::OpenaiChat,
+        default_secret_name: Some("OLLAMA_API_KEY"),
+        native_base_url: "https://ollama.com/v1",
+        docker_base_url: None,
+        suggested_model: "qwen3-coder:480b",
+        connection_check: ConnectionCheck::OpenAiModels,
+    },
+    ProfileDefinition {
+        id: ProviderProfileId::Cline,
+        config_key: "cline",
+        display_name: "Cline API",
+        adapter: AdapterKind::OpenaiChat,
+        default_secret_name: Some("CLINE_API_KEY"),
+        native_base_url: "https://api.cline.bot/api/v1",
+        docker_base_url: None,
+        suggested_model: "anthropic/claude-sonnet-4-6",
+        connection_check: ConnectionCheck::ConfigurationOnly,
+    },
 ];
 
 pub type BuiltinProvider = ProviderProfileId;
@@ -399,6 +421,20 @@ mod tests {
             BuiltinProvider::OpenaiApi,
             crate::config::ProviderProfileId::OpenaiApi
         );
+    }
+
+    #[test]
+    fn secondary_profiles_have_expected_defaults() {
+        assert_eq!(
+            BuiltinProvider::OllamaCloud.default_base_url(false),
+            "https://ollama.com/v1"
+        );
+        assert_eq!(
+            BuiltinProvider::Cline.default_base_url(false),
+            "https://api.cline.bot/api/v1"
+        );
+        assert!(BuiltinProvider::OllamaCloud.needs_api_key());
+        assert!(BuiltinProvider::Cline.needs_api_key());
     }
 
     #[test]

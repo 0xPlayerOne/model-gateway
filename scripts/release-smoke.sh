@@ -19,6 +19,7 @@ for archive in "${archives[@]:-}"; do
     test -x "$workdir/model-gateway"
     test -f "$workdir/gateway.example.toml"
     test -f "$workdir/gateway.core.example.toml"
+    test -f "$workdir/gateway.secondary.example.toml"
     if [ "$EXECUTE_ARCHIVES" = 1 ]; then
         "$workdir/model-gateway" --version >/dev/null
         "$workdir/model-gateway" --help >/dev/null

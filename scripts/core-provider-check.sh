@@ -14,6 +14,9 @@ set -a
 source "$ENV_FILE"
 set +a
 
-MODEL_GATEWAY_CONFIG="$ROOT/gateway.core.example.toml" \
-MODEL_GATEWAY_SECRET_STORE=environment \
-    cargo run --quiet --manifest-path "$ROOT/Cargo.toml" -- config check --online
+for config in gateway.core.example.toml gateway.secondary.example.toml; do
+    printf 'Checking %s\n' "$config"
+    MODEL_GATEWAY_CONFIG="$ROOT/$config" \
+    MODEL_GATEWAY_SECRET_STORE=environment \
+        cargo run --quiet --manifest-path "$ROOT/Cargo.toml" -- config check --online
+done

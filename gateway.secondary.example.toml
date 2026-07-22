@@ -1,0 +1,21 @@
+[server]
+bind = "127.0.0.1:11434"
+exposure = "loopback"
+
+[providers.ollama-cloud]
+profile = "ollama_cloud"
+adapter = "openai_chat"
+base_url = "https://ollama.com/v1"
+api_key_secret = "OLLAMA_API_KEY"
+
+[providers.cline]
+profile = "cline"
+adapter = "openai_chat"
+base_url = "https://api.cline.bot/api/v1"
+api_key_secret = "CLINE_API_KEY"
+
+[models.ollama-cloud]
+targets = [{ provider = "ollama-cloud", model = "qwen3-coder:480b" }]
+
+[models.cline]
+targets = [{ provider = "cline", model = "anthropic/claude-sonnet-4-6" }]

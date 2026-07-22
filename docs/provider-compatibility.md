@@ -24,6 +24,8 @@ not gateway providers.
 | DeepSeek | `deepseek` | OpenAI-compatible / API key | Built-in profile; OpenAI-wire bearer catalog contract-tested |
 | Gemini, OpenCode, Mistral, NVIDIA NIM, Groq, OrcaRouter | `google-gemini`, `opencode`, `mistral`, `nvidia-nim`, `groq`, `orcarouter` | OpenAI-compatible / API key | Built-in profiles; zero-credit model catalogs checked on demand |
 | Kilo Code, Cerebras, Nous Portal | `kilocode`, `cerebras`, `nous-portal` | OpenAI-compatible / API key | Built-in profiles; configuration-only check because no documented zero-credit endpoint is available |
+| Ollama Cloud | `ollama-cloud` | OpenAI-compatible / API key | Secondary profile; documented model catalog checked on demand |
+| Cline API | `cline` | OpenAI-compatible / API key | Secondary profile; configuration-only because the documented API does not expose a zero-credit model catalog endpoint |
 | Kimi, MiniMax, Alibaba | `kimi-coding`, `minimax`, `alibaba` and regional variants | OpenAI-compatible or native variant / API key | Planned profiles/adapters |
 | Arcee, GMI, StepFun, Upstage | `arcee`, `gmi`, `stepfun`, `upstage` | OpenAI-compatible / API key | Planned profiles |
 | Hugging Face, Ollama Cloud | `huggingface`, `ollama-cloud` | OpenAI-compatible or native / API key | Planned profiles/adapters |

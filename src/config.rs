@@ -129,6 +129,8 @@ pub enum ProviderProfileId {
     NvidiaNim,
     Groq,
     OrcaRouter,
+    OllamaCloud,
+    Cline,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -614,6 +616,22 @@ mod tests {
                 .providers
                 .values()
                 .all(|provider| provider.profile.is_some() && provider.api_key_secret.is_some())
+        );
+    }
+
+    #[test]
+    fn secondary_provider_example_is_structurally_valid() {
+        let config: Config = toml::from_str(include_str!("../gateway.secondary.example.toml"))
+            .expect("secondary provider example must parse");
+        config
+            .validate_structure()
+            .expect("secondary provider example must validate");
+        assert_eq!(config.providers.len(), 2);
+        assert_eq!(config.models.len(), 2);
+        assert!(
+            config.providers.values().all(|provider| {
+                provider.profile.is_some() && provider.api_key_secret.is_some()
+            })
         );
     }
 

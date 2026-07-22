@@ -69,11 +69,16 @@ Mistral, Nous Portal, NVIDIA NIM, Groq, and OrcaRouter. The cloud profiles use
 OpenAI Chat Completions with bearer secrets. They are contract-tested against
 deterministic local fixtures; no provider credential is required for CI.
 
+Secondary profiles add Ollama Cloud and the Cline API using their documented
+OpenAI-compatible endpoints. `GITLAWB_API_GIT` remains intentionally unmapped:
+it does not identify a documented LLM provider endpoint.
+
 `gateway.core.example.toml` configures the CORE providers represented by
 `.env.example`. Run `./scripts/core-provider-check.sh` for an explicit one-time
-connection check with `.env.local`. It sends only documented model-catalog or
-key-status GET requests, skips providers without a documented zero-credit
-endpoint, never sends a completion, and is intentionally not part of CI.
+connection check with `.env.local`. It checks both CORE and secondary example
+configs, sends only documented model-catalog or key-status GET requests, skips
+providers without a documented zero-credit endpoint, never sends a completion,
+and is intentionally not part of CI.
 
 ## v0.2 Limitations
 

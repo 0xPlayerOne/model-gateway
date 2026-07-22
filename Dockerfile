@@ -18,6 +18,7 @@ RUN if ! getent group "$MODEL_GATEWAY_GID" >/dev/null; then groupadd --gid "$MOD
 COPY --from=builder /src/target/release/model-gateway /usr/local/bin/model-gateway
 COPY gateway.example.toml /app/gateway.example.toml
 COPY gateway.core.example.toml /app/gateway.core.example.toml
+COPY gateway.secondary.example.toml /app/gateway.secondary.example.toml
 
 USER model-gateway
 WORKDIR /app
