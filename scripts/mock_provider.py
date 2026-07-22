@@ -99,4 +99,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+    host = os.environ.get("MOCK_PROVIDER_HOST", "127.0.0.1")
+    ThreadingHTTPServer((host, int(sys.argv[1])), Handler).serve_forever()

@@ -84,7 +84,8 @@ volumes:
   secrets:
 EOF
 
-MOCK_PROVIDER_API_KEY=fixture-secret python3 "$ROOT/scripts/mock_provider.py" "$PROVIDER_PORT" &
+MOCK_PROVIDER_API_KEY=fixture-secret MOCK_PROVIDER_HOST=0.0.0.0 \
+    python3 "$ROOT/scripts/mock_provider.py" "$PROVIDER_PORT" &
 PROVIDER_PID=$!
 trap 'rc=$?; kill "$PROVIDER_PID" 2>/dev/null || true; cleanup "$rc"' EXIT
 
