@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -17,6 +18,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", "0"))
         request = json.loads(self.rfile.read(length))
+        self.record_request(request)
+        required_key = os.environ.get("MOCK_PROVIDER_API_KEY")
+        if required_key and self.headers.get("Authorization") != f"Bearer {required_key}":
+            self.send_json({"error": {"message": "unauthorized"}}, status=401)
+            return
         content = "smoke-ok" if request.get("tools") else "missing-tools"
         if request.get("stream"):
             chunks = [
@@ -64,9 +70,25 @@ class Handler(BaseHTTPRequestHandler):
             }
         )
 
-    def send_json(self, value):
+    def record_request(self, request):
+        path = os.environ.get("MOCK_PROVIDER_LOG")
+        if not path:
+            return
+        with open(path, "a", encoding="utf-8") as log:
+            log.write(
+                json.dumps(
+                    {
+                        "model": request.get("model"),
+                        "stream": bool(request.get("stream")),
+                        "tools": bool(request.get("tools")),
+                    }
+                )
+                + "\n"
+            )
+
+    def send_json(self, value, status=200):
         body = json.dumps(value).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

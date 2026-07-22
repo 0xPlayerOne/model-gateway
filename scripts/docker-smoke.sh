@@ -23,6 +23,7 @@ shutdown_grace_seconds = 2
 [providers.mock]
 adapter = "openai_chat"
 base_url = "http://host.docker.internal:39001/v1"
+api_key_secret = "MOCK_API_KEY"
 allow_model_passthrough = false
 allow_insecure_http = true
 connect_timeout_seconds = 2
@@ -72,9 +73,12 @@ volumes:
   secrets:
 EOF
 
-python3 "$ROOT/scripts/mock_provider.py" 39001 &
+MOCK_PROVIDER_API_KEY=fixture-secret python3 "$ROOT/scripts/mock_provider.py" 39001 &
 PROVIDER_PID=$!
 trap 'kill "$PROVIDER_PID" 2>/dev/null || true; cleanup' EXIT
+
+docker compose -f "$STATE/compose.yml" --profile setup run --rm --no-deps --entrypoint sh setup -c \
+    'mkdir -p /run/model-gateway/secrets && printf %s fixture-secret > /run/model-gateway/secrets/MOCK_API_KEY && chmod 700 /run/model-gateway/secrets && chmod 600 /run/model-gateway/secrets/MOCK_API_KEY'
 
 docker compose -f "$STATE/compose.yml" up --build --detach
 for _ in $(seq 1 100); do
@@ -86,6 +90,16 @@ done
 curl --silent --fail http://127.0.0.1:39003/health/ready >/dev/null
 curl --silent --fail http://127.0.0.1:39003/v1/models \
     | python3 -c 'import json,sys; assert json.load(sys.stdin)["data"][0]["id"] == "smoke"'
+
+curl --silent --show-error --fail http://127.0.0.1:39003/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"smoke","messages":[],"tools":[{"type":"function","function":{"name":"fixture"}}]}' \
+    | python3 -c 'import json,sys; assert json.load(sys.stdin)["model"] == "upstream-smoke"'
+
+curl --silent --show-error --fail http://127.0.0.1:39003/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"smoke","stream":true,"messages":[]}' \
+    | python3 -c 'import sys; assert "data: [DONE]" in sys.stdin.read()'
 
 docker compose -f "$STATE/compose.yml" --profile setup run --rm --no-deps --entrypoint sh setup -c \
     'cp /app/state/config.toml /app/state/config.toml.tmp && chmod 600 /app/state/config.toml.tmp && mv /app/state/config.toml.tmp /app/state/config.toml && mkdir -p /run/model-gateway/secrets && chmod 700 /run/model-gateway/secrets && touch /run/model-gateway/secrets/fixture && chmod 600 /run/model-gateway/secrets/fixture && test "$(stat -c %a /run/model-gateway/secrets)" = 700 && test "$(stat -c %a /run/model-gateway/secrets/fixture)" = 600'
@@ -103,6 +117,6 @@ if docker compose -f "$STATE/compose.yml" run --rm --no-deps \
 fi
 
 docker compose -f "$STATE/compose.yml" run --rm --no-deps --entrypoint sh gateway -c \
-    'test -z "${OPENROUTER_API_KEY:-}" && test ! -e /app/state/provider-key'
+    'test -z "${OPENROUTER_API_KEY:-}" && test ! -e /app/state/provider-key && test -e /run/model-gateway/secrets/MOCK_API_KEY && test "$(cat /run/model-gateway/secrets/MOCK_API_KEY)" = fixture-secret'
 
 printf 'Docker gateway smoke passed\n'

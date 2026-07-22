@@ -10,6 +10,7 @@ if [ "$GATEWAY_PORT" = "$PROVIDER_PORT" ]; then
 fi
 STATE=$(mktemp -d)
 HERMES_HOME="$STATE/hermes"
+PROVIDER_LOG="$STATE/provider.log"
 
 cleanup() {
     status=$?
@@ -60,7 +61,7 @@ EOF
 printf '%s\n' 'You are an isolated smoke-test assistant.' > "$HERMES_HOME/SOUL.md"
 
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
-python3 "$ROOT/scripts/mock_provider.py" "$PROVIDER_PORT" &
+MOCK_PROVIDER_LOG="$PROVIDER_LOG" python3 "$ROOT/scripts/mock_provider.py" "$PROVIDER_PORT" &
 PROVIDER_PID=$!
 MODEL_GATEWAY_CONFIG="$STATE/gateway.toml" \
     MODEL_GATEWAY_SECRET_STORE=environment \
@@ -91,6 +92,7 @@ curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
     -d '{"model":"smoke","stream":true,"messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"fixture"}}]}' \
     | python3 -c 'import sys; assert "data: [DONE]" in sys.stdin.read()'
 
+: > "$PROVIDER_LOG"
 HERMES_OUTPUT=$(HERMES_HOME="$HERMES_HOME" uvx \
     --from "git+https://github.com/NousResearch/hermes-agent.git@${HERMES_COMMIT}" \
     hermes --oneshot 'Reply once without calling a tool.' --safe-mode)
@@ -101,5 +103,14 @@ case "$HERMES_OUTPUT" in
         exit 1
         ;;
 esac
+
+python3 - "$PROVIDER_LOG" <<'PY'
+import json
+import sys
+
+entries = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+assert entries, "Hermes did not reach the provider"
+assert any(entry["tools"] for entry in entries), entries
+PY
 
 printf 'Hermes v0.19.0 gateway smoke passed\n'
