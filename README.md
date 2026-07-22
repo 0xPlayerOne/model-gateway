@@ -75,9 +75,52 @@ cooldowns, catalog snapshots, and opaque session pins are stored locally in a
 protected SQLite database; prompts and responses are never stored. If all free
 capacity is exhausted, routing falls back to `local`.
 
+The `auto-efficient` model classifies each request locally, filters the current
+catalog against capabilities and a fresh benchmark snapshot, removes dominated
+candidates, and chooses the lowest expected-cost model above the configured
+quality floor. Paid and subscription offerings are considered only when their
+provider has an explicit `billing_mode = "paid"` or `"subscription"`; providers
+default to free-only. Configure `cost_microusd` quota windows to impose
+transactional spend caps. If no benchmarked authorized candidate remains, the
+route falls back once through `auto-free` and then `local`.
+
 Refresh dynamic provider catalogs explicitly with `model-gateway catalog
 refresh`, and inspect cache age with `model-gateway catalog status`. Override
 the state location with `MODEL_GATEWAY_STATE_PATH`.
+
+Benchmark refresh is also explicit; serving never requests a benchmark site.
+Store `ARTIFICIAL_ANALYSIS_API_KEY` through `model-gateway credentials set
+ARTIFICIAL_ANALYSIS_API_KEY`, then run `model-gateway benchmarks refresh` to
+load the authenticated Artificial Analysis API with required attribution.
+Inspect snapshots with `model-gateway benchmarks status`. Arena automation is
+disabled by its terms, and LLM Stats or DeepSWE/DataCurve data must be supplied
+as a documented/licensed export rather than scraped. Import such normalized
+exports with `model-gateway benchmarks import --file <path>`:
+
+```json
+{
+  "source": "licensed-export",
+  "attribution": "Required source attribution",
+  "models": [{
+    "id": "canonical-model-id",
+    "creator": "Creator",
+    "general_quality": 80.0,
+    "coding_quality": 85.0,
+    "agentic_quality": 75.0,
+    "reasoning_quality": 82.0,
+    "input_price_per_million": 1.0,
+    "output_price_per_million": 3.0,
+    "latency_seconds": 0.5,
+    "output_tokens_per_task": 1024,
+    "reasoning_effort": "high"
+  }]
+}
+```
+
+Provider offering IDs map to canonical benchmark IDs only through exact IDs or
+explicit `model_mappings`; similar names are never merged heuristically.
+Successful `auto-efficient` responses include fixed classifier, complexity,
+quality-floor, quality, and expected-cost headers without prompt content.
 
 ## Supported Profiles
 
@@ -103,7 +146,7 @@ model-catalog or key-status GET requests, skips providers without a documented
 zero-credit endpoint, never sends a completion, reports every provider before
 returning a failure summary, and is intentionally not part of CI.
 
-## v0.2 Limitations
+## Limitations
 
 The gateway supports the OpenAI Chat Completions wire protocol only. It has no
 caller authentication or public/LAN bind, does not retry ambiguous transport

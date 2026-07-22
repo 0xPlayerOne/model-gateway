@@ -65,6 +65,14 @@ pub struct ServerConfig {
     pub state_path: Option<PathBuf>,
     #[serde(default = "default_catalog_max_age_seconds")]
     pub catalog_max_age_seconds: u64,
+    #[serde(default = "default_benchmark_max_age_seconds")]
+    pub benchmark_max_age_seconds: u64,
+    #[serde(default = "default_quality_floor_simple")]
+    pub quality_floor_simple: f64,
+    #[serde(default = "default_quality_floor_medium")]
+    pub quality_floor_medium: f64,
+    #[serde(default = "default_quality_floor_complex")]
+    pub quality_floor_complex: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,6 +118,8 @@ pub struct ProviderConfig {
     pub model_denylist: Vec<String>,
     #[serde(default)]
     pub quotas: Vec<QuotaLimit>,
+    #[serde(default)]
+    pub model_mappings: BTreeMap<String, String>,
 }
 
 impl Default for ProviderConfig {
@@ -132,6 +142,7 @@ impl Default for ProviderConfig {
             model_allowlist: Vec::new(),
             model_denylist: Vec::new(),
             quotas: Vec::new(),
+            model_mappings: BTreeMap::new(),
         }
     }
 }
@@ -221,6 +232,10 @@ impl Default for ServerConfig {
             local_model_cache_seconds: default_local_model_cache_seconds(),
             state_path: None,
             catalog_max_age_seconds: default_catalog_max_age_seconds(),
+            benchmark_max_age_seconds: default_benchmark_max_age_seconds(),
+            quality_floor_simple: default_quality_floor_simple(),
+            quality_floor_medium: default_quality_floor_medium(),
+            quality_floor_complex: default_quality_floor_complex(),
         }
     }
 }
@@ -306,6 +321,17 @@ impl Config {
                 "catalog maximum age must be greater than zero".to_owned(),
             ));
         }
+        if self.server.benchmark_max_age_seconds == 0
+            || !valid_quality_floor(self.server.quality_floor_simple)
+            || !valid_quality_floor(self.server.quality_floor_medium)
+            || !valid_quality_floor(self.server.quality_floor_complex)
+            || self.server.quality_floor_simple > self.server.quality_floor_medium
+            || self.server.quality_floor_medium > self.server.quality_floor_complex
+        {
+            return Err(ConfigError::Invalid(
+                "benchmark age and ordered quality floors must be valid (0-100)".to_owned(),
+            ));
+        }
         if self
             .server
             .local_model
@@ -337,7 +363,7 @@ impl Config {
         }
         for (alias, model) in &self.models {
             validate_identifier(alias, "model alias")?;
-            if matches!(alias.as_str(), "local" | "auto-free") {
+            if matches!(alias.as_str(), "local" | "auto-free" | "auto-efficient") {
                 return Err(ConfigError::Invalid(format!(
                     "model alias '{alias}' is reserved for a built-in route"
                 )));
@@ -421,6 +447,10 @@ fn provider_environment_suffix(name: &str) -> String {
             }
         })
         .collect()
+}
+
+fn valid_quality_floor(value: f64) -> bool {
+    value.is_finite() && (0.0..=100.0).contains(&value)
 }
 
 fn validate_server(server: &ServerConfig) -> Result<(), ConfigError> {
@@ -540,14 +570,26 @@ fn validate_provider(
             "provider '{name}' quota limits and windows must be greater than zero"
         )));
     }
-    if provider
-        .quotas
-        .iter()
-        .any(|quota| quota.kind == QuotaKind::CostMicrousd)
+    if provider.billing_mode == BillingMode::Free
+        && provider
+            .quotas
+            .iter()
+            .any(|quota| quota.kind == QuotaKind::CostMicrousd)
     {
         return Err(ConfigError::Invalid(format!(
-            "provider '{name}' cost quotas require the auto-efficient route"
+            "provider '{name}' cost quotas require paid or subscription billing"
         )));
+    }
+    for (offering, canonical) in &provider.model_mappings {
+        if offering.trim().is_empty()
+            || offering.len() > 512
+            || canonical.trim().is_empty()
+            || canonical.len() > 512
+        {
+            return Err(ConfigError::Invalid(format!(
+                "provider '{name}' contains an invalid benchmark model mapping"
+            )));
+        }
     }
     if provider
         .account_scope
@@ -681,6 +723,22 @@ const fn default_catalog_max_age_seconds() -> u64 {
     86_400
 }
 
+const fn default_benchmark_max_age_seconds() -> u64 {
+    604_800
+}
+
+const fn default_quality_floor_simple() -> f64 {
+    40.0
+}
+
+const fn default_quality_floor_medium() -> f64 {
+    60.0
+}
+
+const fn default_quality_floor_complex() -> f64 {
+    75.0
+}
+
 const fn default_connect_timeout_seconds() -> u64 {
     10
 }
@@ -721,6 +779,7 @@ mod tests {
             model_allowlist: Vec::new(),
             model_denylist: Vec::new(),
             quotas: Vec::new(),
+            model_mappings: BTreeMap::new(),
         }
     }
 
@@ -780,10 +839,18 @@ mod tests {
         config.validate_structure().expect("valid quota override");
         config.providers.get_mut("local").expect("provider").quotas[0].limit = 0;
         assert!(config.validate_structure().is_err());
-        let quota = &mut config.providers.get_mut("local").expect("provider").quotas[0];
-        quota.limit = 50;
-        quota.kind = QuotaKind::CostMicrousd;
+        config.providers.get_mut("local").expect("provider").quotas[0].limit = 50;
+        config.providers.get_mut("local").expect("provider").quotas[0].kind =
+            QuotaKind::CostMicrousd;
         assert!(config.validate_structure().is_err());
+        config
+            .providers
+            .get_mut("local")
+            .expect("provider")
+            .billing_mode = BillingMode::Paid;
+        config
+            .validate_structure()
+            .expect("paid provider cost quota");
     }
 
     #[test]
@@ -920,6 +987,27 @@ mod tests {
                 .providers
                 .values()
                 .all(|provider| provider.profile.is_some() && provider.api_key_secret.is_some())
+        );
+    }
+
+    #[test]
+    fn primary_example_includes_valid_efficiency_policy() {
+        let config: Config = toml::from_str(include_str!("../gateway.example.toml"))
+            .expect("primary example must parse");
+        config
+            .validate_structure()
+            .expect("primary example must validate");
+        let openrouter = &config.providers["openrouter"];
+        assert_eq!(openrouter.billing_mode, BillingMode::Paid);
+        assert_eq!(
+            openrouter.model_mappings["anthropic/claude-sonnet-4.6"],
+            "claude-sonnet-4-6"
+        );
+        assert!(
+            openrouter
+                .quotas
+                .iter()
+                .any(|quota| quota.kind == QuotaKind::CostMicrousd)
         );
     }
 

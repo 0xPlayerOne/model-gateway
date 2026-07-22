@@ -6,6 +6,11 @@ max_body_bytes = 33554432
 max_in_flight = 64
 admission_timeout_ms = 250
 shutdown_grace_seconds = 30
+catalog_max_age_seconds = 86400
+benchmark_max_age_seconds = 604800
+quality_floor_simple = 40.0
+quality_floor_medium = 60.0
+quality_floor_complex = 75.0
 
 [providers.openrouter]
 profile = "open_router"
@@ -17,6 +22,15 @@ allow_insecure_http = false
 connect_timeout_seconds = 10
 response_header_timeout_seconds = 300
 stream_idle_timeout_seconds = 180
+billing_mode = "paid"
+
+[providers.openrouter.model_mappings]
+"anthropic/claude-sonnet-4.6" = "claude-sonnet-4-6"
+
+[[providers.openrouter.quotas]]
+kind = "cost_microusd"
+limit = 5000000
+window_seconds = 86400
 
 [models.fast-code]
 [[models.fast-code.targets]]
@@ -33,3 +47,4 @@ allow_insecure_http = false
 connect_timeout_seconds = 10
 response_header_timeout_seconds = 300
 stream_idle_timeout_seconds = 180
+billing_mode = "free"

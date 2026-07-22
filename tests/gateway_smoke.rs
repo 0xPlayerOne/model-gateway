@@ -11,8 +11,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Router, serve};
 use futures_util::{StreamExt, stream};
+use model_gateway::benchmarks::BenchmarkModel;
 use model_gateway::config::{
-    Config, ModelConfig, ProviderConfig, QuotaKind, QuotaLimit, ServerConfig, TargetConfig,
+    BillingMode, Config, ModelConfig, ProviderConfig, QuotaKind, QuotaLimit, ServerConfig,
+    TargetConfig,
 };
 use model_gateway::gateway::build_app;
 use model_gateway::routing::{CatalogRecord, RoutingStore};
@@ -415,7 +417,8 @@ async fn model_and_health_endpoints_are_detail_free() {
         .expect("models json");
     assert_eq!(models["data"][0]["id"], "local");
     assert_eq!(models["data"][1]["id"], "auto-free");
-    assert_eq!(models["data"][2]["id"], "smoke");
+    assert_eq!(models["data"][2]["id"], "auto-efficient");
+    assert_eq!(models["data"][3]["id"], "smoke");
     let ready: Value = client
         .get(format!("{gateway}/health/ready"))
         .send()
@@ -756,6 +759,269 @@ async fn direct_alias_reports_missing_provider_key_in_openai_shape() {
             .expect("message")
             .contains("credential")
     );
+}
+
+#[tokio::test]
+async fn auto_efficient_uses_cost_then_quality_floor() {
+    let cheap = spawn_provider(ProviderResponse::Success).await;
+    let strong = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "cheap",
+            &[CatalogRecord {
+                model: "cheap-model".to_owned(),
+                is_free: false,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(true),
+            }],
+        )
+        .expect("cheap catalog");
+    store
+        .replace_catalog(
+            "strong",
+            &[CatalogRecord {
+                model: "strong-model".to_owned(),
+                is_free: false,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(true),
+            }],
+        )
+        .expect("strong catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "fixture attribution",
+            &[
+                BenchmarkModel::fixture("cheap-model", 55.0, 50.0, 45.0, 50.0, 0.1, 0.2),
+                BenchmarkModel::fixture("strong-model", 92.0, 95.0, 90.0, 93.0, 5.0, 10.0),
+            ],
+        )
+        .expect("benchmarks");
+    drop(store);
+    let mut cheap_provider = provider(format!("http://{cheap}/v1"));
+    cheap_provider.billing_mode = BillingMode::Paid;
+    let mut strong_provider = provider(format!("http://{strong}/v1"));
+    strong_provider.billing_mode = BillingMode::Paid;
+    let mut config = config_for(
+        BTreeMap::from([
+            ("cheap".to_owned(), cheap_provider),
+            ("strong".to_owned(), strong_provider),
+        ]),
+        vec![TargetConfig {
+            provider: "cheap".to_owned(),
+            model: "advanced-only".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+
+    let simple = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-efficient", "messages": [{"role": "user", "content": "Summarize this sentence."}]}))
+        .send()
+        .await
+        .expect("simple response");
+    assert_eq!(simple.status(), StatusCode::OK);
+    assert_eq!(simple.headers()["x-model-gateway-provider"], "cheap");
+    assert_eq!(simple.headers()["x-model-gateway-task"], "general");
+    assert_eq!(simple.headers()["x-model-gateway-complexity"], "simple");
+    assert_eq!(simple.headers()["x-model-gateway-classifier"], "rules-v1");
+
+    let complex = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-efficient",
+            "messages": [{"role": "user", "content": "Implement and debug a multi-step Rust service, write comprehensive tests, and reason about concurrency failures."}],
+            "tools": [{"type": "function", "function": {"name": "edit"}}]
+        }))
+        .send()
+        .await
+        .expect("complex response");
+    assert_eq!(complex.status(), StatusCode::OK);
+    assert_eq!(complex.headers()["x-model-gateway-provider"], "strong");
+}
+
+#[tokio::test]
+async fn auto_efficient_honors_explicit_paid_authorization_and_spend_caps() {
+    let paid = spawn_provider(ProviderResponse::Success).await;
+    let free = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (provider, model, is_free) in [("paid", "paid-model", false), ("free", "free-model", true)]
+    {
+        store
+            .replace_catalog(
+                provider,
+                &[CatalogRecord {
+                    model: model.to_owned(),
+                    is_free,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    supports_structured_output: Some(true),
+                }],
+            )
+            .expect("catalog");
+    }
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[
+                BenchmarkModel::fixture("paid-model", 90.0, 90.0, 90.0, 90.0, 1.0, 1.0),
+                BenchmarkModel::fixture("free-model", 50.0, 50.0, 50.0, 50.0, 0.0, 0.0),
+            ],
+        )
+        .expect("benchmarks");
+    drop(store);
+    let mut paid_provider = provider(format!("http://{paid}/v1"));
+    paid_provider.billing_mode = BillingMode::Paid;
+    paid_provider.quotas = vec![QuotaLimit {
+        kind: QuotaKind::CostMicrousd,
+        limit: 1_100,
+        window_seconds: 86_400,
+    }];
+    let mut free_provider = provider(format!("http://{free}/v1"));
+    free_provider.free_models = vec!["free-model".to_owned()];
+    let mut config = config_for(
+        BTreeMap::from([
+            ("paid".to_owned(), paid_provider),
+            ("free".to_owned(), free_provider),
+        ]),
+        vec![TargetConfig {
+            provider: "paid".to_owned(),
+            model: "paid-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+
+    let request = json!({
+        "model": "auto-efficient",
+        "messages": [{"role": "user", "content": "Implement a comprehensive multi-step production architecture with concurrency safeguards."}],
+        "tools": [{"type": "function", "function": {"name": "edit"}}]
+    });
+    let first = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&request)
+        .send()
+        .await
+        .expect("first paid response");
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(first.headers()["x-model-gateway-provider"], "paid");
+    let second = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&request)
+        .send()
+        .await
+        .expect("spend-capped fallback response");
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(second.headers()["x-model-gateway-provider"], "free");
+}
+
+#[tokio::test]
+async fn auto_efficient_uses_canonical_mapping_and_reasoning_effort() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "paid",
+            &[CatalogRecord {
+                model: "provider/model-v1".to_owned(),
+                is_free: false,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(true),
+                supports_structured_output: Some(true),
+            }],
+        )
+        .expect("catalog");
+    let mut low = BenchmarkModel::fixture("canonical-model", 80.0, 80.0, 80.0, 80.0, 1.0, 1.0);
+    low.reasoning_effort = Some("low".to_owned());
+    let mut high = BenchmarkModel::fixture("canonical-model", 95.0, 95.0, 95.0, 95.0, 2.0, 2.0);
+    high.reasoning_effort = Some("high".to_owned());
+    store
+        .replace_benchmarks("fixture", "Fixture", &[low, high])
+        .expect("benchmarks");
+    drop(store);
+    let mut paid_provider = provider(format!("http://{upstream}/v1"));
+    paid_provider.billing_mode = BillingMode::Paid;
+    paid_provider
+        .model_mappings
+        .insert("provider/model-v1".to_owned(), "canonical-model".to_owned());
+    let mut config = config_for(
+        BTreeMap::from([("paid".to_owned(), paid_provider)]),
+        vec![TargetConfig {
+            provider: "paid".to_owned(),
+            model: "provider/model-v1".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-efficient",
+            "reasoning_effort": "high",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-model-gateway-reasoning-effort"],
+        "High"
+    );
+    let body: Value = response.json().await.expect("response JSON");
+    assert!(
+        body["choices"][0]["message"]["content"]
+            .as_str()
+            .expect("content")
+            .contains("High")
+    );
+}
+
+#[tokio::test]
+async fn auto_efficient_falls_back_when_paid_models_are_unbenchmarked() {
+    let paid = spawn_provider(ProviderResponse::Success).await;
+    let free = spawn_provider(ProviderResponse::Success).await;
+    let mut paid_provider = provider(format!("http://{paid}/v1"));
+    paid_provider.billing_mode = BillingMode::Paid;
+    let mut free_provider = provider(format!("http://{free}/v1"));
+    free_provider.free_models = vec!["free-model".to_owned()];
+    let gateway = spawn_gateway(config_for(
+        BTreeMap::from([
+            ("paid".to_owned(), paid_provider),
+            ("free".to_owned(), free_provider),
+        ]),
+        vec![TargetConfig {
+            provider: "paid".to_owned(),
+            model: "unbenchmarked-paid".to_owned(),
+        }],
+    ))
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-efficient", "messages": []}))
+        .send()
+        .await
+        .expect("fallback response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "free");
 }
 
 #[tokio::test]

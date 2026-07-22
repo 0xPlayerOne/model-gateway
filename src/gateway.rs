@@ -18,9 +18,12 @@ use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
 
-use crate::config::{Config, ProviderConfig, TargetConfig};
+use crate::benchmarks::{Complexity, ScoredCandidate, classify, pareto_rank, quality_for};
+use crate::config::{BillingMode, Config, ProviderConfig, TargetConfig};
 use crate::providers::prepare_request;
-use crate::routing::{RoutingError, RoutingStore, is_verified_free, quota_reference};
+use crate::routing::{
+    ReservationRelease, RoutingError, RoutingStore, is_verified_free, quota_reference,
+};
 use crate::secrets::{SecretError, SecretResolver};
 
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -237,13 +240,17 @@ async fn health_ready(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
-    let mut ids = vec!["local".to_owned(), "auto-free".to_owned()];
+    let mut ids = vec![
+        "local".to_owned(),
+        "auto-free".to_owned(),
+        "auto-efficient".to_owned(),
+    ];
     ids.extend(
         state
             .config
             .models
             .keys()
-            .filter(|id| !matches!(id.as_str(), "local" | "auto-free"))
+            .filter(|id| !matches!(id.as_str(), "local" | "auto-free" | "auto-efficient"))
             .cloned(),
     );
     let data = ids
@@ -439,7 +446,13 @@ async fn chat_completions(
             let upstream_model = target.model.clone();
             let quotas = target.quotas.clone();
             match routing_operation(state.routing.clone(), move |routing| {
-                routing.reserve(&provider, &upstream_model, estimated_tokens, &quotas)
+                routing.reserve(
+                    &provider,
+                    &upstream_model,
+                    estimated_tokens,
+                    target.expected_cost_microusd,
+                    &quotas,
+                )
             })
             .await
             {
@@ -458,6 +471,13 @@ async fn chat_completions(
         attempts += 1;
         let mut target_request = request.clone();
         let Some(provider) = state.providers.get(&target.runtime_provider) else {
+            release_reservation(
+                &state,
+                &target,
+                estimated_tokens,
+                ReservationRelease::BeforeDispatch,
+            )
+            .await;
             last_error = Some((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 HeaderMap::new(),
@@ -495,8 +515,19 @@ async fn chat_completions(
             ));
             continue;
         }
+        if target_request.get("reasoning_effort").is_none() {
+            if let Some(effort) = &target.reasoning_effort {
+                target_request["reasoning_effort"] = Value::String(effort.clone());
+            }
+        }
         if prepare_request(provider.config.adapter, &mut target_request, &target.model).is_err() {
-            release_token_reservation(&state, &target, estimated_tokens).await;
+            release_reservation(
+                &state,
+                &target,
+                estimated_tokens,
+                ReservationRelease::BeforeDispatch,
+            )
+            .await;
             drop(global_permit);
             log_request(
                 &request_id,
@@ -524,7 +555,13 @@ async fn chat_completions(
         {
             Ok(Ok(permit)) => permit,
             _ => {
-                release_token_reservation(&state, &target, estimated_tokens).await;
+                release_reservation(
+                    &state,
+                    &target,
+                    estimated_tokens,
+                    ReservationRelease::BeforeDispatch,
+                )
+                .await;
                 log_request(
                     &request_id,
                     &model,
@@ -562,7 +599,6 @@ async fn chat_completions(
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
                 drop(provider_permit);
-                release_token_reservation(&state, &target, estimated_tokens).await;
                 log_request(
                     &request_id,
                     &model,
@@ -583,7 +619,6 @@ async fn chat_completions(
             }
             Err(_) => {
                 drop(provider_permit);
-                release_token_reservation(&state, &target, estimated_tokens).await;
                 log_request(
                     &request_id,
                     &model,
@@ -659,7 +694,13 @@ async fn chat_completions(
             Err(_) if is_fallback_status(status) => Bytes::new(),
             Err(_) => {
                 drop(provider_permit);
-                release_token_reservation(&state, &target, estimated_tokens).await;
+                release_reservation(
+                    &state,
+                    &target,
+                    estimated_tokens,
+                    ReservationRelease::KnownFailure,
+                )
+                .await;
                 log_request(
                     &request_id,
                     &model,
@@ -680,7 +721,13 @@ async fn chat_completions(
             }
         };
         drop(provider_permit);
-        release_token_reservation(&state, &target, estimated_tokens).await;
+        release_reservation(
+            &state,
+            &target,
+            estimated_tokens,
+            ReservationRelease::KnownFailure,
+        )
+        .await;
         if target.managed
             && matches!(
                 status,
@@ -793,6 +840,19 @@ struct SelectedTarget {
     model: String,
     managed: bool,
     quotas: Vec<crate::config::QuotaLimit>,
+    expected_cost_microusd: u64,
+    reasoning_effort: Option<String>,
+    selection: Option<SelectionMetadata>,
+}
+
+#[derive(Clone)]
+struct SelectionMetadata {
+    task: &'static str,
+    complexity: &'static str,
+    classifier_version: &'static str,
+    quality_floor: f64,
+    quality: f64,
+    expected_cost_microusd: u64,
 }
 
 async fn resolve_targets(
@@ -810,10 +870,16 @@ async fn resolve_targets(
             model: local_model,
             managed: false,
             quotas: Vec::new(),
+            expected_cost_microusd: 0,
+            reasoning_effort: None,
+            selection: None,
         }]);
     }
     if model == "auto-free" {
         return resolve_auto_free_targets(state, request, session_hash).await;
+    }
+    if model == "auto-efficient" {
+        return resolve_auto_efficient_targets(state, request, session_hash).await;
     }
     if let Some(config) = state.config.models.get(model) {
         return Ok(config
@@ -860,6 +926,9 @@ fn selected_target(state: &AppState, target: &TargetConfig) -> SelectedTarget {
         model: target.model.clone(),
         managed: false,
         quotas: Vec::new(),
+        expected_cost_microusd: 0,
+        reasoning_effort: None,
+        selection: None,
     }
 }
 
@@ -930,6 +999,9 @@ async fn resolve_auto_free_targets(
                     quotas: reference
                         .map(|reference| reference.rules)
                         .unwrap_or_default(),
+                    expected_cost_microusd: 0,
+                    reasoning_effort: None,
+                    selection: None,
                 },
             ))
         })
@@ -973,11 +1045,226 @@ async fn resolve_auto_free_targets(
             model,
             managed: false,
             quotas: Vec::new(),
+            expected_cost_microusd: 0,
+            reasoning_effort: None,
+            selection: None,
         }),
         Err(error) if targets.is_empty() => return Err(error),
         Err(_) => {}
     }
     Ok(targets)
+}
+
+async fn resolve_auto_efficient_targets(
+    state: &AppState,
+    request: &Value,
+    session_hash: Option<&str>,
+) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
+    let catalog_age = state.config.server.catalog_max_age_seconds;
+    let benchmark_age = state.config.server.benchmark_max_age_seconds;
+    let (offerings, benchmarks) = tokio::try_join!(
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.all_candidates(catalog_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.benchmark_models(benchmark_age)
+        })
+    )
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "routing state is unavailable".to_owned(),
+            "routing_state_unavailable",
+        )
+    })?;
+    let classification = classify(request);
+    let quality_floor = match classification.complexity {
+        Complexity::Simple => state.config.server.quality_floor_simple,
+        Complexity::Medium => state.config.server.quality_floor_medium,
+        Complexity::Complex => state.config.server.quality_floor_complex,
+    };
+    let requirements = RequestRequirements::from_request(request);
+    let requested_effort = request
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .filter(|effort| is_reasoning_effort(effort));
+    let mut benchmark_by_model = BTreeMap::<String, Vec<_>>::new();
+    for benchmark in benchmarks {
+        benchmark_by_model
+            .entry(benchmark.id.clone())
+            .or_default()
+            .push(benchmark);
+    }
+    let mut candidates = Vec::new();
+    for offering in offerings {
+        let Some(provider) = state.config.providers.get(&offering.provider) else {
+            continue;
+        };
+        let Some(runtime) = state.providers.get(&offering.provider) else {
+            continue;
+        };
+        if !runtime.available
+            || (!offering.is_free && provider.billing_mode == BillingMode::Free)
+            || (!provider.model_allowlist.is_empty()
+                && !provider
+                    .model_allowlist
+                    .iter()
+                    .any(|model| model == &offering.model))
+            || provider
+                .model_denylist
+                .iter()
+                .any(|model| model == &offering.model)
+            || offering
+                .context_length
+                .is_some_and(|context| context < requirements.estimated_tokens)
+            || (requirements.tools && offering.supports_tools != Some(true))
+            || (requirements.vision && offering.supports_vision != Some(true))
+            || (requirements.structured && offering.supports_structured_output != Some(true))
+        {
+            continue;
+        }
+        let canonical = provider
+            .model_mappings
+            .get(&offering.model)
+            .map(String::as_str)
+            .unwrap_or(&offering.model);
+        let Some(model_benchmarks) = benchmark_by_model.get(canonical) else {
+            continue;
+        };
+        let has_effort_variants = model_benchmarks
+            .iter()
+            .any(|benchmark| benchmark.reasoning_effort.is_some());
+        for benchmark in model_benchmarks {
+            if requested_effort.is_some()
+                && has_effort_variants
+                && benchmark.reasoning_effort.as_deref() != requested_effort
+            {
+                continue;
+            }
+            let Some(quality) = quality_for(benchmark, classification.task) else {
+                continue;
+            };
+            if quality < quality_floor {
+                continue;
+            }
+            let expected_cost_microusd =
+                if offering.is_free || provider.billing_mode == BillingMode::Subscription {
+                    0
+                } else {
+                    let (Some(input_price), Some(output_price)) = (
+                        benchmark.input_price_per_million,
+                        benchmark.output_price_per_million,
+                    ) else {
+                        continue;
+                    };
+                    expected_cost_microusd(
+                        requirements.estimated_input_tokens,
+                        benchmark
+                            .output_tokens_per_task
+                            .unwrap_or(requirements.estimated_output_tokens)
+                            .min(requirements.estimated_output_tokens),
+                        input_price,
+                        output_price,
+                    )
+                };
+            let reference = quota_reference(provider, &offering.model);
+            candidates.push(ScoredCandidate {
+                value: SelectedTarget {
+                    runtime_provider: offering.provider.clone(),
+                    provider: offering.provider.clone(),
+                    provider_display: provider
+                        .profile
+                        .map(|profile| profile.definition().display_name.to_owned())
+                        .unwrap_or_else(|| "Custom OpenAI-compatible".to_owned()),
+                    model: offering.model.clone(),
+                    managed: true,
+                    quotas: reference
+                        .map(|reference| reference.rules)
+                        .unwrap_or_default(),
+                    expected_cost_microusd,
+                    reasoning_effort: benchmark.reasoning_effort.clone(),
+                    selection: Some(SelectionMetadata {
+                        task: classification.task.as_str(),
+                        complexity: classification.complexity.as_str(),
+                        classifier_version: classification.version,
+                        quality_floor,
+                        quality,
+                        expected_cost_microusd,
+                    }),
+                },
+                quality,
+                expected_cost_microusd,
+                latency_seconds: benchmark.latency_seconds.unwrap_or(f64::MAX),
+            });
+        }
+    }
+    let pinned = match session_hash {
+        Some(session_hash) => {
+            let session_hash = session_hash.to_owned();
+            routing_operation(state.routing.clone(), move |routing| {
+                routing.session_pin(&session_hash, "auto-efficient")
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+        None => None,
+    };
+    let mut targets = pareto_rank(candidates)
+        .into_iter()
+        .map(|candidate| candidate.value)
+        .collect::<Vec<_>>();
+    targets.sort_by(|left, right| {
+        let left_pinned = pinned
+            .as_ref()
+            .is_some_and(|pin| pin.0 == left.provider && pin.1 == left.model);
+        let right_pinned = pinned
+            .as_ref()
+            .is_some_and(|pin| pin.0 == right.provider && pin.1 == right.model);
+        right_pinned.cmp(&left_pinned).then_with(|| {
+            left.expected_cost_microusd
+                .cmp(&right.expected_cost_microusd)
+                .then_with(|| (&left.provider, &left.model).cmp(&(&right.provider, &right.model)))
+        })
+    });
+    let selected = targets
+        .iter()
+        .map(|target| (target.provider.clone(), target.model.clone()))
+        .collect::<BTreeSet<_>>();
+    match resolve_auto_free_targets(state, request, session_hash).await {
+        Ok(fallbacks) => {
+            for target in fallbacks {
+                if !selected.contains(&(target.provider.clone(), target.model.clone())) {
+                    targets.push(target);
+                }
+            }
+        }
+        Err(error) if targets.is_empty() => return Err(error),
+        Err(_) => {}
+    }
+    Ok(targets)
+}
+
+fn is_reasoning_effort(effort: &str) -> bool {
+    matches!(
+        effort.to_ascii_lowercase().as_str(),
+        "low" | "medium" | "high" | "xhigh"
+    )
+}
+
+fn expected_cost_microusd(
+    input_tokens: u64,
+    output_tokens: u64,
+    input_price_per_million: f64,
+    output_price_per_million: f64,
+) -> u64 {
+    let cost = (input_tokens as f64 * input_price_per_million)
+        + (output_tokens as f64 * output_price_per_million);
+    if !cost.is_finite() || cost >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        cost.ceil().max(0.0) as u64
+    }
 }
 
 fn estimate_request_tokens(request: &Value) -> u64 {
@@ -1007,10 +1294,11 @@ where
         .map_err(|error| RoutingError::Background(error.to_string()))?
 }
 
-async fn release_token_reservation(
+async fn release_reservation(
     state: &AppState,
     target: &SelectedTarget,
     estimated_tokens: u64,
+    release: ReservationRelease,
 ) {
     if !target.managed {
         return;
@@ -1018,14 +1306,24 @@ async fn release_token_reservation(
     let provider = target.provider.clone();
     let model = target.model.clone();
     let quotas = target.quotas.clone();
+    let expected_cost_microusd = target.expected_cost_microusd;
     let _ = routing_operation(state.routing.clone(), move |routing| {
-        routing.release_token_reservation(&provider, &model, estimated_tokens, &quotas)
+        routing.release_reservation(
+            &provider,
+            &model,
+            estimated_tokens,
+            expected_cost_microusd,
+            &quotas,
+            release,
+        )
     })
     .await;
 }
 
 struct RequestRequirements {
     estimated_tokens: u64,
+    estimated_input_tokens: u64,
+    estimated_output_tokens: u64,
     tools: bool,
     vision: bool,
     structured: bool,
@@ -1037,8 +1335,17 @@ impl RequestRequirements {
         let serialized_messages = messages
             .and_then(|messages| serde_json::to_string(messages).ok())
             .unwrap_or_default();
+        let estimated_input_tokens =
+            u64::try_from(serialized_messages.len().div_ceil(4)).unwrap_or(u64::MAX);
+        let estimated_output_tokens = request
+            .get("max_completion_tokens")
+            .or_else(|| request.get("max_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(1_024);
         Self {
-            estimated_tokens: estimate_request_tokens(request),
+            estimated_tokens: estimated_input_tokens.saturating_add(estimated_output_tokens),
+            estimated_input_tokens,
+            estimated_output_tokens,
             tools: request
                 .get("tools")
                 .and_then(Value::as_array)
@@ -1230,6 +1537,7 @@ struct ModelMetadata {
     display: String,
     reasoning_effort: String,
     provider_display: String,
+    selection: Option<SelectionMetadata>,
 }
 
 impl ModelMetadata {
@@ -1244,6 +1552,7 @@ impl ModelMetadata {
                     .and_then(|reasoning| reasoning.get("effort"))
                     .and_then(Value::as_str)
             })
+            .or(target.reasoning_effort.as_deref())
             .map(title_word)
             .unwrap_or_else(|| "Default".to_owned());
         Self {
@@ -1252,6 +1561,7 @@ impl ModelMetadata {
             display,
             reasoning_effort: effort,
             provider_display: target.provider_display.clone(),
+            selection: target.selection.clone(),
         }
     }
 
@@ -1717,6 +2027,29 @@ fn add_model_headers(headers: &mut HeaderMap, metadata: &ModelMetadata) {
         "x-model-gateway-reasoning-effort",
         header_value(&metadata.reasoning_effort),
     );
+    if let Some(selection) = &metadata.selection {
+        headers.insert("x-model-gateway-task", header_value(selection.task));
+        headers.insert(
+            "x-model-gateway-complexity",
+            header_value(selection.complexity),
+        );
+        headers.insert(
+            "x-model-gateway-classifier",
+            header_value(selection.classifier_version),
+        );
+        headers.insert(
+            "x-model-gateway-quality-floor",
+            header_value(&selection.quality_floor.to_string()),
+        );
+        headers.insert(
+            "x-model-gateway-quality",
+            header_value(&selection.quality.to_string()),
+        );
+        headers.insert(
+            "x-model-gateway-expected-cost-microusd",
+            header_value(&selection.expected_cost_microusd.to_string()),
+        );
+    }
 }
 
 fn add_gateway_headers(
@@ -1819,8 +2152,8 @@ mod tests {
 
     use super::{
         RequestRequirements, StreamChoice, decorate_json_response, estimate_request_tokens,
-        is_fallback_status, log_request, request_id, session_material, take_sse_event,
-        transform_sse_event,
+        expected_cost_microusd, is_fallback_status, log_request, request_id, session_material,
+        take_sse_event, transform_sse_event,
     };
     use axum::http::{HeaderMap, StatusCode};
     use tracing_subscriber::fmt::MakeWriter;
@@ -1972,6 +2305,16 @@ mod tests {
         assert!(requirements.tools);
         assert!(requirements.vision);
         assert!(requirements.structured);
+    }
+
+    #[test]
+    fn expected_cost_is_microdollars_and_saturates() {
+        assert_eq!(expected_cost_microusd(500, 500, 1.0, 3.0), 2_000);
+        assert_eq!(expected_cost_microusd(500, 500, 0.0, 0.0), 0);
+        assert_eq!(
+            expected_cost_microusd(u64::MAX, u64::MAX, f64::MAX, f64::MAX),
+            u64::MAX
+        );
     }
 
     #[test]

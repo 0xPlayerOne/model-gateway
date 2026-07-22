@@ -1,5 +1,6 @@
 //! Local model gateway library.
 
+pub mod benchmarks;
 pub mod config;
 pub mod gateway;
 pub mod providers;

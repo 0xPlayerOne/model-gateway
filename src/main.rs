@@ -1,13 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use dialoguer::{Confirm, Input, Password, Select};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
-use model_gateway::config::{Config, ConfigError, Exposure, ModelConfig, TargetConfig};
+use model_gateway::benchmarks::{BenchmarkImport, parse_artificial_analysis};
+use model_gateway::config::{
+    BillingMode, Config, ConfigError, Exposure, ModelConfig, TargetConfig,
+};
 use model_gateway::gateway::run_server;
 use model_gateway::providers::{BuiltinProvider, ConnectionCheck, fetch_catalog};
 use model_gateway::routing::{
@@ -40,6 +44,10 @@ enum Command {
     Catalog {
         #[command(subcommand)]
         command: CatalogCommand,
+    },
+    Benchmarks {
+        #[command(subcommand)]
+        command: BenchmarkCommand,
     },
     Healthcheck {
         #[arg(
@@ -85,6 +93,16 @@ enum CatalogCommand {
     Status,
 }
 
+#[derive(Debug, Subcommand)]
+enum BenchmarkCommand {
+    Refresh,
+    Import {
+        #[arg(long, help = "Path to a validated benchmark JSON export")]
+        file: PathBuf,
+    },
+    Status,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     init_logging()?;
     let cli = Cli::parse();
@@ -98,8 +116,74 @@ fn main() -> Result<(), Box<dyn Error>> {
         } => config_show()?,
         Command::Credentials { command } => credentials(command)?,
         Command::Catalog { command } => catalog(command)?,
+        Command::Benchmarks { command } => benchmarks(command)?,
         Command::Healthcheck { endpoint } => healthcheck(&endpoint)?,
         Command::Serve => tokio::runtime::Runtime::new()?.block_on(serve())?,
+    }
+    Ok(())
+}
+
+fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
+    const SOURCE: &str = "artificial-analysis";
+    const ATTRIBUTION: &str = "Artificial Analysis (https://artificialanalysis.ai/)";
+    const ENDPOINT: &str = "https://artificialanalysis.ai/api/v2/data/llms/models";
+
+    let resolver = SecretResolver::default();
+    let config = Config::load(Config::default_path(), &resolver)?;
+    let store = RoutingStore::open(config.server.state_path.as_deref())?;
+    match command {
+        BenchmarkCommand::Refresh => {
+            let api_key = resolver
+                .get("ARTIFICIAL_ANALYSIS_API_KEY")?
+                .ok_or("ARTIFICIAL_ANALYSIS_API_KEY is unavailable")?;
+            let body = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent(concat!("model-gateway/", env!("CARGO_PKG_VERSION")))
+                .build()?
+                .get(ENDPOINT)
+                .header("x-api-key", api_key)
+                .send()?
+                .error_for_status()?
+                .json::<serde_json::Value>()?;
+            let import = BenchmarkImport {
+                source: SOURCE.to_owned(),
+                attribution: ATTRIBUTION.to_owned(),
+                models: parse_artificial_analysis(&body)?,
+            };
+            import.validate()?;
+            let snapshot =
+                store.replace_benchmarks(&import.source, &import.attribution, &import.models)?;
+            println!(
+                "Refreshed {}: {} models, snapshot={snapshot}",
+                import.source,
+                import.models.len()
+            );
+            println!("Attribution: {}", import.attribution);
+        }
+        BenchmarkCommand::Import { file } => {
+            let import: BenchmarkImport = serde_json::from_slice(&std::fs::read(file)?)?;
+            import.validate()?;
+            let snapshot =
+                store.replace_benchmarks(&import.source, &import.attribution, &import.models)?;
+            println!(
+                "Imported {}: {} models, snapshot={snapshot}",
+                import.source,
+                import.models.len()
+            );
+            println!("Attribution: {}", import.attribution);
+        }
+        BenchmarkCommand::Status => {
+            let status = store.benchmark_status()?;
+            if status.is_empty() {
+                println!("No active benchmark snapshots");
+            }
+            for (source, fetched_at, models, attribution) in status {
+                println!(
+                    "{source}: {models} models, fetched_at={fetched_at}, attribution={attribution}"
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -346,7 +430,18 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
         } else {
             None
         };
-        let provider = profile.config(base_url, secret_name);
+        let mut provider = profile.config(base_url, secret_name);
+        let billing_modes = ["Free only", "Paid usage", "Subscription"];
+        provider.billing_mode = match Select::new()
+            .with_prompt("Authorized billing mode")
+            .items(&billing_modes)
+            .default(0)
+            .interact()?
+        {
+            1 => BillingMode::Paid,
+            2 => BillingMode::Subscription,
+            _ => BillingMode::Free,
+        };
         let mut discovered_models = Vec::new();
         if !args.offline {
             let key = provider.api_key_secret.as_deref().and_then(|name| {
@@ -434,7 +529,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
     apply_pending_secrets(&resolver, &config_path, &config, pending_secrets)?;
     println!("Saved {}", config_path.display());
     println!(
-        "Models: local, auto-free, {}",
+        "Models: local, auto-free, auto-efficient, {}",
         config.models.keys().cloned().collect::<Vec<_>>().join(", ")
     );
     let endpoint = "http://127.0.0.1:8008/v1";

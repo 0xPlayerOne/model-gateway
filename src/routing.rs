@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
@@ -7,6 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::benchmarks::BenchmarkModel;
 use crate::config::{BillingMode, ProviderConfig, ProviderProfileId, QuotaKind, QuotaLimit};
 
 #[derive(Debug, Error)]
@@ -28,6 +30,7 @@ pub struct CatalogOffering {
     pub provider: String,
     pub model: String,
     pub refreshed_at: i64,
+    pub is_free: bool,
     pub context_length: Option<u64>,
     pub supports_tools: Option<bool>,
     pub supports_vision: Option<bool>,
@@ -192,6 +195,12 @@ pub struct RoutingStore {
     connection: Mutex<Connection>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ReservationRelease {
+    BeforeDispatch,
+    KnownFailure,
+}
+
 impl RoutingStore {
     pub fn open(path: Option<&Path>) -> Result<Self, RoutingError> {
         let connection = match path {
@@ -208,7 +217,7 @@ impl RoutingStore {
         };
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 1 {
+        if version > 2 {
             return Err(RoutingError::UnsupportedSchema(version));
         }
         connection.execute_batch(
@@ -270,10 +279,26 @@ impl RoutingStore {
                  latency_seconds REAL,
                  PRIMARY KEY (snapshot_id, canonical_model, metric),
                  FOREIGN KEY (snapshot_id) REFERENCES benchmark_snapshots(id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS benchmark_models (
+                 snapshot_id INTEGER NOT NULL,
+                 model_id TEXT NOT NULL,
+                 creator TEXT,
+                 general_quality REAL,
+                 coding_quality REAL,
+                 agentic_quality REAL,
+                 reasoning_quality REAL,
+                 input_price REAL,
+                 output_price REAL,
+                 latency_seconds REAL,
+                 output_tokens_per_task INTEGER,
+                 reasoning_effort TEXT,
+                 PRIMARY KEY (snapshot_id, model_id, reasoning_effort),
+                 FOREIGN KEY (snapshot_id) REFERENCES benchmark_snapshots(id) ON DELETE CASCADE
              );",
         )?;
         ensure_catalog_columns(&connection)?;
-        connection.pragma_update(None, "user_version", 1)?;
+        connection.pragma_update(None, "user_version", 2)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -334,7 +359,7 @@ impl RoutingStore {
     ) -> Result<Vec<CatalogOffering>, RoutingError> {
         let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let mut statement = connection.prepare(
-            "SELECT provider, model, refreshed_at, context_length,
+            "SELECT provider, model, refreshed_at, is_free, context_length,
                     supports_tools, supports_vision, supports_structured_output
              FROM catalog_models
              WHERE is_free = 1 AND refreshed_at >= ?1
@@ -349,13 +374,166 @@ impl RoutingStore {
                         provider: row.get(0)?,
                         model: row.get(1)?,
                         refreshed_at: row.get(2)?,
-                        context_length: row.get(3)?,
-                        supports_tools: database_bool(row.get(4)?),
-                        supports_vision: database_bool(row.get(5)?),
-                        supports_structured_output: database_bool(row.get(6)?),
+                        is_free: row.get::<_, i64>(3)? != 0,
+                        context_length: row.get(4)?,
+                        supports_tools: database_bool(row.get(5)?),
+                        supports_vision: database_bool(row.get(6)?),
+                        supports_structured_output: database_bool(row.get(7)?),
                     })
                 },
             )?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn all_candidates(
+        &self,
+        max_age_seconds: u64,
+    ) -> Result<Vec<CatalogOffering>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT provider, model, refreshed_at, is_free, context_length,
+                    supports_tools, supports_vision, supports_structured_output
+             FROM catalog_models WHERE refreshed_at >= ?1 ORDER BY provider, model",
+        )?;
+        Ok(statement
+            .query_map(
+                [epoch_seconds()
+                    .saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX))],
+                |row| {
+                    Ok(CatalogOffering {
+                        provider: row.get(0)?,
+                        model: row.get(1)?,
+                        refreshed_at: row.get(2)?,
+                        is_free: row.get::<_, i64>(3)? != 0,
+                        context_length: row.get(4)?,
+                        supports_tools: database_bool(row.get(5)?),
+                        supports_vision: database_bool(row.get(6)?),
+                        supports_structured_output: database_bool(row.get(7)?),
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn replace_benchmarks(
+        &self,
+        source: &str,
+        attribution: &str,
+        models: &[BenchmarkModel],
+    ) -> Result<i64, RoutingError> {
+        if source.trim().is_empty() || attribution.trim().is_empty() || models.is_empty() {
+            return Err(RoutingError::Background(
+                "benchmark snapshot requires source, attribution, and models".to_owned(),
+            ));
+        }
+        let mut identities = BTreeSet::new();
+        for model in models {
+            model
+                .validate()
+                .map_err(|error| RoutingError::Background(error.to_owned()))?;
+            if !identities.insert((
+                model.id.as_str(),
+                model.reasoning_effort.as_deref().unwrap_or(""),
+            )) {
+                return Err(RoutingError::Background(format!(
+                    "duplicate benchmark model/effort '{}'",
+                    model.id
+                )));
+            }
+        }
+        let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE benchmark_snapshots SET active = 0 WHERE source = ?1",
+            [source],
+        )?;
+        transaction.execute(
+            "INSERT INTO benchmark_snapshots(source, fetched_at, active, attribution)
+             VALUES (?1, ?2, 0, ?3)",
+            params![source, epoch_seconds(), attribution],
+        )?;
+        let snapshot_id = transaction.last_insert_rowid();
+        for model in models {
+            transaction.execute(
+                "INSERT INTO benchmark_models(
+                    snapshot_id, model_id, creator, general_quality, coding_quality,
+                    agentic_quality, reasoning_quality, input_price, output_price,
+                    latency_seconds, output_tokens_per_task, reasoning_effort
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    snapshot_id,
+                    model.id,
+                    model.creator,
+                    model.general_quality,
+                    model.coding_quality,
+                    model.agentic_quality,
+                    model.reasoning_quality,
+                    model.input_price_per_million,
+                    model.output_price_per_million,
+                    model.latency_seconds,
+                    model.output_tokens_per_task,
+                    model.reasoning_effort.as_deref().unwrap_or("")
+                ],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE benchmark_snapshots SET active = 1 WHERE id = ?1",
+            [snapshot_id],
+        )?;
+        transaction.commit()?;
+        Ok(snapshot_id)
+    }
+
+    pub fn benchmark_models(
+        &self,
+        max_age_seconds: u64,
+    ) -> Result<Vec<BenchmarkModel>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT m.model_id, m.creator, m.general_quality, m.coding_quality,
+                    m.agentic_quality, m.reasoning_quality, m.input_price,
+                    m.output_price, m.latency_seconds, m.output_tokens_per_task,
+                    NULLIF(m.reasoning_effort, '')
+             FROM benchmark_models m
+             JOIN benchmark_snapshots s ON s.id = m.snapshot_id
+             WHERE s.active = 1 AND s.fetched_at >= ?1
+             ORDER BY m.model_id, s.source",
+        )?;
+        Ok(statement
+            .query_map(
+                [epoch_seconds()
+                    .saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX))],
+                |row| {
+                    Ok(BenchmarkModel {
+                        id: row.get(0)?,
+                        creator: row.get(1)?,
+                        general_quality: row.get(2)?,
+                        coding_quality: row.get(3)?,
+                        agentic_quality: row.get(4)?,
+                        reasoning_quality: row.get(5)?,
+                        input_price_per_million: row.get(6)?,
+                        output_price_per_million: row.get(7)?,
+                        latency_seconds: row.get(8)?,
+                        output_tokens_per_task: row.get(9)?,
+                        reasoning_effort: row.get(10)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn benchmark_status(&self) -> Result<Vec<(String, i64, u64, String)>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT s.source, s.fetched_at, COUNT(m.model_id), s.attribution
+             FROM benchmark_snapshots s
+             LEFT JOIN benchmark_models m ON m.snapshot_id = s.id
+             WHERE s.active = 1 GROUP BY s.id ORDER BY s.source",
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -375,6 +553,7 @@ impl RoutingStore {
         provider: &str,
         model: &str,
         estimated_tokens: u64,
+        expected_cost_microusd: u64,
         quotas: &[QuotaLimit],
     ) -> Result<bool, RoutingError> {
         let now = epoch_seconds();
@@ -391,7 +570,7 @@ impl RoutingStore {
             return Ok(false);
         }
         for quota in quotas {
-            let amount = quota_amount(quota.kind, estimated_tokens);
+            let amount = quota_amount(quota.kind, estimated_tokens, expected_cost_microusd);
             let window = i64::try_from(quota.window_seconds).unwrap_or(i64::MAX);
             let window_start = now - now.rem_euclid(window);
             let used: u64 = transaction
@@ -415,7 +594,7 @@ impl RoutingStore {
             }
         }
         for quota in quotas {
-            let amount = quota_amount(quota.kind, estimated_tokens);
+            let amount = quota_amount(quota.kind, estimated_tokens, expected_cost_microusd);
             let window = i64::try_from(quota.window_seconds).unwrap_or(i64::MAX);
             let window_start = now - now.rem_euclid(window);
             transaction.execute(
@@ -487,29 +666,35 @@ impl RoutingStore {
         Ok(())
     }
 
-    pub fn release_token_reservation(
+    pub fn release_reservation(
         &self,
         provider: &str,
         model: &str,
         estimated_tokens: u64,
+        expected_cost_microusd: u64,
         quotas: &[QuotaLimit],
+        release: ReservationRelease,
     ) -> Result<(), RoutingError> {
         let now = epoch_seconds();
         let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
-        for quota in quotas
-            .iter()
-            .filter(|quota| quota.kind == QuotaKind::Tokens)
-        {
+        for quota in quotas {
+            let amount = match quota.kind {
+                QuotaKind::Requests if matches!(release, ReservationRelease::BeforeDispatch) => 1,
+                QuotaKind::Requests => continue,
+                QuotaKind::Tokens => estimated_tokens.max(1),
+                QuotaKind::CostMicrousd => expected_cost_microusd,
+            };
             let window = i64::try_from(quota.window_seconds).unwrap_or(i64::MAX);
             let window_start = now - now.rem_euclid(window);
             connection.execute(
                 "UPDATE usage_counters SET used = MAX(0, used - ?1)
-                 WHERE provider = ?2 AND model = ?3 AND kind = 'tokens'
-                   AND window_seconds = ?4 AND window_start = ?5",
+                 WHERE provider = ?2 AND model = ?3 AND kind = ?4
+                   AND window_seconds = ?5 AND window_start = ?6",
                 params![
-                    estimated_tokens.max(1),
+                    amount,
                     provider,
                     model,
+                    quota_kind(quota.kind),
                     quota.window_seconds,
                     window_start
                 ],
@@ -708,11 +893,11 @@ fn tokens(limit: u64, window_seconds: u64) -> QuotaLimit {
     }
 }
 
-fn quota_amount(kind: QuotaKind, estimated_tokens: u64) -> u64 {
+fn quota_amount(kind: QuotaKind, estimated_tokens: u64, expected_cost_microusd: u64) -> u64 {
     match kind {
         QuotaKind::Requests => 1,
         QuotaKind::Tokens => estimated_tokens.max(1),
-        QuotaKind::CostMicrousd => 0,
+        QuotaKind::CostMicrousd => expected_cost_microusd,
     }
 }
 
@@ -781,6 +966,8 @@ mod tests {
 
     use crate::config::{ProviderConfig, QuotaKind, QuotaLimit};
 
+    use crate::benchmarks::BenchmarkModel;
+
     use super::{CatalogRecord, RoutingStore};
 
     #[test]
@@ -812,7 +999,7 @@ mod tests {
             .map(|_| {
                 let store = store.clone();
                 let quota = quota.clone();
-                std::thread::spawn(move || store.reserve("p", "m", 1, &quota).expect("reserve"))
+                std::thread::spawn(move || store.reserve("p", "m", 1, 0, &quota).expect("reserve"))
             })
             .collect::<Vec<_>>();
         let accepted = handles
@@ -862,7 +1049,11 @@ mod tests {
         store
             .apply_cooldown("provider", "model", Some(60))
             .expect("cooldown");
-        assert!(!store.reserve("provider", "model", 1, &[]).expect("reserve"));
+        assert!(
+            !store
+                .reserve("provider", "model", 1, 0, &[])
+                .expect("reserve")
+        );
     }
 
     #[test]
@@ -880,12 +1071,19 @@ mod tests {
                 window_seconds: 60,
             },
         ];
-        assert!(store.reserve("p", "m", 100, &quotas).expect("first"));
+        assert!(store.reserve("p", "m", 100, 0, &quotas).expect("first"));
         store
-            .release_token_reservation("p", "m", 100, &quotas)
+            .release_reservation(
+                "p",
+                "m",
+                100,
+                0,
+                &quotas,
+                super::ReservationRelease::KnownFailure,
+            )
             .expect("release tokens");
-        assert!(store.reserve("p", "m", 100, &quotas).expect("second"));
-        assert!(!store.reserve("p", "m", 1, &quotas).expect("third"));
+        assert!(store.reserve("p", "m", 100, 0, &quotas).expect("second"));
+        assert!(!store.reserve("p", "m", 1, 0, &quotas).expect("third"));
     }
 
     #[test]
@@ -932,5 +1130,92 @@ mod tests {
         };
         assert!(super::is_verified_free(&provider, "zero-price", true));
         assert!(!super::is_verified_free(&provider, "unknown-price", false));
+    }
+
+    #[test]
+    fn invalid_benchmark_refresh_preserves_last_known_good_snapshot() {
+        let store = RoutingStore::open(None).expect("store");
+        let valid = BenchmarkModel::fixture("valid", 70.0, 70.0, 70.0, 70.0, 1.0, 1.0);
+        store
+            .replace_benchmarks("fixture", "Fixture", &[valid])
+            .expect("valid snapshot");
+        let invalid = BenchmarkModel::fixture("invalid", 101.0, 70.0, 70.0, 70.0, 1.0, 1.0);
+        assert!(
+            store
+                .replace_benchmarks("fixture", "Fixture", &[invalid])
+                .is_err()
+        );
+        let models = store.benchmark_models(60).expect("active snapshot");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "valid");
+    }
+
+    #[test]
+    fn cost_reservations_enforce_configured_spend_windows() {
+        let store = RoutingStore::open(None).expect("store");
+        let quotas = [QuotaLimit {
+            kind: QuotaKind::CostMicrousd,
+            limit: 100,
+            window_seconds: 86_400,
+        }];
+        assert!(store.reserve("p", "m", 1, 60, &quotas).expect("first"));
+        assert!(!store.reserve("p", "m", 1, 60, &quotas).expect("second"));
+    }
+
+    #[test]
+    fn known_failures_refund_cost_but_not_request_usage() {
+        let store = RoutingStore::open(None).expect("store");
+        let cost_quota = [QuotaLimit {
+            kind: QuotaKind::CostMicrousd,
+            limit: 100,
+            window_seconds: 86_400,
+        }];
+        assert!(
+            store
+                .reserve("p", "m", 1, 60, &cost_quota)
+                .expect("reserve")
+        );
+        store
+            .release_reservation(
+                "p",
+                "m",
+                1,
+                60,
+                &cost_quota,
+                super::ReservationRelease::KnownFailure,
+            )
+            .expect("release cost");
+        assert!(
+            store
+                .reserve("p", "m", 1, 60, &cost_quota)
+                .expect("cost refunded")
+        );
+
+        let request_store = RoutingStore::open(None).expect("request store");
+        let request_quota = [QuotaLimit {
+            kind: QuotaKind::Requests,
+            limit: 1,
+            window_seconds: 86_400,
+        }];
+        assert!(
+            request_store
+                .reserve("p", "m", 1, 0, &request_quota)
+                .expect("reserve")
+        );
+        request_store
+            .release_reservation(
+                "p",
+                "m",
+                1,
+                0,
+                &request_quota,
+                super::ReservationRelease::KnownFailure,
+            )
+            .expect("release known failure");
+        assert!(
+            !request_store
+                .reserve("p", "m", 1, 0, &request_quota)
+                .expect("request retained")
+        );
     }
 }
