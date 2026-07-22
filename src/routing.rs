@@ -12,6 +12,7 @@ use crate::benchmarks::BenchmarkModel;
 use crate::config::{
     BillingMode, ProviderConfig, ProviderProfileId, QuotaBoundary, QuotaKind, QuotaLimit,
 };
+use crate::providers::AccountLimit;
 
 #[derive(Debug, Error)]
 pub enum RoutingError {
@@ -67,6 +68,15 @@ pub struct ProviderLimitReference {
     pub source_url: &'static str,
     pub status: &'static str,
 }
+
+pub type AccountLimitStatus = (
+    String,
+    i64,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<bool>,
+);
 
 pub const PROVIDER_LIMIT_REFERENCES: &[ProviderLimitReference] = &[
     limit(ProviderProfileId::Custom, "", "user_defined"),
@@ -327,7 +337,7 @@ impl RoutingStore {
                    model TEXT NOT NULL,
                    expires_at INTEGER NOT NULL
                );
-               CREATE TABLE IF NOT EXISTS reservation_dimensions (
+              CREATE TABLE IF NOT EXISTS reservation_dimensions (
                    reservation_id INTEGER NOT NULL,
                    kind TEXT NOT NULL,
                    window_seconds INTEGER NOT NULL,
@@ -335,6 +345,14 @@ impl RoutingStore {
                    amount INTEGER NOT NULL,
                    PRIMARY KEY (reservation_id, kind, window_seconds, window_start),
                    FOREIGN KEY (reservation_id) REFERENCES reservations(id) ON DELETE CASCADE
+               );
+               CREATE TABLE IF NOT EXISTS provider_account_limits (
+                   provider TEXT PRIMARY KEY,
+                   fetched_at INTEGER NOT NULL,
+                   limit_value REAL,
+                   usage REAL,
+                   remaining REAL,
+                   is_free_tier INTEGER
                );",
         )?;
         ensure_catalog_columns(&connection)?;
@@ -648,6 +666,54 @@ impl RoutingStore {
         )?;
         Ok(statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn record_account_limit(
+        &self,
+        provider: &str,
+        account: &AccountLimit,
+    ) -> Result<(), RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        connection.execute(
+            "INSERT INTO provider_account_limits(
+                provider, fetched_at, limit_value, usage, remaining, is_free_tier
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(provider) DO UPDATE SET
+                fetched_at = excluded.fetched_at,
+                limit_value = excluded.limit_value,
+                usage = excluded.usage,
+                remaining = excluded.remaining,
+                is_free_tier = excluded.is_free_tier",
+            params![
+                provider,
+                epoch_seconds(),
+                account.limit,
+                account.usage,
+                account.remaining,
+                account.is_free_tier.map(i64::from)
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn account_limit_status(&self) -> Result<Vec<AccountLimitStatus>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT provider, fetched_at, limit_value, usage, remaining, is_free_tier
+             FROM provider_account_limits ORDER BY provider",
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    database_bool(row.get(5)?),
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -1363,6 +1429,7 @@ mod tests {
     use crate::config::{ProviderConfig, QuotaBoundary, QuotaKind, QuotaLimit};
 
     use crate::benchmarks::BenchmarkModel;
+    use crate::providers::AccountLimit;
 
     use super::{CatalogRecord, ReservationOutcome, RoutingStore};
 
@@ -1730,5 +1797,25 @@ mod tests {
             boundary: QuotaBoundary::UtcMonth,
         };
         assert_eq!(super::quota_window_start(0, &month), 0);
+    }
+
+    #[test]
+    fn account_limit_snapshots_are_persisted_without_credentials() {
+        let store = RoutingStore::open(None).expect("store");
+        store
+            .record_account_limit(
+                "openrouter",
+                &AccountLimit {
+                    limit: Some(10.0),
+                    usage: Some(2.0),
+                    remaining: Some(8.0),
+                    is_free_tier: Some(true),
+                },
+            )
+            .expect("account limit");
+        let status = store.account_limit_status().expect("status");
+        assert_eq!(status[0].0, "openrouter");
+        assert_eq!(status[0].4, Some(8.0));
+        assert_eq!(status[0].5, Some(true));
     }
 }
