@@ -10,8 +10,14 @@ if [ "$GATEWAY_PORT" = "$PROVIDER_PORT" ]; then
 fi
 
 cleanup() {
+    rc=${1:-$?}
+    if [ "$rc" -ne 0 ] && [ -f "$STATE/compose.yml" ]; then
+        docker compose -f "$STATE/compose.yml" ps >&2 || true
+        docker compose -f "$STATE/compose.yml" logs --no-color >&2 || true
+    fi
     docker compose -f "$STATE/compose.yml" down -v --remove-orphans >/dev/null 2>&1 || true
     rm -rf "$STATE"
+    return "$rc"
 }
 trap cleanup EXIT
 
@@ -80,7 +86,7 @@ EOF
 
 MOCK_PROVIDER_API_KEY=fixture-secret python3 "$ROOT/scripts/mock_provider.py" "$PROVIDER_PORT" &
 PROVIDER_PID=$!
-trap 'kill "$PROVIDER_PID" 2>/dev/null || true; cleanup' EXIT
+trap 'rc=$?; kill "$PROVIDER_PID" 2>/dev/null || true; cleanup "$rc"' EXIT
 
 docker compose -f "$STATE/compose.yml" --profile setup run --rm --no-deps --entrypoint sh setup -c \
     'mkdir -p /run/model-gateway/secrets && printf %s fixture-secret > /run/model-gateway/secrets/MOCK_API_KEY && chmod 700 /run/model-gateway/secrets && chmod 600 /run/model-gateway/secrets/MOCK_API_KEY'
