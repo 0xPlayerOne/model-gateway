@@ -55,6 +55,13 @@ services:
       args:
         MODEL_GATEWAY_UID: "$(id -u)"
         MODEL_GATEWAY_GID: "$(id -g)"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       MODEL_GATEWAY_CONFIG: /app/state/config.toml
       MODEL_GATEWAY_CONTAINER_MODE: "1"
@@ -130,5 +137,8 @@ fi
 
 docker compose -f "$STATE/compose.yml" run --rm --no-deps --entrypoint sh gateway -c \
     'test -z "${OPENROUTER_API_KEY:-}" && test ! -e /app/state/provider-key && test -e /run/model-gateway/secrets/MOCK_API_KEY && test "$(cat /run/model-gateway/secrets/MOCK_API_KEY)" = fixture-secret'
+
+docker compose -f "$STATE/compose.yml" run --rm --no-deps --entrypoint sh gateway -c \
+    'test "$(id -u)" != 0 && test "$(awk "/^CapEff:/{print \$2}" /proc/self/status)" = 0000000000000000 && ! touch /app/should-not-write && test -d /tmp'
 
 printf 'Docker gateway smoke passed\n'

@@ -6,6 +6,13 @@ services:
         MODEL_GATEWAY_UID: "${MODEL_GATEWAY_UID:-1000}"
         MODEL_GATEWAY_GID: "${MODEL_GATEWAY_GID:-1000}"
     command: ["serve"]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       MODEL_GATEWAY_CONFIG: /app/state/config.toml
       MODEL_GATEWAY_SECRET_DIR: /run/model-gateway/secrets
