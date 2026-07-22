@@ -65,9 +65,9 @@ jobs:
           package="model-gateway-${version}-${{ matrix.target }}"
           mkdir -p dist/package
           cp "target/${{ matrix.target }}/release/model-gateway" dist/model-gateway
-          cp README.md LICENSE-MIT LICENSE-APACHE dist/
-          tar -czf "dist/package/${package}.tar.gz" -C dist model-gateway README.md LICENSE-MIT LICENSE-APACHE
-          rm -f dist/model-gateway dist/README.md dist/LICENSE-MIT dist/LICENSE-APACHE
+          cp README.md LICENSE-MIT LICENSE-APACHE gateway.example.toml gateway.core.example.toml dist/
+          tar -czf "dist/package/${package}.tar.gz" -C dist model-gateway README.md LICENSE-MIT LICENSE-APACHE gateway.example.toml gateway.core.example.toml
+          rm -f dist/model-gateway dist/README.md dist/LICENSE-MIT dist/LICENSE-APACHE dist/gateway.example.toml dist/gateway.core.example.toml
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.target }}

@@ -62,11 +62,18 @@ credentials, and arbitrary upstream errors are never logged.
 
 ## Supported Profiles
 
-The setup wizard includes Custom OpenAI-compatible, OpenRouter, Ollama, LM
-Studio, OpenAI API, DeepSeek, Fireworks AI, Novita AI, and Z.AI/GLM profiles.
-The cloud profiles use OpenAI Chat Completions with bearer secrets. They are
-contract-tested against deterministic local fixtures; no provider credential is
-required for the test suite.
+The setup wizard uses one declarative registry for Custom, OpenRouter, Ollama,
+LM Studio, OpenAI API, DeepSeek, Fireworks AI, Novita AI, Z.AI/GLM, Google
+Gemini's OpenAI compatibility endpoint, Kilo Code, OpenCode Zen, Cerebras,
+Mistral, Nous Portal, NVIDIA NIM, Groq, and OrcaRouter. The cloud profiles use
+OpenAI Chat Completions with bearer secrets. They are contract-tested against
+deterministic local fixtures; no provider credential is required for CI.
+
+`gateway.core.example.toml` configures the CORE providers represented by
+`.env.example`. Run `./scripts/core-provider-check.sh` for an explicit one-time
+connection check with `.env.local`. It sends only documented model-catalog or
+key-status GET requests, skips providers without a documented zero-credit
+endpoint, never sends a completion, and is intentionally not part of CI.
 
 ## v0.2 Limitations
 

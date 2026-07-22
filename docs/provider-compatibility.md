@@ -22,12 +22,13 @@ not gateway providers.
 | OpenAI API | `openai-api` | OpenAI Chat / API key | Built-in profile; OpenAI-wire bearer catalog contract-tested |
 | Fireworks, Novita, z.ai | `fireworks`, `novita`, `zai` | OpenAI-compatible / API key | Built-in profiles; OpenAI-wire bearer catalog contract-tested |
 | DeepSeek | `deepseek` | OpenAI-compatible / API key | Built-in profile; OpenAI-wire bearer catalog contract-tested |
+| Gemini, OpenCode, Mistral, NVIDIA NIM, Groq, OrcaRouter | `google-gemini`, `opencode`, `mistral`, `nvidia-nim`, `groq`, `orcarouter` | OpenAI-compatible / API key | Built-in profiles; zero-credit model catalogs checked on demand |
+| Kilo Code, Cerebras, Nous Portal | `kilocode`, `cerebras`, `nous-portal` | OpenAI-compatible / API key | Built-in profiles; configuration-only check because no documented zero-credit endpoint is available |
 | Kimi, MiniMax, Alibaba | `kimi-coding`, `minimax`, `alibaba` and regional variants | OpenAI-compatible or native variant / API key | Planned profiles/adapters |
 | Arcee, GMI, StepFun, Upstage | `arcee`, `gmi`, `stepfun`, `upstage` | OpenAI-compatible / API key | Planned profiles |
-| Kilo Code, OpenCode Zen/Go, Nous API | `kilocode`, `opencode-zen`, `opencode-go`, `nous` | OpenAI-compatible / API key | Planned profiles |
-| Hugging Face, NVIDIA, Ollama Cloud | `huggingface`, `nvidia`, `ollama-cloud` | OpenAI-compatible / API key | Planned profiles |
+| Hugging Face, Ollama Cloud | `huggingface`, `ollama-cloud` | OpenAI-compatible or native / API key | Planned profiles/adapters |
 | Anthropic | `anthropic` | Anthropic Messages / API or OAuth | Planned native adapter |
-| Google Gemini | `gemini` | Gemini API / API key | Planned native adapter |
+| Google Gemini native API | `gemini-native` | Gemini API / API key | Planned native adapter; the OpenAI compatibility endpoint is supported |
 | Vertex AI | `vertex` | Vertex OpenAI-compatible / OAuth | Planned credential adapter |
 | Azure Foundry | `azure-foundry` | OpenAI-compatible / API key or Entra | Planned credential adapter |
 | AWS Bedrock | `bedrock` | Bedrock Converse / AWS credentials | Planned native adapter |

@@ -7,7 +7,7 @@ admission_timeout_ms = 250
 shutdown_grace_seconds = 30
 
 [providers.openrouter]
-profile = "openrouter"
+profile = "open_router"
 adapter = "openai_chat"
 base_url = "https://openrouter.ai/api/v1"
 api_key_secret = "OPENROUTER_API_KEY"

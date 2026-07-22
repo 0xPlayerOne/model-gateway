@@ -120,6 +120,15 @@ pub enum ProviderProfileId {
     Fireworks,
     Novita,
     Zai,
+    GoogleGemini,
+    KiloCode,
+    OpenCode,
+    Cerebras,
+    Mistral,
+    NousPortal,
+    NvidiaNim,
+    Groq,
+    OrcaRouter,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -588,6 +597,23 @@ mod tests {
         assert_eq!(
             decoded.providers["local"].profile,
             Some(super::ProviderProfileId::OpenaiApi)
+        );
+    }
+
+    #[test]
+    fn core_provider_example_is_structurally_valid() {
+        let config: Config = toml::from_str(include_str!("../gateway.core.example.toml"))
+            .expect("CORE provider example must parse");
+        config
+            .validate_structure()
+            .expect("CORE provider example must validate");
+        assert_eq!(config.providers.len(), 12);
+        assert_eq!(config.models.len(), 12);
+        assert!(
+            config
+                .providers
+                .values()
+                .all(|provider| provider.profile.is_some() && provider.api_key_secret.is_some())
         );
     }
 

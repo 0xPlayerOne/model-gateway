@@ -69,8 +69,7 @@ enum CredentialCommand {
     List,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     init_logging()?;
     let cli = Cli::parse();
     match cli.command {
@@ -83,7 +82,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } => config_show()?,
         Command::Credentials { command } => credentials(command)?,
         Command::Healthcheck { endpoint } => healthcheck(&endpoint)?,
-        Command::Serve => serve().await?,
+        Command::Serve => tokio::runtime::Runtime::new()?.block_on(serve())?,
     }
     Ok(())
 }
@@ -197,7 +196,8 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
     }
 
     loop {
-        let choices: Vec<&str> = BuiltinProvider::all()
+        let profiles: Vec<_> = BuiltinProvider::all().collect();
+        let choices: Vec<&str> = profiles
             .iter()
             .map(|provider| provider.display_name())
             .collect();
@@ -206,7 +206,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
             .items(&choices)
             .default(0)
             .interact()?;
-        let profile = BuiltinProvider::all()[selection];
+        let profile = profiles[selection];
         let default_name = profile.config_key();
         let name: String = Input::new()
             .with_prompt("Provider name")
@@ -262,11 +262,14 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
                     .or_else(|| resolver.get(name).ok().flatten())
             });
             match profile.validate_and_fetch_models(&provider, key.as_deref()) {
-                Ok(models) if !models.is_empty() => {
+                Ok(Some(models)) if !models.is_empty() => {
                     println!("Discovered {} model(s)", models.len());
                     discovered_models = models;
                 }
-                Ok(_) => println!("Provider returned no models; enter one manually."),
+                Ok(Some(_)) => println!("Provider returned no models; enter one manually."),
+                Ok(None) => println!(
+                    "Provider has no documented zero-credit connection endpoint; enter a model manually."
+                ),
                 Err(error) => {
                     eprintln!("Provider validation failed: {error}");
                     if !Confirm::new()
@@ -444,6 +447,7 @@ fn config_check(online: bool) -> Result<(), Box<dyn Error>> {
     println!("Providers: {}", config.providers.len());
     println!("Aliases: {}", config.models.len());
     if online {
+        let mut failures = Vec::new();
         for (name, provider) in &config.providers {
             let profile = BuiltinProvider::from_profile_id(provider.profile);
             let key = provider
@@ -451,12 +455,26 @@ fn config_check(online: bool) -> Result<(), Box<dyn Error>> {
                 .as_deref()
                 .and_then(|secret| resolver.get(secret).ok().flatten());
             match profile.validate_and_fetch_models(provider, key.as_deref()) {
-                Ok(models) => println!(
+                Ok(Some(models)) => println!(
                     "Online provider check passed: {name} ({} models)",
                     models.len()
                 ),
-                Err(error) => println!("Online provider check failed: {name} ({error})"),
+                Ok(None) => println!(
+                    "Online provider check skipped: {name} (no documented zero-credit endpoint)"
+                ),
+                Err(error) => {
+                    println!("Online provider check failed: {name} ({error})");
+                    failures.push(name.as_str());
+                }
             }
+        }
+        if !failures.is_empty() {
+            return Err(format!(
+                "{} provider connection check(s) failed: {}",
+                failures.len(),
+                failures.join(", ")
+            )
+            .into());
         }
     }
     Ok(())

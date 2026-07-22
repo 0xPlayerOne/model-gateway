@@ -1,0 +1,111 @@
+[server]
+bind = "127.0.0.1:11434"
+exposure = "loopback"
+
+[providers.google-gemini]
+profile = "google_gemini"
+adapter = "openai_chat"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key_secret = "GOOGLE_API_KEY"
+
+[providers.kilocode]
+profile = "kilo_code"
+adapter = "openai_chat"
+base_url = "https://api.kilo.ai/api/gateway"
+api_key_secret = "KILOCODE_API_KEY"
+
+[providers.opencode]
+profile = "open_code"
+adapter = "openai_chat"
+base_url = "https://opencode.ai/zen/v1"
+api_key_secret = "OPENCODE_API_KEY"
+
+[providers.openrouter]
+profile = "open_router"
+adapter = "openai_chat"
+base_url = "https://openrouter.ai/api/v1"
+api_key_secret = "OPENROUTER_API_KEY"
+
+[providers.cerebras]
+profile = "cerebras"
+adapter = "openai_chat"
+base_url = "https://api.cerebras.ai/v1"
+api_key_secret = "CEREBRAS_API_KEY"
+
+[providers.deepseek]
+profile = "deepseek"
+adapter = "openai_chat"
+base_url = "https://api.deepseek.com/v1"
+api_key_secret = "DEEPSEEK_API_KEY"
+
+[providers.mistral]
+profile = "mistral"
+adapter = "openai_chat"
+base_url = "https://api.mistral.ai/v1"
+api_key_secret = "MISTRAL_API_KEY"
+
+[providers.nous-portal]
+profile = "nous_portal"
+adapter = "openai_chat"
+base_url = "https://portal.nousresearch.com/v1"
+api_key_secret = "NOUS_PORTAL_API_KEY"
+
+[providers.nvidia-nim]
+profile = "nvidia_nim"
+adapter = "openai_chat"
+base_url = "https://integrate.api.nvidia.com/v1"
+api_key_secret = "NVIDIA_NIM_API_KEY"
+
+[providers.groq]
+profile = "groq"
+adapter = "openai_chat"
+base_url = "https://api.groq.com/openai/v1"
+api_key_secret = "GROQ_API_KEY"
+
+[providers.novita]
+profile = "novita"
+adapter = "openai_chat"
+base_url = "https://api.novita.ai/openai/v1"
+api_key_secret = "NOVITA_INFRA_KEY"
+
+[providers.orcarouter]
+profile = "orca_router"
+adapter = "openai_chat"
+base_url = "https://api.orcarouter.ai/v1"
+api_key_secret = "ORCAROUTER_API_KEY"
+
+[models.google-gemini]
+targets = [{ provider = "google-gemini", model = "gemini-2.5-flash" }]
+
+[models.kilocode]
+targets = [{ provider = "kilocode", model = "anthropic/claude-sonnet-4.5" }]
+
+[models.opencode]
+targets = [{ provider = "opencode", model = "qwen3-coder" }]
+
+[models.openrouter]
+targets = [{ provider = "openrouter", model = "openai/gpt-4o-mini" }]
+
+[models.cerebras]
+targets = [{ provider = "cerebras", model = "qwen-3-coder-480b" }]
+
+[models.deepseek]
+targets = [{ provider = "deepseek", model = "deepseek-chat" }]
+
+[models.mistral]
+targets = [{ provider = "mistral", model = "mistral-small-latest" }]
+
+[models.nous-portal]
+targets = [{ provider = "nous-portal", model = "hermes-4-405b" }]
+
+[models.nvidia-nim]
+targets = [{ provider = "nvidia-nim", model = "nvidia/llama-3.1-nemotron-ultra-253b-v1" }]
+
+[models.groq]
+targets = [{ provider = "groq", model = "llama-3.3-70b-versatile" }]
+
+[models.novita]
+targets = [{ provider = "novita", model = "meta-llama/llama-3.1-8b-instruct" }]
+
+[models.orcarouter]
+targets = [{ provider = "orcarouter", model = "auto" }]
