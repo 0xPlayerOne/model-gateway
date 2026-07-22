@@ -49,6 +49,12 @@ MODEL_GATEWAY_SECRET_STORE=environment \
 LOCAL_API_KEY=fixture-secret \
 NO_PROXY=127.0.0.1,localhost \
 no_proxy=127.0.0.1,localhost \
+HTTP_PROXY= \
+http_proxy= \
+HTTPS_PROXY= \
+https_proxy= \
+ALL_PROXY= \
+all_proxy= \
     "$ROOT/target/release/model-gateway" serve >"$STATE/gateway.log" 2>&1 &
 GATEWAY_PID=$!
 
