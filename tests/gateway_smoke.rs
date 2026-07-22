@@ -6,16 +6,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::body::{Body, Bytes};
 use axum::extract::Json;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Router, serve};
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use model_gateway::config::{Config, ModelConfig, ProviderConfig, ServerConfig, TargetConfig};
 use model_gateway::gateway::build_app;
 use model_gateway::secrets::SecretResolver;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio::time::Duration;
 
 async fn spawn_provider(response: ProviderResponse) -> SocketAddr {
     let response = Arc::new(response);
@@ -27,6 +28,27 @@ async fn spawn_provider(response: ProviderResponse) -> SocketAddr {
         }),
     );
     spawn_router(router).await
+}
+
+async fn spawn_header_echo_provider() -> (SocketAddr, Arc<AtomicUsize>) {
+    let authorization_seen = Arc::new(AtomicUsize::new(0));
+    let seen = authorization_seen.clone();
+    let router = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: HeaderMap, Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                if headers.contains_key(header::AUTHORIZATION)
+                    || headers.contains_key(header::COOKIE)
+                    || headers.contains_key("x-forwarded-for")
+                {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+                Json(json!({"model": body["model"]}))
+            }
+        }),
+    );
+    (spawn_router(router).await, authorization_seen)
 }
 
 async fn spawn_router(router: Router) -> SocketAddr {
@@ -541,6 +563,200 @@ async fn client_disconnect_releases_stream_permit() {
         .await
         .expect("second stream");
     assert_eq!(second.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn response_header_timeout_does_not_fallback() {
+    let first = spawn_router(Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Json(json!({"late": true}))
+        }),
+    ))
+    .await;
+    let fallback_calls = Arc::new(AtomicUsize::new(0));
+    let calls = fallback_calls.clone();
+    let second = spawn_router(Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"unexpected": true}))
+            }
+        }),
+    ))
+    .await;
+    let mut first_config = provider(format!("http://{first}/v1"));
+    first_config.response_header_timeout_seconds = 1;
+    let gateway = spawn_gateway(config_for(
+        BTreeMap::from([
+            ("first".to_owned(), first_config),
+            ("second".to_owned(), provider(format!("http://{second}/v1"))),
+        ]),
+        vec![
+            TargetConfig {
+                provider: "first".to_owned(),
+                model: "first-model".to_owned(),
+            },
+            TargetConfig {
+                provider: "second".to_owned(),
+                model: "second-model".to_owned(),
+            },
+        ],
+    ))
+    .await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "smoke", "messages": []}))
+        .send()
+        .await
+        .expect("timeout response");
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "first");
+    assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn stream_idle_timeout_ends_started_response_without_fallback() {
+    let first = spawn_provider(ProviderResponse::HoldStream).await;
+    let fallback_calls = Arc::new(AtomicUsize::new(0));
+    let calls = fallback_calls.clone();
+    let second = spawn_router(Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"unexpected": true}))
+            }
+        }),
+    ))
+    .await;
+    let mut first_config = provider(format!("http://{first}/v1"));
+    first_config.stream_idle_timeout_seconds = 1;
+    let gateway = spawn_gateway(config_for(
+        BTreeMap::from([
+            ("first".to_owned(), first_config),
+            ("second".to_owned(), provider(format!("http://{second}/v1"))),
+        ]),
+        vec![
+            TargetConfig {
+                provider: "first".to_owned(),
+                model: "first-model".to_owned(),
+            },
+            TargetConfig {
+                provider: "second".to_owned(),
+                model: "second-model".to_owned(),
+            },
+        ],
+    ))
+    .await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "smoke", "stream": true, "messages": []}))
+        .send()
+        .await
+        .expect("stream timeout response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "first");
+    let mut stream = response.bytes_stream();
+    let first_chunk = stream
+        .next()
+        .await
+        .expect("first stream chunk")
+        .expect("first stream chunk bytes");
+    assert!(first_chunk.starts_with(b"data: {\"choices\":[]}"));
+    assert!(stream.next().await.expect("idle timeout chunk").is_err());
+    assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn provider_saturation_does_not_block_another_provider() {
+    let held = spawn_provider(ProviderResponse::HoldStream).await;
+    let available = spawn_provider(ProviderResponse::Success).await;
+    let mut held_config = provider(format!("http://{held}/v1"));
+    held_config.max_in_flight = Some(1);
+    let mut config = Config {
+        server: ServerConfig {
+            max_in_flight: 4,
+            admission_timeout_ms: 25,
+            ..ServerConfig::default()
+        },
+        providers: BTreeMap::from([
+            ("held".to_owned(), held_config),
+            (
+                "available".to_owned(),
+                provider(format!("http://{available}/v1")),
+            ),
+        ]),
+        models: BTreeMap::from([
+            (
+                "held-model".to_owned(),
+                ModelConfig {
+                    targets: vec![TargetConfig {
+                        provider: "held".to_owned(),
+                        model: "held-upstream".to_owned(),
+                    }],
+                },
+            ),
+            (
+                "available-model".to_owned(),
+                ModelConfig {
+                    targets: vec![TargetConfig {
+                        provider: "available".to_owned(),
+                        model: "available-upstream".to_owned(),
+                    }],
+                },
+            ),
+        ]),
+    };
+    config.server.max_body_bytes = 1024 * 1024;
+    let gateway = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+    let held_response = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "held-model", "stream": true, "messages": []}))
+        .send()
+        .await
+        .expect("held stream");
+    assert_eq!(held_response.status(), StatusCode::OK);
+    let available_response = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "available-model", "messages": []}))
+        .send()
+        .await
+        .expect("available response");
+    assert_eq!(available_response.status(), StatusCode::OK);
+    drop(held_response);
+}
+
+#[tokio::test]
+async fn caller_sensitive_headers_are_not_forwarded_upstream() {
+    let (provider_address, sensitive_headers_seen) = spawn_header_echo_provider().await;
+    let gateway = spawn_gateway(config_for(
+        BTreeMap::from([(
+            "local".to_owned(),
+            provider(format!("http://{provider_address}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "local".to_owned(),
+            model: "upstream-model".to_owned(),
+        }],
+    ))
+    .await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .header(header::AUTHORIZATION, "Bearer caller-secret")
+        .header(header::COOKIE, "session=caller-secret")
+        .header("x-forwarded-for", "198.51.100.10")
+        .json(&json!({"model": "smoke", "messages": []}))
+        .send()
+        .await
+        .expect("header response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(sensitive_headers_seen.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
