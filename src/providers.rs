@@ -143,6 +143,20 @@ impl BuiltinProvider {
         self.definition().id
     }
 
+    pub fn from_profile_id(id: Option<ProviderProfileId>) -> Self {
+        match id.unwrap_or(ProviderProfileId::Custom) {
+            ProviderProfileId::Custom => Self::Custom,
+            ProviderProfileId::OpenRouter => Self::OpenRouter,
+            ProviderProfileId::Ollama => Self::Ollama,
+            ProviderProfileId::LmStudio => Self::LmStudio,
+            ProviderProfileId::OpenaiApi => Self::OpenaiApi,
+            ProviderProfileId::Deepseek => Self::Deepseek,
+            ProviderProfileId::Fireworks => Self::Fireworks,
+            ProviderProfileId::Novita => Self::Novita,
+            ProviderProfileId::Zai => Self::Zai,
+        }
+    }
+
     pub fn config_key(self) -> &'static str {
         match self {
             Self::Custom => "custom",

@@ -47,7 +47,11 @@ struct SetupArgs {
 
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
-    Check,
+    Check {
+        #[arg(long, help = "Explicitly contact configured providers")]
+        online: bool,
+    },
+    Show,
 }
 
 #[derive(Debug, Subcommand)]
@@ -64,8 +68,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match cli.command {
         Command::Setup(args) => setup(args)?,
         Command::Config {
-            command: ConfigCommand::Check,
-        } => config_check()?,
+            command: ConfigCommand::Check { online },
+        } => config_check(online)?,
+        Command::Config {
+            command: ConfigCommand::Show,
+        } => config_show()?,
         Command::Credentials { command } => credentials(command)?,
         Command::Serve => serve().await?,
     }
@@ -115,6 +122,57 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
     } else {
         "127.0.0.1:11434".to_owned()
     };
+
+    if original.is_some() {
+        let actions = [
+            "Add provider or fallback target",
+            "Remove provider",
+            "Remove model alias",
+            "Cancel",
+        ];
+        match Select::new()
+            .with_prompt("Existing configuration action")
+            .items(&actions)
+            .default(0)
+            .interact()?
+        {
+            1 => {
+                let name: String = Input::new()
+                    .with_prompt("Provider name to remove")
+                    .interact_text()?;
+                if config
+                    .models
+                    .values()
+                    .flat_map(|model| model.targets.iter())
+                    .any(|target| target.provider == name)
+                {
+                    return Err(format!(
+                        "provider '{name}' is still referenced by a model alias; remove its targets first"
+                    )
+                    .into());
+                }
+                config.providers.remove(&name);
+                config.validate_structure()?;
+                apply_pending_secrets(&resolver, &config_path, &config, pending_secrets)?;
+                println!("Removed provider '{name}'");
+                return Ok(());
+            }
+            2 => {
+                let alias: String = Input::new()
+                    .with_prompt("Model alias to remove")
+                    .interact_text()?;
+                if config.models.remove(&alias).is_none() {
+                    return Err(format!("model alias '{alias}' does not exist").into());
+                }
+                config.validate_structure()?;
+                apply_pending_secrets(&resolver, &config_path, &config, pending_secrets)?;
+                println!("Removed model alias '{alias}'");
+                return Ok(());
+            }
+            3 => return Err("configuration was not changed".into()),
+            _ => {}
+        }
+    }
 
     loop {
         let choices: Vec<&str> = BuiltinProvider::all()
@@ -173,6 +231,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
             None
         };
         let provider = profile.config(base_url, secret_name);
+        let mut discovered_models = Vec::new();
         if !args.offline {
             let key = provider.api_key_secret.as_deref().and_then(|name| {
                 pending_secrets
@@ -183,6 +242,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
             match profile.validate_and_fetch_models(&provider, key.as_deref()) {
                 Ok(models) if !models.is_empty() => {
                     println!("Discovered {} model(s)", models.len());
+                    discovered_models = models;
                 }
                 Ok(_) => println!("Provider returned no models; enter one manually."),
                 Err(error) => {
@@ -198,10 +258,27 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
             }
         }
         config.providers.insert(name.clone(), provider);
-        let model: String = Input::new()
-            .with_prompt("Upstream model ID")
-            .default(profile.suggested_model().to_owned())
-            .interact_text()?;
+        let model: String = if discovered_models.is_empty() {
+            Input::new()
+                .with_prompt("Upstream model ID")
+                .default(profile.suggested_model().to_owned())
+                .interact_text()?
+        } else {
+            let mut choices = discovered_models.clone();
+            choices.push("Enter model ID manually".to_owned());
+            let selection = Select::new()
+                .with_prompt("Upstream model ID")
+                .items(&choices)
+                .default(0)
+                .interact()?;
+            if selection == discovered_models.len() {
+                Input::new()
+                    .with_prompt("Upstream model ID")
+                    .interact_text()?
+            } else {
+                discovered_models[selection].clone()
+            }
+        };
         let alias: String = Input::new()
             .with_prompt("Public model alias")
             .default(name.clone())
@@ -337,13 +414,37 @@ fn config_diff(before: Option<&Config>, after: &Config) -> Result<String, Config
     }
 }
 
-fn config_check() -> Result<(), Box<dyn Error>> {
+fn config_check(online: bool) -> Result<(), Box<dyn Error>> {
     let path = Config::default_path();
     let resolver = SecretResolver::default();
     let config = Config::load(&path, &resolver)?;
     println!("Configuration is valid: {}", path.display());
     println!("Providers: {}", config.providers.len());
     println!("Aliases: {}", config.models.len());
+    if online {
+        for (name, provider) in &config.providers {
+            let profile = BuiltinProvider::from_profile_id(provider.profile);
+            let key = provider
+                .api_key_secret
+                .as_deref()
+                .and_then(|secret| resolver.get(secret).ok().flatten());
+            match profile.validate_and_fetch_models(provider, key.as_deref()) {
+                Ok(models) => println!(
+                    "Online provider check passed: {name} ({} models)",
+                    models.len()
+                ),
+                Err(error) => println!("Online provider check failed: {name} ({error})"),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn config_show() -> Result<(), Box<dyn Error>> {
+    let path = Config::default_path();
+    let config = Config::read(&path)?;
+    println!("# Canonical non-secret configuration: {}", path.display());
+    print!("{}", config.to_toml()?);
     Ok(())
 }
 
