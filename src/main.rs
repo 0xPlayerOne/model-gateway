@@ -34,6 +34,14 @@ enum Command {
         #[command(subcommand)]
         command: CredentialCommand,
     },
+    Healthcheck {
+        #[arg(
+            long,
+            default_value = "http://127.0.0.1:11434",
+            help = "Gateway base URL to probe"
+        )]
+        endpoint: String,
+    },
     Serve,
 }
 
@@ -74,7 +82,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
             command: ConfigCommand::Show,
         } => config_show()?,
         Command::Credentials { command } => credentials(command)?,
+        Command::Healthcheck { endpoint } => healthcheck(&endpoint)?,
         Command::Serve => serve().await?,
+    }
+    Ok(())
+}
+
+fn healthcheck(endpoint: &str) -> Result<(), Box<dyn Error>> {
+    let url = format!("{}/health/ready", endpoint.trim_end_matches('/'));
+    let response = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?
+        .get(url)
+        .send()?;
+    if !response.status().is_success() {
+        return Err("gateway health check failed".into());
     }
     Ok(())
 }

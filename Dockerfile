@@ -23,5 +23,7 @@ WORKDIR /app
 ENV MODEL_GATEWAY_CONFIG=/app/state/config.toml \
     RUST_LOG=info
 
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 CMD ["model-gateway", "healthcheck"]
+
 ENTRYPOINT ["model-gateway"]
 CMD ["serve"]

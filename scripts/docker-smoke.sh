@@ -62,6 +62,12 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "model-gateway", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
     environment:
       MODEL_GATEWAY_CONFIG: /app/state/config.toml
       MODEL_GATEWAY_CONTAINER_MODE: "1"
@@ -107,6 +113,13 @@ for _ in $(seq 1 100); do
     sleep 0.2
 done
 curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/health/ready" >/dev/null
+for _ in $(seq 1 30); do
+    if [ "$(docker inspect "$(docker compose -f "$STATE/compose.yml" ps -q gateway)" --format '{{.State.Health.Status}}')" = healthy ]; then
+        break
+    fi
+    sleep 0.2
+done
+test "$(docker inspect "$(docker compose -f "$STATE/compose.yml" ps -q gateway)" --format '{{.State.Health.Status}}')" = healthy
 curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/models" \
     | python3 -c 'import json,sys; assert json.load(sys.stdin)["data"][0]["id"] == "smoke"'
 

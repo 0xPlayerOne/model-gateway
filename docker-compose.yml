@@ -6,6 +6,12 @@ services:
         MODEL_GATEWAY_UID: "${MODEL_GATEWAY_UID:-1000}"
         MODEL_GATEWAY_GID: "${MODEL_GATEWAY_GID:-1000}"
     command: ["serve"]
+    healthcheck:
+      test: ["CMD", "model-gateway", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
