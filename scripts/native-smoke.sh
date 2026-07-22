@@ -47,6 +47,8 @@ HOME="$STATE/home" \
 MODEL_GATEWAY_CONFIG="$STATE/config/config.toml" \
 MODEL_GATEWAY_SECRET_STORE=environment \
 LOCAL_API_KEY=fixture-secret \
+NO_PROXY=127.0.0.1,localhost \
+no_proxy=127.0.0.1,localhost \
     "$ROOT/target/release/model-gateway" serve >"$STATE/gateway.log" 2>&1 &
 GATEWAY_PID=$!
 
