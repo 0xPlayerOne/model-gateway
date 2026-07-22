@@ -79,13 +79,13 @@ curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/health/ready" >/dev/null
 
 MODELS=$(curl --silent --show-error --fail --retry 3 \
     "http://127.0.0.1:${GATEWAY_PORT}/v1/models")
-python3 -c 'import json,sys; assert json.loads(sys.argv[1])["data"][0]["id"] == "smoke"' "$MODELS"
+python3 -c 'import json,sys; assert [item["id"] for item in json.loads(sys.argv[1])["data"]][:2] == ["local", "smoke"]' "$MODELS"
 
 NON_STREAMING=$(curl --silent --show-error --fail --retry 3 \
     "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
     -d '{"model":"smoke","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"fixture"}}]}')
-python3 -c 'import json,sys; assert json.loads(sys.argv[1])["choices"][0]["message"]["content"] == "smoke-ok"' "$NON_STREAMING"
+python3 -c 'import json,sys; content=json.loads(sys.argv[1])["choices"][0]["message"]["content"]; assert content.startswith("smoke-ok\n-")' "$NON_STREAMING"
 
 curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \

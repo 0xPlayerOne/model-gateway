@@ -37,7 +37,7 @@ enum Command {
     Healthcheck {
         #[arg(
             long,
-            default_value = "http://127.0.0.1:11434",
+            default_value = "http://127.0.0.1:8008",
             help = "Gateway base URL to probe"
         )]
         endpoint: String,
@@ -139,9 +139,14 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
         Exposure::Loopback
     };
     config.server.bind = if args.docker {
-        "0.0.0.0:11434".to_owned()
+        "0.0.0.0:8008".to_owned()
     } else {
-        "127.0.0.1:11434".to_owned()
+        "127.0.0.1:8008".to_owned()
+    };
+    config.server.local_base_url = if args.docker {
+        "http://host.docker.internal:8000/v1".to_owned()
+    } else {
+        "http://127.0.0.1:8000/v1".to_owned()
     };
 
     if original.is_some() {
@@ -343,15 +348,15 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
         "Aliases: {}",
         config.models.keys().cloned().collect::<Vec<_>>().join(", ")
     );
-    let endpoint = "http://127.0.0.1:11434/v1";
+    let endpoint = "http://127.0.0.1:8008/v1";
     let default_alias = config.models.keys().next().expect("validated alias");
     println!("Hermes custom-endpoint YAML:");
     println!("model:");
     println!("  provider: custom");
     println!("  base_url: {endpoint}");
     println!("  default: {default_alias}");
-    println!("curl http://127.0.0.1:11434/health/live");
-    println!("curl http://127.0.0.1:11434/v1/models");
+    println!("curl http://127.0.0.1:8008/health/live");
+    println!("curl http://127.0.0.1:8008/v1/models");
     Ok(())
 }
 

@@ -25,7 +25,7 @@ services:
       MODEL_GATEWAY_CONTAINER_MODE: "1"
       RUST_LOG: info
     ports:
-      - "127.0.0.1:11434:11434"
+      - "127.0.0.1:8008:8008"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

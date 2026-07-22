@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +15,7 @@ use reqwest::Client;
 use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
 
 use crate::config::{Config, ProviderConfig, TargetConfig};
@@ -24,6 +24,7 @@ use crate::secrets::{SecretError, SecretResolver};
 
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
+const LOCAL_RUNTIME_PROVIDER: &str = "\0local";
 
 #[derive(Debug, Error)]
 pub enum GatewayBuildError {
@@ -40,6 +41,12 @@ pub struct AppState {
     pub config: Arc<Config>,
     providers: Arc<BTreeMap<String, ProviderRuntime>>,
     global_permits: Arc<Semaphore>,
+    local_model: Arc<Mutex<Option<CachedLocalModel>>>,
+}
+
+struct CachedLocalModel {
+    model: String,
+    expires_at: Instant,
 }
 
 struct ProviderRuntime {
@@ -105,10 +112,37 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
             },
         );
     }
+    let local_config = ProviderConfig {
+        base_url: config.server.local_base_url.clone(),
+        allow_insecure_http: config
+            .server
+            .local_base_url
+            .starts_with("http://host.docker.internal"),
+        ..ProviderConfig::default()
+    };
+    let local_client = Client::builder()
+        .connect_timeout(Duration::from_secs(local_config.connect_timeout_seconds))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("model-gateway/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| GatewayBuildError::Client {
+            provider: "local".to_owned(),
+            message: error.to_string(),
+        })?;
+    providers.insert(
+        LOCAL_RUNTIME_PROVIDER.to_owned(),
+        ProviderRuntime {
+            config: local_config,
+            api_key: None,
+            client: local_client,
+            permits: Arc::new(Semaphore::new(config.server.max_in_flight)),
+        },
+    );
     let state = AppState {
         global_permits: Arc::new(Semaphore::new(config.server.max_in_flight)),
         config: Arc::new(config),
         providers: Arc::new(providers),
+        local_model: Arc::new(Mutex::new(None)),
     };
     Ok(Router::new()
         .route("/health/live", get(health_live))
@@ -174,10 +208,17 @@ async fn health_ready(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
-    let data = state
-        .config
-        .models
-        .keys()
+    let mut ids = vec!["local".to_owned()];
+    ids.extend(
+        state
+            .config
+            .models
+            .keys()
+            .filter(|id| id.as_str() != "local")
+            .cloned(),
+    );
+    let data = ids
+        .into_iter()
         .map(|id| json!({"id": id, "object": "model", "owned_by": "model-gateway"}))
         .collect::<Vec<_>>();
     Json(json!({"object": "list", "data": data}))
@@ -311,7 +352,7 @@ async fn chat_completions(
             );
         }
     };
-    let targets = match resolve_targets(&state, &model) {
+    let targets = match resolve_targets(&state, &model).await {
         Ok(targets) => targets,
         Err((status, message, code)) => {
             log_request(&request_id, &model, "", status, started_at, is_stream, 0);
@@ -350,10 +391,14 @@ async fn chat_completions(
     };
     let mut attempts = 0usize;
     let mut last_error = None;
-    for target in targets {
+    let mut targets = targets;
+    let mut target_index = 0;
+    while target_index < targets.len() {
+        let target = targets[target_index].clone();
+        target_index += 1;
         attempts += 1;
         let mut target_request = request.clone();
-        let Some(provider) = state.providers.get(&target.provider) else {
+        let Some(provider) = state.providers.get(&target.runtime_provider) else {
             last_error = Some((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 HeaderMap::new(),
@@ -477,6 +522,7 @@ async fn chat_completions(
                     request_id,
                     alias: model,
                     provider: target.provider.clone(),
+                    model_metadata: ModelMetadata::from_target(&target, &request),
                     attempts,
                     idle_timeout_seconds: provider.config.stream_idle_timeout_seconds,
                     is_stream,
@@ -484,7 +530,8 @@ async fn chat_completions(
                     global_permit,
                     provider_permit,
                 },
-            );
+            )
+            .await;
         }
         let response_body = match read_bounded(
             response,
@@ -516,6 +563,19 @@ async fn chat_completions(
             }
         };
         drop(provider_permit);
+        if target.runtime_provider == LOCAL_RUNTIME_PROVIDER
+            && status == StatusCode::NOT_FOUND
+            && state.config.server.local_model.is_none()
+            && attempts == 1
+        {
+            *state.local_model.lock().await = None;
+            if let Ok(model) = resolve_local_model(&state).await {
+                targets.push(SelectedTarget {
+                    model,
+                    ..target.clone()
+                });
+            }
+        }
         if !is_fallback_status(status) {
             log_request(
                 &request_id,
@@ -587,31 +647,171 @@ async fn chat_completions(
     response
 }
 
-#[allow(clippy::single_match)]
-fn resolve_targets(
+#[derive(Clone)]
+struct SelectedTarget {
+    runtime_provider: String,
+    provider: String,
+    provider_display: String,
+    model: String,
+}
+
+async fn resolve_targets(
     state: &AppState,
     model: &str,
-) -> Result<Vec<TargetConfig>, (StatusCode, String, &'static str)> {
-    if let Some(config) = state.config.models.get(model) {
-        return Ok(config.targets.clone());
+) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
+    if model == "local" {
+        let local_model = resolve_local_model(state).await?;
+        return Ok(vec![SelectedTarget {
+            runtime_provider: LOCAL_RUNTIME_PROVIDER.to_owned(),
+            provider: "local".to_owned(),
+            provider_display: "Local".to_owned(),
+            model: local_model,
+        }]);
     }
-    match model.split_once('/') {
-        Some((provider_name, upstream_model)) => match state.config.providers.get(provider_name) {
-            Some(provider) if provider.allow_model_passthrough => {
-                return Ok(vec![TargetConfig {
+    if let Some(config) = state.config.models.get(model) {
+        return Ok(config
+            .targets
+            .iter()
+            .map(|target| selected_target(state, target))
+            .collect());
+    }
+    if let Some((provider_name, upstream_model)) = model.split_once('/') {
+        if state
+            .config
+            .providers
+            .get(provider_name)
+            .is_some_and(|provider| provider.allow_model_passthrough)
+        {
+            return Ok(vec![selected_target(
+                state,
+                &TargetConfig {
                     provider: provider_name.to_owned(),
                     model: upstream_model.to_owned(),
-                }]);
-            }
-            _ => {}
-        },
-        None => {}
+                },
+            )]);
+        }
     }
     Err((
         StatusCode::NOT_FOUND,
         format!("model '{model}' is not configured"),
         "model_not_found",
     ))
+}
+
+fn selected_target(state: &AppState, target: &TargetConfig) -> SelectedTarget {
+    let provider_display = state
+        .config
+        .providers
+        .get(&target.provider)
+        .and_then(|provider| provider.profile)
+        .map(|profile| profile.definition().display_name.to_owned())
+        .unwrap_or_else(|| target.provider.clone());
+    SelectedTarget {
+        runtime_provider: target.provider.clone(),
+        provider: target.provider.clone(),
+        provider_display,
+        model: target.model.clone(),
+    }
+}
+
+async fn resolve_local_model(
+    state: &AppState,
+) -> Result<String, (StatusCode, String, &'static str)> {
+    if let Some(model) = &state.config.server.local_model {
+        return Ok(model.clone());
+    }
+    let mut cache = state.local_model.lock().await;
+    if let Some(cached) = cache.as_ref() {
+        if cached.expires_at > Instant::now() {
+            return Ok(cached.model.clone());
+        }
+    }
+    let provider = state
+        .providers
+        .get(LOCAL_RUNTIME_PROVIDER)
+        .expect("local runtime is always built");
+    let url = format!("{}/models", provider.config.base_url.trim_end_matches('/'));
+    let response = timeout(
+        Duration::from_secs(provider.config.response_header_timeout_seconds),
+        provider.client.get(url).send(),
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "local model discovery timed out".to_owned(),
+            "local_model_unavailable",
+        )
+    })?
+    .map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "local model endpoint is unavailable".to_owned(),
+            "local_model_unavailable",
+        )
+    })?;
+    if !response.status().is_success() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("local model discovery returned HTTP {}", response.status()),
+            "local_model_unavailable",
+        ));
+    }
+    let body = read_bounded(
+        response,
+        Duration::from_secs(provider.config.stream_idle_timeout_seconds),
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "local model catalog could not be read".to_owned(),
+            "local_model_unavailable",
+        )
+    })?;
+    let value: Value = serde_json::from_slice(&body).map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "local model catalog was invalid JSON".to_owned(),
+            "local_model_unavailable",
+        )
+    })?;
+    let models = value
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(Value::as_str))
+                .filter(|id| !id.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let model = match models.as_slice() {
+        [model] => model.clone(),
+        [] => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "local endpoint reported no loaded models; set MODEL_GATEWAY_LOCAL_MODEL"
+                    .to_owned(),
+                "local_model_unavailable",
+            ));
+        }
+        _ => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "local endpoint reported multiple models; set MODEL_GATEWAY_LOCAL_MODEL".to_owned(),
+                "local_model_ambiguous",
+            ));
+        }
+    };
+    *cache = Some(CachedLocalModel {
+        model: model.clone(),
+        expires_at: Instant::now()
+            + Duration::from_secs(state.config.server.local_model_cache_seconds),
+    });
+    Ok(model)
 }
 
 async fn read_bounded(
@@ -650,6 +850,7 @@ struct StreamContext {
     request_id: String,
     alias: String,
     provider: String,
+    model_metadata: ModelMetadata,
     attempts: usize,
     idle_timeout_seconds: u64,
     is_stream: bool,
@@ -658,7 +859,85 @@ struct StreamContext {
     provider_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
-fn relay_response(
+#[derive(Clone)]
+struct ModelMetadata {
+    upstream_model: String,
+    family: String,
+    display: String,
+    reasoning_effort: String,
+    provider_display: String,
+}
+
+impl ModelMetadata {
+    fn from_target(target: &SelectedTarget, request: &Value) -> Self {
+        let (family, display) = model_name_parts(&target.model);
+        let effort = request
+            .get("reasoning_effort")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                request
+                    .get("reasoning")
+                    .and_then(|reasoning| reasoning.get("effort"))
+                    .and_then(Value::as_str)
+            })
+            .map(title_word)
+            .unwrap_or_else(|| "Default".to_owned());
+        Self {
+            upstream_model: target.model.clone(),
+            family,
+            display,
+            reasoning_effort: effort,
+            provider_display: target.provider_display.clone(),
+        }
+    }
+
+    fn footer(&self) -> String {
+        format!(
+            "- {}: {} {}, {}",
+            self.family, self.display, self.reasoning_effort, self.provider_display
+        )
+    }
+}
+
+fn model_name_parts(model: &str) -> (String, String) {
+    let model = model.rsplit('/').next().unwrap_or(model);
+    let mut parts = model.split(['-', ':']).filter(|part| !part.is_empty());
+    let first = parts.next().unwrap_or("Model");
+    let family = match first.to_ascii_lowercase().as_str() {
+        "gpt" => "GPT".to_owned(),
+        "mtplx" => "MTPLX".to_owned(),
+        "glm" => "GLM".to_owned(),
+        other
+            if other.len() <= 5
+                && other
+                    .chars()
+                    .all(|character| character.is_ascii_alphabetic()) =>
+        {
+            other.to_ascii_uppercase()
+        }
+        _ => title_word(first),
+    };
+    let remainder = parts.map(title_word).collect::<Vec<_>>();
+    let display = if remainder.is_empty() {
+        title_word(first)
+    } else {
+        remainder.join(" ")
+    };
+    (family, display)
+}
+
+fn title_word(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    let mut characters = lower.chars();
+    match characters.next() {
+        Some(first) if first.is_ascii_alphabetic() => {
+            format!("{}{}", first.to_ascii_uppercase(), characters.as_str())
+        }
+        Some(_) | None => value.to_owned(),
+    }
+}
+
+async fn relay_response(
     response: reqwest::Response,
     status: StatusCode,
     upstream_headers: HeaderMap,
@@ -669,6 +948,7 @@ fn relay_response(
         request_id,
         alias,
         provider,
+        model_metadata,
         attempts,
         is_stream,
         started_at,
@@ -676,6 +956,79 @@ fn relay_response(
         provider_permit,
         ..
     } = context;
+    if !is_stream {
+        let body = match read_bounded(response, idle_timeout).await {
+            Ok(body) => body,
+            Err(_) => {
+                drop(provider_permit);
+                drop(global_permit);
+                log_request(
+                    &request_id,
+                    &alias,
+                    &provider,
+                    StatusCode::BAD_GATEWAY,
+                    started_at,
+                    false,
+                    attempts.saturating_sub(1),
+                );
+                return selected_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    request_id,
+                    "upstream response body failed",
+                    &alias,
+                    &provider,
+                    attempts,
+                );
+            }
+        };
+        let body = match decorate_json_response(&body, &model_metadata.footer()) {
+            Ok(body) => body,
+            Err(message) => {
+                drop(provider_permit);
+                drop(global_permit);
+                log_request(
+                    &request_id,
+                    &alias,
+                    &provider,
+                    StatusCode::BAD_GATEWAY,
+                    started_at,
+                    false,
+                    attempts.saturating_sub(1),
+                );
+                return selected_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    request_id,
+                    message,
+                    &alias,
+                    &provider,
+                    attempts,
+                );
+            }
+        };
+        drop(provider_permit);
+        drop(global_permit);
+        log_request(
+            &request_id,
+            &alias,
+            &provider,
+            status,
+            started_at,
+            false,
+            attempts.saturating_sub(1),
+        );
+        let mut downstream = Response::new(body.into());
+        *downstream.status_mut() = status;
+        copy_safe_headers(&upstream_headers, downstream.headers_mut());
+        add_gateway_headers(
+            downstream.headers_mut(),
+            request_id,
+            &alias,
+            &provider,
+            attempts.saturating_sub(1),
+        );
+        add_model_headers(downstream.headers_mut(), &model_metadata);
+        return downstream;
+    }
     let request_log = RequestLog {
         request_id: request_id.clone(),
         alias: alias.clone(),
@@ -686,15 +1039,30 @@ fn relay_response(
         fallbacks: attempts.saturating_sub(1),
     };
     let mut upstream = response.bytes_stream();
+    let footer = model_metadata.footer();
     let stream = async_stream::stream! {
+        let mut buffer = Vec::new();
+        let mut choices = BTreeMap::new();
         loop {
             match timeout(idle_timeout, upstream.next()).await {
-                Ok(Some(Ok(chunk))) => yield Ok::<Bytes, std::io::Error>(chunk),
+                Ok(Some(Ok(chunk))) => {
+                    buffer.extend_from_slice(&chunk);
+                    while let Some(event) = take_sse_event(&mut buffer) {
+                        for transformed in transform_sse_event(&event, &footer, &mut choices) {
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from(transformed));
+                        }
+                    }
+                }
                 Ok(Some(Err(error))) => {
                     yield Err(std::io::Error::other(error));
                     break;
                 }
-                Ok(None) => break,
+                Ok(None) => {
+                    if !buffer.is_empty() {
+                        yield Ok::<Bytes, std::io::Error>(Bytes::from(std::mem::take(&mut buffer)));
+                    }
+                    break;
+                },
                 Err(_) => {
                     yield Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
@@ -718,12 +1086,170 @@ fn relay_response(
         &provider,
         attempts.saturating_sub(1),
     );
+    add_model_headers(response.headers_mut(), &model_metadata);
     if is_stream {
         response
             .headers_mut()
             .insert("x-accel-buffering", HeaderValue::from_static("no"));
     }
     response
+}
+
+fn decorate_json_response(body: &[u8], footer: &str) -> Result<Bytes, &'static str> {
+    let mut value: Value = serde_json::from_slice(body)
+        .map_err(|_| "upstream returned invalid Chat Completions JSON")?;
+    let choices = value
+        .get_mut("choices")
+        .and_then(Value::as_array_mut)
+        .ok_or("upstream response did not contain Chat Completions choices")?;
+    for choice in choices {
+        let Some(content) = choice
+            .get_mut("message")
+            .and_then(|message| message.get_mut("content"))
+            .and_then(|content| content.as_str())
+            .map(ToOwned::to_owned)
+        else {
+            continue;
+        };
+        if content.is_empty() || content.trim_end().ends_with(footer) {
+            continue;
+        }
+        let decorated = format!("{content}\n{footer}");
+        choice["message"]["content"] = Value::String(decorated);
+    }
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map_err(|_| "upstream response could not be decorated")
+}
+
+#[derive(Default)]
+struct StreamChoice {
+    tail: String,
+    saw_content: bool,
+    appended: bool,
+    source: Option<Value>,
+}
+
+fn take_sse_event(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let (position, delimiter_len) =
+        if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            (position, 4)
+        } else if let Some(position) = buffer.windows(2).position(|window| window == b"\n\n") {
+            (position, 2)
+        } else {
+            return None;
+        };
+    Some(buffer.drain(..position + delimiter_len).collect())
+}
+
+fn transform_sse_event(
+    event: &[u8],
+    footer: &str,
+    choices: &mut BTreeMap<u64, StreamChoice>,
+) -> Vec<Vec<u8>> {
+    let text = match std::str::from_utf8(event) {
+        Ok(text) => text,
+        Err(_) => return vec![event.to_vec()],
+    };
+    let line_ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let payload = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if payload.is_empty() {
+        return vec![event.to_vec()];
+    }
+    if payload.trim() == "[DONE]" {
+        let pending = choices
+            .iter()
+            .filter_map(|(index, state)| {
+                (state.saw_content && !state.appended && !state.tail.trim_end().ends_with(footer))
+                    .then_some(*index)
+            })
+            .collect::<Vec<_>>();
+        let mut output = pending
+            .into_iter()
+            .map(|index| {
+                let state = choices.get_mut(&index).expect("known choice");
+                state.appended = true;
+                footer_sse_event(index, footer, line_ending, state.source.as_ref())
+            })
+            .collect::<Vec<_>>();
+        output.push(event.to_vec());
+        return output;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(&payload) else {
+        return vec![event.to_vec()];
+    };
+    let mut finishing = BTreeSet::new();
+    if let Some(items) = value.get("choices").and_then(Value::as_array) {
+        for item in items {
+            let index = item.get("index").and_then(Value::as_u64).unwrap_or(0);
+            let state = choices.entry(index).or_default();
+            state.source = Some(value.clone());
+            if let Some(content) = item
+                .get("delta")
+                .and_then(|delta| delta.get("content"))
+                .and_then(Value::as_str)
+            {
+                if !content.is_empty() {
+                    state.saw_content = true;
+                    state.tail.push_str(content);
+                    if state.tail.len() > footer.len() * 2 + 32 {
+                        let keep = footer.len() * 2 + 32;
+                        state.tail = state
+                            .tail
+                            .chars()
+                            .rev()
+                            .take(keep)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
+                    }
+                }
+            }
+            if item
+                .get("finish_reason")
+                .is_some_and(|reason| !reason.is_null())
+                && state.saw_content
+                && !state.appended
+                && !state.tail.trim_end().ends_with(footer)
+            {
+                finishing.insert(index);
+            }
+        }
+    }
+    let mut output = finishing
+        .into_iter()
+        .map(|index| {
+            choices.get_mut(&index).expect("known choice").appended = true;
+            footer_sse_event(index, footer, line_ending, Some(&value))
+        })
+        .collect::<Vec<_>>();
+    output.push(event.to_vec());
+    output
+}
+
+fn footer_sse_event(
+    index: u64,
+    footer: &str,
+    line_ending: &str,
+    source: Option<&Value>,
+) -> Vec<u8> {
+    let mut value = json!({
+        "object": "chat.completion.chunk",
+        "choices": [{"index": index, "delta": {"content": format!("\n{footer}")}}]
+    });
+    if let (Some(source), Some(object)) = (source, value.as_object_mut()) {
+        for key in ["id", "created", "model", "system_fingerprint"] {
+            if let Some(field) = source.get(key) {
+                object.insert(key.to_owned(), field.clone());
+            }
+        }
+    }
+    format!("data: {}{line_ending}{line_ending}", value).into_bytes()
 }
 
 struct RequestLog {
@@ -805,7 +1331,6 @@ fn upstream_error_response(
 fn copy_safe_headers(source: &HeaderMap, target: &mut HeaderMap) {
     for name in [
         "content-type",
-        "content-length",
         "cache-control",
         "retry-after",
         "x-request-id",
@@ -817,6 +1342,17 @@ fn copy_safe_headers(source: &HeaderMap, target: &mut HeaderMap) {
             target.insert(HeaderName::from_static(name), value.clone());
         }
     }
+}
+
+fn add_model_headers(headers: &mut HeaderMap, metadata: &ModelMetadata) {
+    headers.insert(
+        "x-model-gateway-model",
+        header_value(&metadata.upstream_model),
+    );
+    headers.insert(
+        "x-model-gateway-reasoning-effort",
+        header_value(&metadata.reasoning_effort),
+    );
 }
 
 fn add_gateway_headers(
@@ -912,11 +1448,15 @@ fn error_response(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
-    use super::{is_fallback_status, log_request, request_id};
+    use super::{
+        StreamChoice, decorate_json_response, is_fallback_status, log_request, request_id,
+        take_sse_event, transform_sse_event,
+    };
     use axum::http::{HeaderMap, StatusCode};
     use tracing_subscriber::fmt::MakeWriter;
 
@@ -993,5 +1533,64 @@ mod tests {
         assert!(!output.contains("messages"));
         assert!(!output.contains("authorization"));
         assert!(!output.contains("tool_calls"));
+    }
+
+    #[test]
+    fn decorates_terminal_json_text_once_and_skips_tool_only_choices() {
+        let footer = "- GPT: 5.6 Sol Medium, Kilo Code";
+        let body = serde_json::json!({
+            "id": "fixture",
+            "choices": [
+                {"message": {"content": "answer"}, "finish_reason": "stop"},
+                {"message": {"content": null, "tool_calls": [{"id": "call"}]}, "finish_reason": "tool_calls"},
+                {"message": {"content": format!("already\n{footer}")}, "finish_reason": "stop"}
+            ],
+            "unknown": {"preserved": true}
+        });
+        let decorated = decorate_json_response(&serde_json::to_vec(&body).expect("body"), footer)
+            .expect("decorated response");
+        let value: serde_json::Value = serde_json::from_slice(&decorated).expect("json");
+        assert_eq!(
+            value["choices"][0]["message"]["content"],
+            format!("answer\n{footer}")
+        );
+        assert!(value["choices"][1]["message"]["content"].is_null());
+        assert_eq!(
+            value["choices"][2]["message"]["content"],
+            format!("already\n{footer}")
+        );
+        assert_eq!(value["unknown"]["preserved"], true);
+    }
+
+    #[test]
+    fn frames_split_sse_and_injects_footer_before_finish() {
+        let footer = "- GPT: 5.6 Sol Medium, Kilo Code";
+        let mut buffer =
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n".to_vec();
+        assert!(take_sse_event(&mut buffer).is_none());
+        buffer.extend_from_slice(
+            b"\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        );
+        let first = take_sse_event(&mut buffer).expect("first event");
+        let second = take_sse_event(&mut buffer).expect("second event");
+        let mut state = BTreeMap::<u64, StreamChoice>::new();
+        let first_output = transform_sse_event(&first, footer, &mut state);
+        assert_eq!(first_output, vec![first]);
+        let second_output = transform_sse_event(&second, footer, &mut state);
+        assert_eq!(second_output.len(), 2);
+        assert!(String::from_utf8_lossy(&second_output[0]).contains(footer));
+        assert!(String::from_utf8_lossy(&second_output[1]).contains("finish_reason"));
+    }
+
+    #[test]
+    fn sse_done_decorates_unfinished_text_without_duplicates() {
+        let footer = "- Local: Model Default, Local";
+        let mut state = BTreeMap::<u64, StreamChoice>::new();
+        let content = format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"answer\\n{footer}\"}}}}]}}\n\n"
+        );
+        let _ = transform_sse_event(content.as_bytes(), footer, &mut state);
+        let output = transform_sse_event(b"data: [DONE]\n\n", footer, &mut state);
+        assert_eq!(output, vec![b"data: [DONE]\n\n".to_vec()]);
     }
 }

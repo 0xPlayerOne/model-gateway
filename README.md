@@ -24,8 +24,8 @@ Hermes can use the gateway as a custom endpoint:
 ```yaml
 model:
   provider: custom
-  base_url: http://127.0.0.1:11434/v1
-  default: <alias-from-setup>
+  base_url: http://127.0.0.1:8008/v1
+  default: local
 ```
 
 ## Docker quickstart
@@ -41,7 +41,7 @@ docker compose up --build gateway
 ```
 
 The provider secrets live in a Docker named volume mounted read-only by the
-server. The host port is fixed to `127.0.0.1:11434`; do not broaden it without
+server. The host port is fixed to `127.0.0.1:8008`; do not broaden it without
 designing caller authentication. `docker compose down -v` deletes the local
 credential volume.
 
@@ -52,13 +52,21 @@ For Ollama or LM Studio on the host, configure the endpoint as
 ## Verification
 
 ```bash
-curl http://127.0.0.1:11434/health/live
-curl http://127.0.0.1:11434/v1/models
+curl http://127.0.0.1:8008/health/live
+curl http://127.0.0.1:8008/v1/models
 ```
 
 Set `MODEL_GATEWAY_LOG_FORMAT=json` for structured logs. Both text and JSON
 formats contain fixed request metadata only; prompts, responses, tools,
 credentials, and arbitrary upstream errors are never logged.
+
+The built-in `local` model relays the only model reported by an OpenAI-compatible
+endpoint at `http://127.0.0.1:8000/v1`. Set `MODEL_GATEWAY_LOCAL_BASE_URL` and
+`MODEL_GATEWAY_LOCAL_MODEL` when the endpoint or loaded model is different, and
+`MODEL_GATEWAY_BIND` to override the gateway bind. If the local catalog reports
+multiple models, an explicit model is required. Terminal assistant text is
+decorated with one final model, reasoning-effort, and provider line; this
+gateway-added text is not included in upstream token usage.
 
 ## Supported Profiles
 

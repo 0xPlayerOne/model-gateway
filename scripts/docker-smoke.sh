@@ -24,7 +24,7 @@ trap cleanup EXIT
 mkdir -p "$STATE/state"
 cat > "$STATE/state/config.toml" <<EOF
 [server]
-bind = "0.0.0.0:11434"
+bind = "0.0.0.0:8008"
 exposure = "local_container"
 max_body_bytes = 33554432
 max_in_flight = 8
@@ -73,7 +73,7 @@ services:
       MODEL_GATEWAY_CONTAINER_MODE: "1"
       MODEL_GATEWAY_SECRET_DIR: /run/model-gateway/secrets
     ports:
-       - "127.0.0.1:${GATEWAY_PORT}:11434"
+       - "127.0.0.1:${GATEWAY_PORT}:8008"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -121,7 +121,7 @@ for _ in $(seq 1 30); do
 done
 test "$(docker inspect "$(docker compose -f "$STATE/compose.yml" ps -q gateway)" --format '{{.State.Health.Status}}')" = healthy
 curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/models" \
-    | python3 -c 'import json,sys; assert json.load(sys.stdin)["data"][0]["id"] == "smoke"'
+    | python3 -c 'import json,sys; assert [item["id"] for item in json.load(sys.stdin)["data"]][:2] == ["local", "smoke"]'
 
 curl --silent --show-error --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \

@@ -8,7 +8,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::Json;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Router, serve};
 use futures_util::{StreamExt, stream};
 use model_gateway::config::{Config, ModelConfig, ProviderConfig, ServerConfig, TargetConfig};
@@ -30,6 +30,58 @@ async fn spawn_provider(response: ProviderResponse) -> SocketAddr {
     spawn_router(router).await
 }
 
+async fn spawn_local_provider(models: Vec<&'static str>) -> SocketAddr {
+    let router = Router::new()
+        .route(
+            "/v1/models",
+            get(move || async move {
+                Json(json!({
+                    "object": "list",
+                    "data": models
+                        .iter()
+                        .map(|model| json!({"id": model, "object": "model"}))
+                        .collect::<Vec<_>>()
+                }))
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(|Json(body): Json<Value>| async move { ProviderResponse::Success.respond(body) }),
+        );
+    spawn_router(router).await
+}
+
+async fn spawn_reloading_local_provider() -> (SocketAddr, Arc<AtomicUsize>) {
+    let discoveries = Arc::new(AtomicUsize::new(0));
+    let get_discoveries = discoveries.clone();
+    let router = Router::new()
+        .route(
+            "/v1/models",
+            get(move || {
+                let discoveries = get_discoveries.clone();
+                async move {
+                    let model = if discoveries.fetch_add(1, Ordering::SeqCst) == 0 {
+                        "unloaded-model"
+                    } else {
+                        "loaded-model"
+                    };
+                    Json(json!({"object": "list", "data": [{"id": model}]}))
+                }
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                if body["model"] == "unloaded-model" {
+                    return ProviderResponse::Failure(StatusCode::NOT_FOUND, "model unloaded")
+                        .respond(body);
+                }
+                ProviderResponse::Success.respond(body)
+            }),
+        );
+    (spawn_router(router).await, discoveries)
+}
+
 async fn spawn_header_echo_provider() -> (SocketAddr, Arc<AtomicUsize>) {
     let authorization_seen = Arc::new(AtomicUsize::new(0));
     let seen = authorization_seen.clone();
@@ -44,7 +96,10 @@ async fn spawn_header_echo_provider() -> (SocketAddr, Arc<AtomicUsize>) {
                 {
                     seen.fetch_add(1, Ordering::SeqCst);
                 }
-                Json(json!({"model": body["model"]}))
+                Json(json!({
+                    "model": body["model"],
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]
+                }))
             }
         }),
     );
@@ -184,7 +239,10 @@ async fn forwards_json_and_tools_without_rewriting_response_model() {
     assert_eq!(response.headers()["x-model-gateway-provider"], "local");
     let body: Value = response.json().await.expect("json response");
     assert_eq!(body["model"], "upstream-model");
-    assert_eq!(body["choices"][0]["message"]["content"], "ok");
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "ok\n- Upstream: Model Default, local"
+    );
 }
 
 #[tokio::test]
@@ -241,6 +299,7 @@ async fn streams_sse_and_falls_back_before_output() {
             .starts_with("text/event-stream")
     );
     let body = response.text().await.expect("stream body");
+    assert!(body.contains("- Second: Model Default, second"));
     assert!(body.contains("data: [DONE]"));
 }
 
@@ -351,7 +410,8 @@ async fn model_and_health_endpoints_are_detail_free() {
         .json()
         .await
         .expect("models json");
-    assert_eq!(models["data"][0]["id"], "smoke");
+    assert_eq!(models["data"][0]["id"], "local");
+    assert_eq!(models["data"][1]["id"], "smoke");
     let ready: Value = client
         .get(format!("{gateway}/health/ready"))
         .send()
@@ -361,6 +421,98 @@ async fn model_and_health_endpoints_are_detail_free() {
         .await
         .expect("ready json");
     assert_eq!(ready, json!({"status": "ready"}));
+}
+
+#[tokio::test]
+async fn local_route_discovers_the_only_loaded_model() {
+    let local = spawn_local_provider(vec!["mtplx-7b"]).await;
+    let configured = spawn_provider(ProviderResponse::Success).await;
+    let mut config = config_for(
+        BTreeMap::from([(
+            "configured".to_owned(),
+            provider(format!("http://{configured}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "configured".to_owned(),
+            model: "configured-model".to_owned(),
+        }],
+    );
+    config.server.local_base_url = format!("http://{local}/v1");
+    let gateway = spawn_gateway(config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "local", "messages": [{"role": "user", "content": "hello"}]}))
+        .send()
+        .await
+        .expect("local response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-alias"], "local");
+    assert_eq!(response.headers()["x-model-gateway-provider"], "local");
+    let body: Value = response.json().await.expect("local json");
+    assert_eq!(body["model"], "mtplx-7b");
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "ok\n- MTPLX: 7b Default, Local"
+    );
+}
+
+#[tokio::test]
+async fn local_route_rejects_ambiguous_discovery() {
+    let local = spawn_local_provider(vec!["first", "second"]).await;
+    let configured = spawn_provider(ProviderResponse::Success).await;
+    let mut config = config_for(
+        BTreeMap::from([(
+            "configured".to_owned(),
+            provider(format!("http://{configured}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "configured".to_owned(),
+            model: "configured-model".to_owned(),
+        }],
+    );
+    config.server.local_base_url = format!("http://{local}/v1");
+    let gateway = spawn_gateway(config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "local", "messages": []}))
+        .send()
+        .await
+        .expect("ambiguous local response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response.json().await.expect("local error json");
+    assert_eq!(body["error"]["code"], "local_model_ambiguous");
+}
+
+#[tokio::test]
+async fn local_route_rediscovers_after_model_not_found() {
+    let (local, discoveries) = spawn_reloading_local_provider().await;
+    let configured = spawn_provider(ProviderResponse::Success).await;
+    let mut config = config_for(
+        BTreeMap::from([(
+            "configured".to_owned(),
+            provider(format!("http://{configured}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "configured".to_owned(),
+            model: "configured-model".to_owned(),
+        }],
+    );
+    config.server.local_base_url = format!("http://{local}/v1");
+    let gateway = spawn_gateway(config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "local", "messages": []}))
+        .send()
+        .await
+        .expect("reloaded local response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-fallbacks"], "1");
+    let body: Value = response.json().await.expect("reloaded local json");
+    assert_eq!(body["model"], "loaded-model");
+    assert_eq!(discoveries.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -430,7 +582,11 @@ async fn preserves_multimodal_and_unknown_fields_for_each_target() {
     let router = Router::new().route(
         "/v1/chat/completions",
         post(|Json(body): Json<Value>| async move {
-            Json(json!({"model": body["model"], "echo": body}))
+            Json(json!({
+                "model": body["model"],
+                "echo": body,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]
+            }))
         }),
     );
     let provider_address = spawn_router(router).await;

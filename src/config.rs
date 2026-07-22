@@ -55,6 +55,12 @@ pub struct ServerConfig {
     pub admission_timeout_ms: u64,
     #[serde(default = "default_shutdown_grace_seconds")]
     pub shutdown_grace_seconds: u64,
+    #[serde(default = "default_local_base_url")]
+    pub local_base_url: String,
+    #[serde(default)]
+    pub local_model: Option<String>,
+    #[serde(default = "default_local_model_cache_seconds")]
+    pub local_model_cache_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -163,6 +169,9 @@ impl Default for ServerConfig {
             max_in_flight: default_max_in_flight(),
             admission_timeout_ms: default_admission_timeout_ms(),
             shutdown_grace_seconds: default_shutdown_grace_seconds(),
+            local_base_url: default_local_base_url(),
+            local_model: None,
+            local_model_cache_seconds: default_local_model_cache_seconds(),
         }
     }
 }
@@ -177,9 +186,37 @@ impl Config {
     }
 
     pub fn load(path: impl AsRef<Path>, secrets: &SecretResolver) -> Result<Self, ConfigError> {
-        let config = Self::read(path)?;
+        let mut config = Self::read(path)?;
+        config.apply_environment_overrides(
+            env::var("MODEL_GATEWAY_BIND").ok().as_deref(),
+            env::var("MODEL_GATEWAY_LOCAL_BASE_URL").ok().as_deref(),
+            env::var("MODEL_GATEWAY_LOCAL_MODEL").ok().as_deref(),
+        )?;
         config.validate(secrets)?;
         Ok(config)
+    }
+
+    pub fn apply_environment_overrides(
+        &mut self,
+        bind: Option<&str>,
+        local_base_url: Option<&str>,
+        local_model: Option<&str>,
+    ) -> Result<(), ConfigError> {
+        if let Some(bind) = bind {
+            self.server.bind = bind.to_owned();
+        }
+        if let Some(local_base_url) = local_base_url {
+            self.server.local_base_url = local_base_url.to_owned();
+        }
+        if let Some(local_model) = local_model {
+            if local_model.trim().is_empty() || local_model.len() > 512 {
+                return Err(ConfigError::Invalid(
+                    "MODEL_GATEWAY_LOCAL_MODEL must be 1-512 non-whitespace characters".to_owned(),
+                ));
+            }
+            self.server.local_model = Some(local_model.to_owned());
+        }
+        Ok(())
     }
 
     pub fn validate(&self, secrets: &SecretResolver) -> Result<(), ConfigError> {
@@ -192,6 +229,33 @@ impl Config {
 
     fn validate_inner(&self, secrets: Option<&SecretResolver>) -> Result<(), ConfigError> {
         validate_server(&self.server)?;
+        validate_provider(
+            "local",
+            &ProviderConfig {
+                base_url: self.server.local_base_url.clone(),
+                allow_insecure_http: self
+                    .server
+                    .local_base_url
+                    .starts_with("http://host.docker.internal"),
+                ..ProviderConfig::default()
+            },
+            None,
+        )?;
+        if self.server.local_model_cache_seconds == 0 {
+            return Err(ConfigError::Invalid(
+                "local model cache duration must be greater than zero".to_owned(),
+            ));
+        }
+        if self
+            .server
+            .local_model
+            .as_ref()
+            .is_some_and(|model| model.trim().is_empty() || model.len() > 512)
+        {
+            return Err(ConfigError::Invalid(
+                "local model must be 1-512 non-whitespace characters".to_owned(),
+            ));
+        }
         if self.providers.is_empty() {
             return Err(ConfigError::Invalid(
                 "at least one provider is required".to_owned(),
@@ -207,6 +271,11 @@ impl Config {
         }
         for (alias, model) in &self.models {
             validate_identifier(alias, "model alias")?;
+            if alias == "local" {
+                return Err(ConfigError::Invalid(
+                    "model alias 'local' is reserved for the built-in local route".to_owned(),
+                ));
+            }
             if alias.contains('/') {
                 return Err(ConfigError::Invalid(format!(
                     "model alias '{alias}' must be non-empty and contain no '/': aliases are public names"
@@ -442,7 +511,11 @@ fn home_dir() -> PathBuf {
 }
 
 fn default_bind() -> String {
-    "127.0.0.1:11434".to_owned()
+    "127.0.0.1:8008".to_owned()
+}
+
+fn default_local_base_url() -> String {
+    "http://127.0.0.1:8000/v1".to_owned()
 }
 
 const fn default_max_body_bytes() -> usize {
@@ -459,6 +532,10 @@ const fn default_admission_timeout_ms() -> u64 {
 
 const fn default_shutdown_grace_seconds() -> u64 {
     30
+}
+
+const fn default_local_model_cache_seconds() -> u64 {
+    60
 }
 
 const fn default_connect_timeout_seconds() -> u64 {
@@ -524,6 +601,30 @@ mod tests {
     }
 
     #[test]
+    fn defaults_gateway_and_local_endpoint_to_distinct_ports() {
+        let server = ServerConfig::default();
+        assert_eq!(server.bind, "127.0.0.1:8008");
+        assert_eq!(server.local_base_url, "http://127.0.0.1:8000/v1");
+        assert_eq!(server.local_model, None);
+        assert!(server.local_model_cache_seconds > 0);
+    }
+
+    #[test]
+    fn environment_overrides_only_runtime_server_values() {
+        let mut config = valid_config("http://localhost:11434/v1");
+        config
+            .apply_environment_overrides(
+                Some("127.0.0.1:9008"),
+                Some("http://127.0.0.1:9000/v1"),
+                Some("fixture-local"),
+            )
+            .expect("environment overrides");
+        assert_eq!(config.server.bind, "127.0.0.1:9008");
+        assert_eq!(config.server.local_base_url, "http://127.0.0.1:9000/v1");
+        assert_eq!(config.server.local_model.as_deref(), Some("fixture-local"));
+    }
+
+    #[test]
     fn validates_alias_provider_references() {
         let mut config = Config {
             server: ServerConfig::default(),
@@ -543,6 +644,17 @@ mod tests {
             },
         );
         assert!(config.validate(&SecretResolver::default()).is_err());
+    }
+
+    #[test]
+    fn rejects_alias_that_shadows_the_local_route() {
+        let mut config = valid_config("http://localhost:11434/v1");
+        let model = config.models.remove("local-model").expect("fixture model");
+        config.models.insert("local".to_owned(), model);
+        let error = config
+            .validate(&SecretResolver::default())
+            .expect_err("reserved local alias");
+        assert!(error.to_string().contains("reserved"));
     }
 
     #[test]
