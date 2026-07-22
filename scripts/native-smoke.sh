@@ -74,7 +74,7 @@ for _ in $(seq 1 100); do
 done
 curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/health/ready" >/dev/null
 curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/models" \
-    | python3 -c 'import json,sys; assert [item["id"] for item in json.load(sys.stdin)["data"]][:3] == ["local", "auto-free", "smoke"]'
+    | python3 -c 'import json,sys; assert [item["id"] for item in json.load(sys.stdin)["data"]][:4] == ["local", "auto-free", "auto-efficient", "smoke"]'
 curl --silent --show-error --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
     -d '{"model":"smoke","messages":[]}' \
