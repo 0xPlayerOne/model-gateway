@@ -138,6 +138,7 @@ impl ProviderResponse {
                 "id": "chatcmpl-smoke",
                 "object": "chat.completion",
                 "model": body["model"],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
             }))
             .into_response(),
@@ -169,9 +170,9 @@ impl ProviderResponse {
             }
             Self::TimedStream => {
                 let chunks = async_stream::stream! {
-                    yield Ok::<Bytes, Infallible>(Bytes::from_static(b"data: one\n\n"));
+                    yield Ok::<Bytes, Infallible>(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n"));
                     tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-                    yield Ok::<Bytes, Infallible>(Bytes::from_static(b"data: two\n\n"));
+                    yield Ok::<Bytes, Infallible>(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"));
                     tokio::time::sleep(std::time::Duration::from_millis(700)).await;
                     yield Ok::<Bytes, Infallible>(Bytes::from_static(b"data: [DONE]\n\n"));
                 };
@@ -612,6 +613,8 @@ async fn auto_free_filters_catalog_capability_mismatches() {
                 supports_tools: Some(false),
                 supports_vision: Some(false),
                 supports_structured_output: Some(false),
+                input_price_per_million: None,
+                output_price_per_million: None,
             }],
         )
         .expect("unsupported catalog");
@@ -625,6 +628,8 @@ async fn auto_free_filters_catalog_capability_mismatches() {
                 supports_tools: Some(true),
                 supports_vision: Some(false),
                 supports_structured_output: Some(true),
+                input_price_per_million: None,
+                output_price_per_million: None,
             }],
         )
         .expect("supported catalog");
@@ -825,6 +830,8 @@ async fn auto_efficient_uses_cost_then_quality_floor() {
                 supports_tools: Some(true),
                 supports_vision: Some(false),
                 supports_structured_output: Some(true),
+                input_price_per_million: None,
+                output_price_per_million: None,
             }],
         )
         .expect("cheap catalog");
@@ -838,6 +845,8 @@ async fn auto_efficient_uses_cost_then_quality_floor() {
                 supports_tools: Some(true),
                 supports_vision: Some(false),
                 supports_structured_output: Some(true),
+                input_price_per_million: None,
+                output_price_per_million: None,
             }],
         )
         .expect("strong catalog");
@@ -915,6 +924,8 @@ async fn auto_efficient_honors_explicit_paid_authorization_and_spend_caps() {
                     supports_tools: Some(true),
                     supports_vision: Some(true),
                     supports_structured_output: Some(true),
+                    input_price_per_million: None,
+                    output_price_per_million: None,
                 }],
             )
             .expect("catalog");
@@ -973,7 +984,7 @@ async fn auto_efficient_honors_explicit_paid_authorization_and_spend_caps() {
         .await
         .expect("spend-capped fallback response");
     assert_eq!(second.status(), StatusCode::OK);
-    assert_eq!(second.headers()["x-model-gateway-provider"], "free");
+    assert_eq!(second.headers()["x-model-gateway-provider"], "paid");
 }
 
 #[tokio::test]
@@ -992,6 +1003,8 @@ async fn auto_efficient_uses_canonical_mapping_and_reasoning_effort() {
                 supports_tools: Some(true),
                 supports_vision: Some(true),
                 supports_structured_output: Some(true),
+                input_price_per_million: None,
+                output_price_per_million: None,
             }],
         )
         .expect("catalog");
@@ -1093,6 +1106,8 @@ async fn auto_frontier_selects_only_openai_or_anthropic_canonical_creators() {
                     supports_tools: Some(true),
                     supports_vision: Some(true),
                     supports_structured_output: Some(true),
+                    input_price_per_million: None,
+                    output_price_per_million: None,
                 }],
             )
             .expect("catalog");
@@ -1159,6 +1174,8 @@ async fn auto_frontier_returns_explicit_error_without_free_or_local_fallback() {
                     supports_tools: Some(true),
                     supports_vision: Some(true),
                     supports_structured_output: Some(true),
+                    input_price_per_million: None,
+                    output_price_per_million: None,
                 }],
             )
             .expect("catalog");
@@ -1218,6 +1235,8 @@ async fn auto_frontier_reroutes_same_canonical_model_before_output() {
                     supports_tools: Some(true),
                     supports_vision: Some(true),
                     supports_structured_output: Some(true),
+                    input_price_per_million: None,
+                    output_price_per_million: None,
                 }],
             )
             .expect("catalog");
@@ -1281,6 +1300,8 @@ async fn auto_frontier_requires_explicit_billing_and_preview_authorization() {
                 supports_tools: Some(true),
                 supports_vision: Some(true),
                 supports_structured_output: Some(true),
+                input_price_per_million: None,
+                output_price_per_million: None,
             }],
         )
         .expect("catalog");
@@ -1353,6 +1374,8 @@ async fn auto_frontier_reports_quality_capability_and_spend_exclusions() {
         supports_tools: Some(supports_tools),
         supports_vision: Some(true),
         supports_structured_output: Some(true),
+        input_price_per_million: None,
+        output_price_per_million: None,
     };
     store
         .replace_catalog("frontier", &[catalog(false)])

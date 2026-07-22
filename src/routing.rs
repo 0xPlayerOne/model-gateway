@@ -25,7 +25,7 @@ pub enum RoutingError {
     Background(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CatalogOffering {
     pub provider: String,
     pub model: String,
@@ -35,6 +35,8 @@ pub struct CatalogOffering {
     pub supports_tools: Option<bool>,
     pub supports_vision: Option<bool>,
     pub supports_structured_output: Option<bool>,
+    pub input_price_per_million: Option<f64>,
+    pub output_price_per_million: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +47,8 @@ pub struct CatalogRecord {
     pub supports_tools: Option<bool>,
     pub supports_vision: Option<bool>,
     pub supports_structured_output: Option<bool>,
+    pub input_price_per_million: Option<f64>,
+    pub output_price_per_million: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -195,7 +199,7 @@ pub struct RoutingStore {
     connection: Mutex<Connection>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReservationRelease {
     BeforeDispatch,
     KnownFailure,
@@ -203,10 +207,17 @@ pub enum ReservationRelease {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReservationOutcome {
-    Reserved,
+    Reserved(ReservationToken),
     Cooldown,
     QuotaExceeded(QuotaKind),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReservationToken {
+    pub id: i64,
+}
+
+const RESERVATION_TTL_SECONDS: i64 = 3_600;
 
 impl RoutingStore {
     pub fn open(path: Option<&Path>) -> Result<Self, RoutingError> {
@@ -224,7 +235,7 @@ impl RoutingStore {
         };
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 2 {
+        if version > 3 {
             return Err(RoutingError::UnsupportedSchema(version));
         }
         connection.execute_batch(
@@ -238,8 +249,10 @@ impl RoutingStore {
                  context_length INTEGER,
                  supports_tools INTEGER,
                  supports_vision INTEGER,
-                 supports_structured_output INTEGER,
-                 PRIMARY KEY (provider, model)
+                  supports_structured_output INTEGER,
+                  input_price_per_million REAL,
+                  output_price_per_million REAL,
+                  PRIMARY KEY (provider, model)
              );
              CREATE TABLE IF NOT EXISTS usage_counters (
                  provider TEXT NOT NULL,
@@ -287,7 +300,7 @@ impl RoutingStore {
                  PRIMARY KEY (snapshot_id, canonical_model, metric),
                  FOREIGN KEY (snapshot_id) REFERENCES benchmark_snapshots(id) ON DELETE CASCADE
              );
-             CREATE TABLE IF NOT EXISTS benchmark_models (
+              CREATE TABLE IF NOT EXISTS benchmark_models (
                  snapshot_id INTEGER NOT NULL,
                  model_id TEXT NOT NULL,
                  creator TEXT,
@@ -297,15 +310,34 @@ impl RoutingStore {
                  reasoning_quality REAL,
                  input_price REAL,
                  output_price REAL,
-                 latency_seconds REAL,
-                 output_tokens_per_task INTEGER,
-                 reasoning_effort TEXT,
+                  latency_seconds REAL,
+                  output_tokens_per_task INTEGER,
+                  reasoning_effort TEXT,
+                  as_of TEXT,
+                  harness TEXT,
+                  confidence REAL,
                  PRIMARY KEY (snapshot_id, model_id, reasoning_effort),
-                 FOREIGN KEY (snapshot_id) REFERENCES benchmark_snapshots(id) ON DELETE CASCADE
-             );",
+                  FOREIGN KEY (snapshot_id) REFERENCES benchmark_snapshots(id) ON DELETE CASCADE
+              );
+              CREATE TABLE IF NOT EXISTS reservations (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   provider TEXT NOT NULL,
+                   model TEXT NOT NULL,
+                   expires_at INTEGER NOT NULL
+               );
+               CREATE TABLE IF NOT EXISTS reservation_dimensions (
+                   reservation_id INTEGER NOT NULL,
+                   kind TEXT NOT NULL,
+                   window_seconds INTEGER NOT NULL,
+                   window_start INTEGER NOT NULL,
+                   amount INTEGER NOT NULL,
+                   PRIMARY KEY (reservation_id, kind, window_seconds, window_start),
+                   FOREIGN KEY (reservation_id) REFERENCES reservations(id) ON DELETE CASCADE
+               );",
         )?;
         ensure_catalog_columns(&connection)?;
-        connection.pragma_update(None, "user_version", 2)?;
+        ensure_benchmark_columns(&connection)?;
+        connection.pragma_update(None, "user_version", 3)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -324,8 +356,9 @@ impl RoutingStore {
             transaction.execute(
                 "INSERT INTO catalog_models(
                     provider, model, is_free, refreshed_at, context_length,
-                    supports_tools, supports_vision, supports_structured_output
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     supports_tools, supports_vision, supports_structured_output
+                     , input_price_per_million, output_price_per_million
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     provider,
                     model.model,
@@ -334,7 +367,9 @@ impl RoutingStore {
                     model.context_length,
                     optional_bool(model.supports_tools),
                     optional_bool(model.supports_vision),
-                    optional_bool(model.supports_structured_output)
+                    optional_bool(model.supports_structured_output),
+                    model.input_price_per_million,
+                    model.output_price_per_million
                 ],
             )?;
         }
@@ -367,7 +402,8 @@ impl RoutingStore {
         let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let mut statement = connection.prepare(
             "SELECT provider, model, refreshed_at, is_free, context_length,
-                    supports_tools, supports_vision, supports_structured_output
+                    supports_tools, supports_vision, supports_structured_output,
+                    input_price_per_million, output_price_per_million
              FROM catalog_models
              WHERE is_free = 1 AND refreshed_at >= ?1
              ORDER BY provider, model",
@@ -386,6 +422,8 @@ impl RoutingStore {
                         supports_tools: database_bool(row.get(5)?),
                         supports_vision: database_bool(row.get(6)?),
                         supports_structured_output: database_bool(row.get(7)?),
+                        input_price_per_million: row.get(8)?,
+                        output_price_per_million: row.get(9)?,
                     })
                 },
             )?
@@ -400,7 +438,8 @@ impl RoutingStore {
         let mut statement = connection.prepare(
             "SELECT provider, model, refreshed_at, is_free, context_length,
                     supports_tools, supports_vision, supports_structured_output
-             FROM catalog_models WHERE refreshed_at >= ?1 ORDER BY provider, model",
+                     , input_price_per_million, output_price_per_million
+              FROM catalog_models WHERE refreshed_at >= ?1 ORDER BY provider, model",
         )?;
         Ok(statement
             .query_map(
@@ -416,6 +455,8 @@ impl RoutingStore {
                         supports_tools: database_bool(row.get(5)?),
                         supports_vision: database_bool(row.get(6)?),
                         supports_structured_output: database_bool(row.get(7)?),
+                        input_price_per_million: row.get(8)?,
+                        output_price_per_million: row.get(9)?,
                     })
                 },
             )?
@@ -465,8 +506,9 @@ impl RoutingStore {
                 "INSERT INTO benchmark_models(
                     snapshot_id, model_id, creator, general_quality, coding_quality,
                     agentic_quality, reasoning_quality, input_price, output_price,
-                    latency_seconds, output_tokens_per_task, reasoning_effort
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    latency_seconds, output_tokens_per_task, reasoning_effort,
+                    as_of, harness, confidence
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     snapshot_id,
                     model.id,
@@ -479,9 +521,40 @@ impl RoutingStore {
                     model.output_price_per_million,
                     model.latency_seconds,
                     model.output_tokens_per_task,
-                    model.reasoning_effort.as_deref().unwrap_or("")
+                    model.reasoning_effort.as_deref().unwrap_or(""),
+                    model.as_of,
+                    model.harness,
+                    model.confidence
                 ],
             )?;
+            for (metric, score) in [
+                ("general_quality", model.general_quality),
+                ("coding_quality", model.coding_quality),
+                ("agentic_quality", model.agentic_quality),
+                ("reasoning_quality", model.reasoning_quality),
+            ] {
+                if let Some(score) = score {
+                    let metric = model
+                        .reasoning_effort
+                        .as_deref()
+                        .map_or_else(|| metric.to_owned(), |effort| format!("{metric}@{effort}"));
+                    transaction.execute(
+                        "INSERT INTO benchmark_scores(
+                            snapshot_id, canonical_model, metric, score,
+                            input_price, output_price, latency_seconds
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            snapshot_id,
+                            model.id,
+                            metric,
+                            score,
+                            model.input_price_per_million,
+                            model.output_price_per_million,
+                            model.latency_seconds
+                        ],
+                    )?;
+                }
+            }
         }
         transaction.execute(
             "UPDATE benchmark_snapshots SET active = 1 WHERE id = ?1",
@@ -500,7 +573,7 @@ impl RoutingStore {
             "SELECT m.model_id, m.creator, m.general_quality, m.coding_quality,
                     m.agentic_quality, m.reasoning_quality, m.input_price,
                     m.output_price, m.latency_seconds, m.output_tokens_per_task,
-                    NULLIF(m.reasoning_effort, '')
+                     NULLIF(m.reasoning_effort, ''), m.as_of, m.harness, m.confidence
              FROM benchmark_models m
              JOIN benchmark_snapshots s ON s.id = m.snapshot_id
              WHERE s.active = 1 AND s.fetched_at >= ?1
@@ -523,6 +596,9 @@ impl RoutingStore {
                         latency_seconds: row.get(8)?,
                         output_tokens_per_task: row.get(9)?,
                         reasoning_effort: row.get(10)?,
+                        as_of: row.get(11)?,
+                        harness: row.get(12)?,
+                        confidence: row.get(13)?,
                     })
                 },
             )?
@@ -542,6 +618,24 @@ impl RoutingStore {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?
             .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn active_benchmark_snapshot(
+        &self,
+        max_age_seconds: u64,
+    ) -> Result<Option<(i64, i64)>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        connection
+            .query_row(
+                "SELECT id, fetched_at FROM benchmark_snapshots
+                 WHERE active = 1 AND fetched_at >= ?1
+                 ORDER BY fetched_at DESC, id DESC LIMIT 1",
+                [epoch_seconds()
+                    .saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX))],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(RoutingError::from)
     }
 
     pub fn catalog_summary(&self) -> Result<Vec<(String, u64, i64)>, RoutingError> {
@@ -566,6 +660,7 @@ impl RoutingStore {
         let now = epoch_seconds();
         let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let transaction = connection.transaction()?;
+        expire_reservations(&transaction, now)?;
         let cooldown: Option<i64> = transaction
             .query_row(
                 "SELECT until_epoch FROM cooldowns WHERE provider = ?1 AND model = ?2",
@@ -621,13 +716,37 @@ impl RoutingStore {
             )?;
         }
         transaction.execute(
+            "INSERT INTO reservations(provider, model, expires_at)
+             VALUES (?1, ?2, ?3)",
+            params![provider, model, now.saturating_add(RESERVATION_TTL_SECONDS)],
+        )?;
+        let reservation_id = transaction.last_insert_rowid();
+        for quota in quotas {
+            let window = i64::try_from(quota.window_seconds).unwrap_or(i64::MAX);
+            let window_start = now - now.rem_euclid(window);
+            transaction.execute(
+                "INSERT INTO reservation_dimensions(
+                    reservation_id, kind, window_seconds, window_start, amount
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    reservation_id,
+                    quota_kind(quota.kind),
+                    quota.window_seconds,
+                    window_start,
+                    quota_amount(quota.kind, estimated_tokens, expected_cost_microusd)
+                ],
+            )?;
+        }
+        transaction.execute(
             "DELETE FROM usage_counters WHERE window_start + window_seconds < ?1",
             [now],
         )?;
         transaction.execute("DELETE FROM session_pins WHERE expires_at < ?1", [now])?;
         transaction.execute("DELETE FROM cooldowns WHERE until_epoch < ?1", [now])?;
         transaction.commit()?;
-        Ok(ReservationOutcome::Reserved)
+        Ok(ReservationOutcome::Reserved(ReservationToken {
+            id: reservation_id,
+        }))
     }
 
     pub fn apply_cooldown(
@@ -675,38 +794,129 @@ impl RoutingStore {
 
     pub fn release_reservation(
         &self,
-        provider: &str,
-        model: &str,
-        estimated_tokens: u64,
-        expected_cost_microusd: u64,
-        quotas: &[QuotaLimit],
+        token: ReservationToken,
         release: ReservationRelease,
     ) -> Result<(), RoutingError> {
-        let now = epoch_seconds();
-        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
-        for quota in quotas {
-            let amount = match quota.kind {
-                QuotaKind::Requests if matches!(release, ReservationRelease::BeforeDispatch) => 1,
-                QuotaKind::Requests => continue,
-                QuotaKind::Tokens => estimated_tokens.max(1),
-                QuotaKind::CostMicrousd => expected_cost_microusd,
-            };
-            let window = i64::try_from(quota.window_seconds).unwrap_or(i64::MAX);
-            let window_start = now - now.rem_euclid(window);
-            connection.execute(
-                "UPDATE usage_counters SET used = MAX(0, used - ?1)
-                 WHERE provider = ?2 AND model = ?3 AND kind = ?4
-                   AND window_seconds = ?5 AND window_start = ?6",
-                params![
-                    amount,
-                    provider,
-                    model,
-                    quota_kind(quota.kind),
-                    quota.window_seconds,
-                    window_start
-                ],
+        let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let transaction = connection.transaction()?;
+        let reservation = transaction
+            .query_row(
+                "SELECT provider, model FROM reservations WHERE id = ?1",
+                [token.id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((provider, model)) = reservation else {
+            return Ok(());
+        };
+        let release_requests = matches!(release, ReservationRelease::BeforeDispatch);
+        let dimensions = {
+            let mut statement = transaction.prepare(
+                "SELECT kind, window_seconds, window_start, amount
+                 FROM reservation_dimensions WHERE reservation_id = ?1",
+            )?;
+            statement
+                .query_map([token.id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, u64>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (kind, window_seconds, window_start, amount) in dimensions {
+            if kind == "requests" && !release_requests {
+                continue;
+            }
+            decrement_counter_at(
+                &transaction,
+                &provider,
+                &model,
+                &kind,
+                window_seconds,
+                window_start,
+                amount,
             )?;
         }
+        transaction.execute(
+            "DELETE FROM reservation_dimensions WHERE reservation_id = ?1",
+            [token.id],
+        )?;
+        transaction.execute("DELETE FROM reservations WHERE id = ?1", [token.id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn finalize_reservation(
+        &self,
+        token: ReservationToken,
+        actual_tokens: Option<u64>,
+        actual_cost_microusd: Option<u64>,
+    ) -> Result<(), RoutingError> {
+        let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let transaction = connection.transaction()?;
+        let reservation = transaction
+            .query_row(
+                "SELECT provider, model FROM reservations WHERE id = ?1",
+                [token.id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((provider, model)) = reservation else {
+            return Ok(());
+        };
+        let dimensions = {
+            let mut statement = transaction.prepare(
+                "SELECT kind, window_seconds, window_start, amount
+                 FROM reservation_dimensions WHERE reservation_id = ?1",
+            )?;
+            statement
+                .query_map([token.id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, u64>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (kind, window_seconds, window_start, reserved) in dimensions {
+            let actual = match kind.as_str() {
+                "tokens" => actual_tokens,
+                "cost_microusd" => actual_cost_microusd,
+                _ => None,
+            };
+            if let Some(actual) = actual {
+                adjust_counter_at(
+                    &transaction,
+                    &provider,
+                    &model,
+                    &kind,
+                    window_seconds,
+                    window_start,
+                    reserved,
+                    actual,
+                )?;
+            }
+        }
+        transaction.execute(
+            "DELETE FROM reservation_dimensions WHERE reservation_id = ?1",
+            [token.id],
+        )?;
+        transaction.execute("DELETE FROM reservations WHERE id = ?1", [token.id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_session_pin(&self, session_hash: &str, route: &str) -> Result<(), RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        connection.execute(
+            "DELETE FROM session_pins WHERE session_hash = ?1 AND route = ?2",
+            params![session_hash, route],
+        )?;
         Ok(())
     }
 
@@ -924,6 +1134,113 @@ fn database_bool(value: Option<i64>) -> Option<bool> {
     value.map(|value| value != 0)
 }
 
+fn expire_reservations(
+    transaction: &rusqlite::Transaction<'_>,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    let expired = {
+        let mut statement = transaction
+            .prepare("SELECT id, provider, model FROM reservations WHERE expires_at <= ?1")?;
+        statement
+            .query_map([now], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, provider, model) in expired {
+        let dimensions = {
+            let mut statement = transaction.prepare(
+                "SELECT kind, window_seconds, window_start, amount
+                 FROM reservation_dimensions WHERE reservation_id = ?1",
+            )?;
+            statement
+                .query_map([id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, u64>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (kind, window_seconds, window_start, amount) in dimensions {
+            decrement_counter_at(
+                transaction,
+                &provider,
+                &model,
+                &kind,
+                window_seconds,
+                window_start,
+                amount,
+            )?;
+        }
+        transaction.execute("DELETE FROM reservations WHERE id = ?1", [id])?;
+    }
+    Ok(())
+}
+
+fn decrement_counter_at(
+    transaction: &rusqlite::Transaction<'_>,
+    provider: &str,
+    model: &str,
+    kind: &str,
+    window_seconds: u64,
+    window_start: i64,
+    amount: u64,
+) -> Result<(), rusqlite::Error> {
+    transaction.execute(
+        "UPDATE usage_counters SET used = MAX(0, used - ?1)
+         WHERE provider = ?2 AND model = ?3 AND kind = ?4
+           AND window_seconds = ?5 AND window_start = ?6",
+        params![amount, provider, model, kind, window_seconds, window_start],
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adjust_counter_at(
+    transaction: &rusqlite::Transaction<'_>,
+    provider: &str,
+    model: &str,
+    kind: &str,
+    window_seconds: u64,
+    window_start: i64,
+    reserved: u64,
+    actual: u64,
+) -> Result<(), rusqlite::Error> {
+    if actual >= reserved {
+        transaction.execute(
+            "UPDATE usage_counters SET used = used + ?1
+             WHERE provider = ?2 AND model = ?3 AND kind = ?4
+               AND window_seconds = ?5 AND window_start = ?6",
+            params![
+                actual - reserved,
+                provider,
+                model,
+                kind,
+                window_seconds,
+                window_start
+            ],
+        )?;
+    } else {
+        decrement_counter_at(
+            transaction,
+            provider,
+            model,
+            kind,
+            window_seconds,
+            window_start,
+            reserved - actual,
+        )?;
+    }
+    Ok(())
+}
+
 fn ensure_catalog_columns(connection: &Connection) -> Result<(), rusqlite::Error> {
     let mut statement = connection.prepare("PRAGMA table_info(catalog_models)")?;
     let columns = statement
@@ -935,10 +1252,33 @@ fn ensure_catalog_columns(connection: &Connection) -> Result<(), rusqlite::Error
         ("supports_tools", "INTEGER"),
         ("supports_vision", "INTEGER"),
         ("supports_structured_output", "INTEGER"),
+        ("input_price_per_million", "REAL"),
+        ("output_price_per_million", "REAL"),
     ] {
         if !columns.iter().any(|column| column == name) {
             connection.execute(
                 &format!("ALTER TABLE catalog_models ADD COLUMN {name} {sql_type}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_benchmark_columns(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare("PRAGMA table_info(benchmark_models)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (name, sql_type) in [
+        ("as_of", "TEXT"),
+        ("harness", "TEXT"),
+        ("confidence", "REAL"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            connection.execute(
+                &format!("ALTER TABLE benchmark_models ADD COLUMN {name} {sql_type}"),
                 [],
             )?;
         }
@@ -1012,7 +1352,7 @@ mod tests {
         let accepted = handles
             .into_iter()
             .map(|handle| handle.join().expect("thread"))
-            .filter(|outcome| *outcome == ReservationOutcome::Reserved)
+            .filter(|outcome| matches!(outcome, ReservationOutcome::Reserved(_)))
             .count();
         assert_eq!(accepted, 1);
     }
@@ -1047,6 +1387,8 @@ mod tests {
             supports_tools: None,
             supports_vision: None,
             supports_structured_output: None,
+            input_price_per_million: None,
+            output_price_per_million: None,
         }
     }
 
@@ -1079,24 +1421,17 @@ mod tests {
                 window_seconds: 60,
             },
         ];
-        assert_eq!(
-            store.reserve("p", "m", 100, 0, &quotas).expect("first"),
-            ReservationOutcome::Reserved
-        );
+        let first = match store.reserve("p", "m", 100, 0, &quotas).expect("first") {
+            ReservationOutcome::Reserved(token) => token,
+            outcome => panic!("expected reservation, got {outcome:?}"),
+        };
         store
-            .release_reservation(
-                "p",
-                "m",
-                100,
-                0,
-                &quotas,
-                super::ReservationRelease::KnownFailure,
-            )
+            .release_reservation(first, super::ReservationRelease::KnownFailure)
             .expect("release tokens");
-        assert_eq!(
+        assert!(matches!(
             store.reserve("p", "m", 100, 0, &quotas).expect("second"),
-            ReservationOutcome::Reserved
-        );
+            ReservationOutcome::Reserved(_)
+        ));
         assert_eq!(
             store.reserve("p", "m", 1, 0, &quotas).expect("third"),
             ReservationOutcome::QuotaExceeded(QuotaKind::Requests)
@@ -1175,10 +1510,10 @@ mod tests {
             limit: 100,
             window_seconds: 86_400,
         }];
-        assert_eq!(
+        assert!(matches!(
             store.reserve("p", "m", 1, 60, &quotas).expect("first"),
-            ReservationOutcome::Reserved
-        );
+            ReservationOutcome::Reserved(_)
+        ));
         assert_eq!(
             store.reserve("p", "m", 1, 60, &quotas).expect("second"),
             ReservationOutcome::QuotaExceeded(QuotaKind::CostMicrousd)
@@ -1193,28 +1528,22 @@ mod tests {
             limit: 100,
             window_seconds: 86_400,
         }];
-        assert_eq!(
-            store
-                .reserve("p", "m", 1, 60, &cost_quota)
-                .expect("reserve"),
-            ReservationOutcome::Reserved
-        );
+        let cost_reservation = match store
+            .reserve("p", "m", 1, 60, &cost_quota)
+            .expect("reserve")
+        {
+            ReservationOutcome::Reserved(token) => token,
+            outcome => panic!("expected reservation, got {outcome:?}"),
+        };
         store
-            .release_reservation(
-                "p",
-                "m",
-                1,
-                60,
-                &cost_quota,
-                super::ReservationRelease::KnownFailure,
-            )
+            .release_reservation(cost_reservation, super::ReservationRelease::KnownFailure)
             .expect("release cost");
-        assert_eq!(
+        assert!(matches!(
             store
                 .reserve("p", "m", 1, 60, &cost_quota)
                 .expect("cost refunded"),
-            ReservationOutcome::Reserved
-        );
+            ReservationOutcome::Reserved(_)
+        ));
 
         let request_store = RoutingStore::open(None).expect("request store");
         let request_quota = [QuotaLimit {
@@ -1222,21 +1551,15 @@ mod tests {
             limit: 1,
             window_seconds: 86_400,
         }];
-        assert_eq!(
-            request_store
-                .reserve("p", "m", 1, 0, &request_quota)
-                .expect("reserve"),
-            ReservationOutcome::Reserved
-        );
+        let request_reservation = match request_store
+            .reserve("p", "m", 1, 0, &request_quota)
+            .expect("reserve")
+        {
+            ReservationOutcome::Reserved(token) => token,
+            outcome => panic!("expected reservation, got {outcome:?}"),
+        };
         request_store
-            .release_reservation(
-                "p",
-                "m",
-                1,
-                0,
-                &request_quota,
-                super::ReservationRelease::KnownFailure,
-            )
+            .release_reservation(request_reservation, super::ReservationRelease::KnownFailure)
             .expect("release known failure");
         assert_eq!(
             request_store
@@ -1244,5 +1567,64 @@ mod tests {
                 .expect("request retained"),
             ReservationOutcome::QuotaExceeded(QuotaKind::Requests)
         );
+    }
+
+    #[test]
+    fn finalization_reconciles_actual_tokens_and_cost() {
+        let store = RoutingStore::open(None).expect("store");
+        let quotas = [
+            QuotaLimit {
+                kind: QuotaKind::Tokens,
+                limit: 100,
+                window_seconds: 86_400,
+            },
+            QuotaLimit {
+                kind: QuotaKind::CostMicrousd,
+                limit: 100,
+                window_seconds: 86_400,
+            },
+        ];
+        let token = match store.reserve("p", "m", 80, 80, &quotas).expect("reserve") {
+            ReservationOutcome::Reserved(token) => token,
+            outcome => panic!("expected reservation, got {outcome:?}"),
+        };
+        store
+            .finalize_reservation(token, Some(20), Some(20))
+            .expect("finalize");
+        assert!(matches!(
+            store
+                .reserve("p", "m", 80, 80, &quotas)
+                .expect("reconciled reserve"),
+            ReservationOutcome::Reserved(_)
+        ));
+    }
+
+    #[test]
+    fn expired_reservations_release_reserved_dimensions() {
+        let store = RoutingStore::open(None).expect("store");
+        let quota = [QuotaLimit {
+            kind: QuotaKind::Tokens,
+            limit: 100,
+            window_seconds: 86_400,
+        }];
+        let token = match store.reserve("p", "m", 80, 0, &quota).expect("reserve") {
+            ReservationOutcome::Reserved(token) => token,
+            outcome => panic!("expected reservation, got {outcome:?}"),
+        };
+        store
+            .connection
+            .lock()
+            .expect("connection")
+            .execute(
+                "UPDATE reservations SET expires_at = 0 WHERE id = ?1",
+                [token.id],
+            )
+            .expect("expire reservation");
+        assert!(matches!(
+            store
+                .reserve("p", "m", 80, 0, &quota)
+                .expect("expired reserve"),
+            ReservationOutcome::Reserved(_)
+        ));
     }
 }

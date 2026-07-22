@@ -228,6 +228,8 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
                             supports_tools: model.supports_tools,
                             supports_vision: model.supports_vision,
                             supports_structured_output: model.supports_structured_output,
+                            input_price_per_million: model.input_price_per_million,
+                            output_price_per_million: model.output_price_per_million,
                         }
                     })
                     .collect::<Vec<_>>();
@@ -637,6 +639,7 @@ fn config_check(online: bool) -> Result<(), Box<dyn Error>> {
     println!("Providers: {}", config.providers.len());
     println!("Aliases: {}", config.models.len());
     if online {
+        let store = RoutingStore::open(config.server.state_path.as_deref())?;
         let mut failures = Vec::new();
         for (name, provider) in &config.providers {
             let profile = BuiltinProvider::from_profile_id(provider.profile);
@@ -644,18 +647,42 @@ fn config_check(online: bool) -> Result<(), Box<dyn Error>> {
                 .api_key_secret
                 .as_deref()
                 .and_then(|secret| resolver.get(secret).ok().flatten());
-            match profile.validate_and_fetch_models(provider, key.as_deref()) {
-                Ok(Some(models)) => println!(
-                    "Online provider check passed: {name} ({} models)",
-                    models.len()
-                ),
-                Ok(None) => println!(
+            match profile.definition().connection_check {
+                ConnectionCheck::OpenAiModels | ConnectionCheck::OpenRouter => {
+                    match fetch_catalog(provider, key.as_deref()) {
+                        Ok(models) => {
+                            let records = models
+                                .into_iter()
+                                .map(|model| CatalogRecord {
+                                    is_free: is_verified_free(
+                                        provider,
+                                        &model.id,
+                                        model.zero_priced,
+                                    ),
+                                    model: model.id,
+                                    context_length: model.context_length,
+                                    supports_tools: model.supports_tools,
+                                    supports_vision: model.supports_vision,
+                                    supports_structured_output: model.supports_structured_output,
+                                    input_price_per_million: model.input_price_per_million,
+                                    output_price_per_million: model.output_price_per_million,
+                                })
+                                .collect::<Vec<_>>();
+                            store.replace_catalog(name, &records)?;
+                            println!(
+                                "Online provider check passed: {name} ({} models)",
+                                records.len()
+                            );
+                        }
+                        Err(error) => {
+                            println!("Online provider check failed: {name} ({error})");
+                            failures.push(name.as_str());
+                        }
+                    }
+                }
+                ConnectionCheck::ConfigurationOnly => println!(
                     "Online provider check skipped: {name} (no documented zero-credit endpoint)"
                 ),
-                Err(error) => {
-                    println!("Online provider check failed: {name} ({error})");
-                    failures.push(name.as_str());
-                }
             }
         }
         if !failures.is_empty() {

@@ -349,6 +349,8 @@ pub struct CatalogModel {
     pub supports_tools: Option<bool>,
     pub supports_vision: Option<bool>,
     pub supports_structured_output: Option<bool>,
+    pub input_price_per_million: Option<f64>,
+    pub output_price_per_million: Option<f64>,
 }
 
 pub fn prepare_request(
@@ -479,6 +481,8 @@ pub fn fetch_catalog(
                     "response_format",
                     "structured_outputs",
                 ]),
+                input_price_per_million: input.map(|price| price * 1_000_000.0),
+                output_price_per_million: output.map(|price| price * 1_000_000.0),
             })
         })
         .collect())
@@ -556,6 +560,8 @@ mod tests {
             supports_tools: Some(true),
             supports_vision: Some(false),
             supports_structured_output: Some(true),
+            input_price_per_million: None,
+            output_price_per_million: None,
         };
         assert!(model.zero_priced);
     }

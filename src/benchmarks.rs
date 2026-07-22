@@ -25,6 +25,12 @@ pub struct BenchmarkModel {
     pub output_tokens_per_task: Option<u64>,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub as_of: Option<String>,
+    #[serde(default)]
+    pub harness: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f64>,
 }
 
 impl BenchmarkModel {
@@ -49,6 +55,9 @@ impl BenchmarkModel {
             latency_seconds: Some(1.0),
             output_tokens_per_task: Some(1_024),
             reasoning_effort: None,
+            as_of: None,
+            harness: Some("fixture".to_owned()),
+            confidence: Some(1.0),
         }
     }
 
@@ -86,6 +95,26 @@ impl BenchmarkModel {
                     self.id
                 ));
             }
+        }
+        if self
+            .as_of
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > 64)
+            || self
+                .harness
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty() || value.len() > 128)
+        {
+            return Err(format!("benchmark provenance for '{}' is invalid", self.id));
+        }
+        if self
+            .confidence
+            .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+        {
+            return Err(format!(
+                "benchmark confidence for '{}' must be between 0 and 1",
+                self.id
+            ));
         }
         Ok(())
     }
@@ -386,6 +415,15 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                 latency_seconds: number(item, "median_time_to_first_token_seconds"),
                 output_tokens_per_task: None,
                 reasoning_effort: None,
+                as_of: item
+                    .get("as_of")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                harness: item
+                    .get("harness")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                confidence: item.get("confidence").and_then(Value::as_f64),
             };
             model.validate()?;
             Ok(model)

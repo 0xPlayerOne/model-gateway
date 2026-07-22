@@ -25,8 +25,8 @@ use crate::benchmarks::{
 use crate::config::{BillingMode, Config, ProviderConfig, QuotaKind, TargetConfig};
 use crate::providers::prepare_request;
 use crate::routing::{
-    ReservationOutcome, ReservationRelease, RoutingError, RoutingStore, is_verified_free,
-    quota_reference,
+    ReservationOutcome, ReservationRelease, ReservationToken, RoutingError, RoutingStore,
+    is_verified_free, quota_reference,
 };
 use crate::secrets::{SecretError, SecretResolver};
 
@@ -239,8 +239,14 @@ async fn health_live() -> impl IntoResponse {
 }
 
 async fn health_ready(State(state): State<AppState>) -> impl IntoResponse {
-    let _ = state;
-    Json(json!({"status": "ready"}))
+    match state.routing.catalog_summary() {
+        Ok(_) => (StatusCode::OK, Json(json!({"status": "ready"}))).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "not_ready"})),
+        )
+            .into_response(),
+    }
 }
 
 async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
@@ -454,8 +460,9 @@ async fn chat_completions(
         let target = targets[target_index].clone();
         target_index += 1;
         let estimated_tokens = estimate_request_tokens(&request);
+        let mut reservation = None;
         if target.managed {
-            let provider = target.provider.clone();
+            let provider = target.quota_scope.clone();
             let upstream_model = target.model.clone();
             let quotas = target.quotas.clone();
             match routing_operation(state.routing.clone(), move |routing| {
@@ -469,19 +476,22 @@ async fn chat_completions(
             })
             .await
             {
-                Ok(ReservationOutcome::Reserved) => {}
+                Ok(ReservationOutcome::Reserved(token)) => reservation = Some(token),
                 Ok(ReservationOutcome::Cooldown) => {
                     frontier_exhaustion_code.get_or_insert("frontier_all_candidates_unhealthy");
+                    invalidate_session_pin(&state.routing, session_hash.as_deref(), &model).await;
                     continue;
                 }
                 Ok(ReservationOutcome::QuotaExceeded(QuotaKind::CostMicrousd)) => {
                     frontier_exhaustion_code = Some("frontier_spend_cap_reached");
+                    invalidate_session_pin(&state.routing, session_hash.as_deref(), &model).await;
                     continue;
                 }
                 Ok(ReservationOutcome::QuotaExceeded(_)) => {
                     if frontier_exhaustion_code != Some("frontier_spend_cap_reached") {
                         frontier_exhaustion_code = Some("frontier_quota_exhausted");
                     }
+                    invalidate_session_pin(&state.routing, session_hash.as_deref(), &model).await;
                     continue;
                 }
                 Err(error) => {
@@ -497,13 +507,7 @@ async fn chat_completions(
         attempts += 1;
         let mut target_request = request.clone();
         let Some(provider) = state.providers.get(&target.runtime_provider) else {
-            release_reservation(
-                &state,
-                &target,
-                estimated_tokens,
-                ReservationRelease::BeforeDispatch,
-            )
-            .await;
+            release_reservation(&state, reservation, ReservationRelease::BeforeDispatch).await;
             last_error = Some((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 HeaderMap::new(),
@@ -513,6 +517,8 @@ async fn chat_completions(
             continue;
         };
         if !provider.available {
+            release_reservation(&state, reservation, ReservationRelease::BeforeDispatch).await;
+            invalidate_session_pin(&state.routing, session_hash.as_deref(), &model).await;
             if target_index >= targets.len() {
                 drop(global_permit);
                 log_request(
@@ -547,13 +553,7 @@ async fn chat_completions(
             }
         }
         if prepare_request(provider.config.adapter, &mut target_request, &target.model).is_err() {
-            release_reservation(
-                &state,
-                &target,
-                estimated_tokens,
-                ReservationRelease::BeforeDispatch,
-            )
-            .await;
+            release_reservation(&state, reservation, ReservationRelease::BeforeDispatch).await;
             drop(global_permit);
             log_request(
                 &request_id,
@@ -581,13 +581,7 @@ async fn chat_completions(
         {
             Ok(Ok(permit)) => permit,
             _ => {
-                release_reservation(
-                    &state,
-                    &target,
-                    estimated_tokens,
-                    ReservationRelease::BeforeDispatch,
-                )
-                .await;
+                release_reservation(&state, reservation, ReservationRelease::BeforeDispatch).await;
                 log_request(
                     &request_id,
                     &model,
@@ -667,30 +661,6 @@ async fn chat_completions(
         let status = response.status();
         let response_headers = response.headers().clone();
         if status.is_success() {
-            if target.managed {
-                let provider = target.provider.clone();
-                let upstream_model = target.model.clone();
-                let _ = routing_operation(state.routing.clone(), move |routing| {
-                    routing.clear_cooldown(&provider, &upstream_model)
-                })
-                .await;
-                if let Some(session_hash) = &session_hash {
-                    let session_hash = session_hash.clone();
-                    let route = model.clone();
-                    let provider = target.provider.clone();
-                    let upstream_model = target.model.clone();
-                    let _ = routing_operation(state.routing.clone(), move |routing| {
-                        routing.set_session_pin(
-                            &session_hash,
-                            &route,
-                            &provider,
-                            &upstream_model,
-                            1_800,
-                        )
-                    })
-                    .await;
-                }
-            }
             return relay_response(
                 response,
                 status,
@@ -706,6 +676,11 @@ async fn chat_completions(
                     started_at,
                     global_permit,
                     provider_permit,
+                    reservation,
+                    session_hash: session_hash.clone(),
+                    input_price_per_million: target.input_price_per_million,
+                    output_price_per_million: target.output_price_per_million,
+                    routing: state.routing.clone(),
                 },
             )
             .await;
@@ -720,13 +695,7 @@ async fn chat_completions(
             Err(_) if is_fallback_status(status) => Bytes::new(),
             Err(_) => {
                 drop(provider_permit);
-                release_reservation(
-                    &state,
-                    &target,
-                    estimated_tokens,
-                    ReservationRelease::KnownFailure,
-                )
-                .await;
+                release_reservation(&state, reservation, ReservationRelease::KnownFailure).await;
                 log_request(
                     &request_id,
                     &model,
@@ -747,13 +716,7 @@ async fn chat_completions(
             }
         };
         drop(provider_permit);
-        release_reservation(
-            &state,
-            &target,
-            estimated_tokens,
-            ReservationRelease::KnownFailure,
-        )
-        .await;
+        release_reservation(&state, reservation, ReservationRelease::KnownFailure).await;
         if target.managed
             && matches!(
                 status,
@@ -764,15 +727,35 @@ async fn chat_completions(
                 .get("retry-after")
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.parse::<u64>().ok());
-            let retry_after = retry_after.or_else(|| {
-                matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN).then_some(300)
-            });
+            let retry_after = retry_after
+                .or_else(|| rate_limit_reset_delay(&response_headers))
+                .or_else(|| {
+                    matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+                        .then_some(300)
+                });
             let provider = target.provider.clone();
             let upstream_model = target.model.clone();
             let _ = routing_operation(state.routing.clone(), move |routing| {
                 routing.apply_cooldown(&provider, &upstream_model, retry_after)
             })
             .await;
+            invalidate_session_pin(&state.routing, session_hash.as_deref(), &model).await;
+        }
+        if target.managed
+            && response_headers
+                .get("x-ratelimit-remaining")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.trim() == "0")
+        {
+            if let Some(delay) = rate_limit_reset_delay(&response_headers) {
+                let provider = target.provider.clone();
+                let upstream_model = target.model.clone();
+                let _ = routing_operation(state.routing.clone(), move |routing| {
+                    routing.apply_cooldown(&provider, &upstream_model, Some(delay))
+                })
+                .await;
+                invalidate_session_pin(&state.routing, session_hash.as_deref(), &model).await;
+            }
         }
         if target.runtime_provider == LOCAL_RUNTIME_PROVIDER
             && status == StatusCode::NOT_FOUND
@@ -869,11 +852,14 @@ async fn chat_completions(
 struct SelectedTarget {
     runtime_provider: String,
     provider: String,
+    quota_scope: String,
     provider_display: String,
     model: String,
     managed: bool,
     quotas: Vec<crate::config::QuotaLimit>,
     expected_cost_microusd: u64,
+    input_price_per_million: Option<f64>,
+    output_price_per_million: Option<f64>,
     reasoning_effort: Option<String>,
     selection: Option<SelectionMetadata>,
 }
@@ -887,6 +873,8 @@ struct SelectionMetadata {
     quality_floor: f64,
     quality: f64,
     expected_cost_microusd: u64,
+    benchmark_snapshot_id: i64,
+    benchmark_as_of: i64,
 }
 
 async fn resolve_targets(
@@ -900,11 +888,14 @@ async fn resolve_targets(
         return Ok(vec![SelectedTarget {
             runtime_provider: LOCAL_RUNTIME_PROVIDER.to_owned(),
             provider: "local".to_owned(),
+            quota_scope: "local".to_owned(),
             provider_display: "Local".to_owned(),
             model: local_model,
             managed: false,
             quotas: Vec::new(),
             expected_cost_microusd: 0,
+            input_price_per_million: None,
+            output_price_per_million: None,
             reasoning_effort: None,
             selection: None,
         }]);
@@ -966,11 +957,14 @@ fn selected_target(state: &AppState, target: &TargetConfig) -> SelectedTarget {
     SelectedTarget {
         runtime_provider: target.provider.clone(),
         provider: target.provider.clone(),
+        quota_scope: target.provider.clone(),
         provider_display,
         model: target.model.clone(),
         managed: false,
         quotas: Vec::new(),
         expected_cost_microusd: 0,
+        input_price_per_million: None,
+        output_price_per_million: None,
         reasoning_effort: None,
         selection: None,
     }
@@ -1033,7 +1027,11 @@ async fn resolve_auto_free_targets(
                 unknown_capabilities,
                 SelectedTarget {
                     runtime_provider: offering.provider.clone(),
-                    provider: offering.provider,
+                    provider: offering.provider.clone(),
+                    quota_scope: provider
+                        .account_scope
+                        .clone()
+                        .unwrap_or_else(|| offering.provider.clone()),
                     provider_display: provider
                         .profile
                         .map(|profile| profile.definition().display_name.to_owned())
@@ -1044,6 +1042,8 @@ async fn resolve_auto_free_targets(
                         .map(|reference| reference.rules)
                         .unwrap_or_default(),
                     expected_cost_microusd: 0,
+                    input_price_per_million: offering.input_price_per_million,
+                    output_price_per_million: offering.output_price_per_million,
                     reasoning_effort: None,
                     selection: None,
                 },
@@ -1085,11 +1085,14 @@ async fn resolve_auto_free_targets(
         Ok(model) => targets.push(SelectedTarget {
             runtime_provider: LOCAL_RUNTIME_PROVIDER.to_owned(),
             provider: "local".to_owned(),
+            quota_scope: "local".to_owned(),
             provider_display: "Local".to_owned(),
             model,
             managed: false,
             quotas: Vec::new(),
             expected_cost_microusd: 0,
+            input_price_per_million: None,
+            output_price_per_million: None,
             reasoning_effort: None,
             selection: None,
         }),
@@ -1157,12 +1160,15 @@ async fn resolve_benchmark_targets(
 ) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
     let catalog_age = state.config.server.catalog_max_age_seconds;
     let benchmark_age = state.config.server.benchmark_max_age_seconds;
-    let (offerings, benchmarks) = tokio::try_join!(
+    let (offerings, benchmarks, benchmark_snapshot) = tokio::try_join!(
         routing_operation(state.routing.clone(), move |routing| {
             routing.all_candidates(catalog_age)
         }),
         routing_operation(state.routing.clone(), move |routing| {
             routing.benchmark_models(benchmark_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.active_benchmark_snapshot(benchmark_age)
         })
     )
     .map_err(|_| {
@@ -1199,6 +1205,7 @@ async fn resolve_benchmark_targets(
         .and_then(Value::as_str)
         .filter(|effort| is_reasoning_effort(effort));
     let mut benchmark_by_model = BTreeMap::<String, Vec<_>>::new();
+    let (benchmark_snapshot_id, benchmark_as_of) = benchmark_snapshot.unwrap_or((0, 0));
     for benchmark in benchmarks {
         benchmark_by_model
             .entry(benchmark.id.clone())
@@ -1287,52 +1294,65 @@ async fn resolve_benchmark_targets(
         let has_effort_variants = model_benchmarks
             .iter()
             .any(|benchmark| benchmark.reasoning_effort.is_some());
+        let requested_effort_supported = requested_effort.is_some_and(|effort| {
+            model_benchmarks
+                .iter()
+                .any(|benchmark| benchmark.reasoning_effort.as_deref() == Some(effort))
+        });
         for benchmark in model_benchmarks {
             if policy == BenchmarkPolicy::Frontier
                 && !is_frontier_model(benchmark.creator.as_deref(), canonical)
             {
                 continue;
             }
-            if requested_effort.is_some()
+            if requested_effort_supported
                 && has_effort_variants
                 && benchmark.reasoning_effort.as_deref() != requested_effort
             {
                 continue;
             }
-            let Some(quality) = quality_for(benchmark, classification.task) else {
+            let Some(raw_quality) = quality_for(benchmark, classification.task) else {
                 continue;
             };
+            let quality = raw_quality * benchmark.confidence.unwrap_or(1.0);
             if quality < quality_floor {
                 continue;
             }
             if policy == BenchmarkPolicy::Frontier {
                 frontier_saw_quality = true;
             }
-            let expected_cost_microusd =
-                if offering.is_free || provider.billing_mode == BillingMode::Subscription {
-                    0
-                } else {
-                    let (Some(input_price), Some(output_price)) = (
-                        benchmark.input_price_per_million,
-                        benchmark.output_price_per_million,
-                    ) else {
-                        continue;
-                    };
-                    expected_cost_microusd(
-                        requirements.estimated_input_tokens,
-                        benchmark
-                            .output_tokens_per_task
-                            .unwrap_or(requirements.estimated_output_tokens)
-                            .min(requirements.estimated_output_tokens),
-                        input_price,
-                        output_price,
-                    )
+            let expected_cost_microusd = if offering.is_free {
+                0
+            } else {
+                let (Some(input_price), Some(output_price)) = (
+                    offering
+                        .input_price_per_million
+                        .or(benchmark.input_price_per_million),
+                    offering
+                        .output_price_per_million
+                        .or(benchmark.output_price_per_million),
+                ) else {
+                    continue;
                 };
+                expected_cost_microusd(
+                    requirements.estimated_input_tokens,
+                    benchmark
+                        .output_tokens_per_task
+                        .unwrap_or(requirements.estimated_output_tokens)
+                        .min(requirements.estimated_output_tokens),
+                    input_price,
+                    output_price,
+                )
+            };
             let reference = quota_reference(provider, &offering.model);
             candidates.push(ScoredCandidate {
                 value: SelectedTarget {
                     runtime_provider: offering.provider.clone(),
                     provider: offering.provider.clone(),
+                    quota_scope: provider
+                        .account_scope
+                        .clone()
+                        .unwrap_or_else(|| offering.provider.clone()),
                     provider_display: provider
                         .profile
                         .map(|profile| profile.definition().display_name.to_owned())
@@ -1343,6 +1363,12 @@ async fn resolve_benchmark_targets(
                         .map(|reference| reference.rules)
                         .unwrap_or_default(),
                     expected_cost_microusd,
+                    input_price_per_million: offering
+                        .input_price_per_million
+                        .or(benchmark.input_price_per_million),
+                    output_price_per_million: offering
+                        .output_price_per_million
+                        .or(benchmark.output_price_per_million),
                     reasoning_effort: benchmark.reasoning_effort.clone(),
                     selection: Some(SelectionMetadata {
                         canonical_model: canonical.to_owned(),
@@ -1352,6 +1378,8 @@ async fn resolve_benchmark_targets(
                         quality_floor,
                         quality,
                         expected_cost_microusd,
+                        benchmark_snapshot_id,
+                        benchmark_as_of,
                     }),
                 },
                 quality,
@@ -1384,11 +1412,10 @@ async fn resolve_benchmark_targets(
         let right_pinned = pinned
             .as_ref()
             .is_some_and(|pin| pin.0 == right.provider && pin.1 == right.model);
-        right_pinned.cmp(&left_pinned).then_with(|| {
-            left.expected_cost_microusd
-                .cmp(&right.expected_cost_microusd)
-                .then_with(|| (&left.provider, &left.model).cmp(&(&right.provider, &right.model)))
-        })
+        left.expected_cost_microusd
+            .cmp(&right.expected_cost_microusd)
+            .then_with(|| right_pinned.cmp(&left_pinned))
+            .then_with(|| (&left.provider, &left.model).cmp(&(&right.provider, &right.model)))
     });
     if policy == BenchmarkPolicy::Frontier && targets.is_empty() {
         let (message, code) = if !frontier_saw_mapping {
@@ -1459,6 +1486,23 @@ fn expected_cost_microusd(
     }
 }
 
+fn rate_limit_reset_delay(headers: &HeaderMap) -> Option<u64> {
+    let reset = headers
+        .get("x-ratelimit-reset")
+        .and_then(|value| value.to_str().ok())?
+        .parse::<u64>()
+        .ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(if reset > now {
+        reset.saturating_sub(now).min(86_400)
+    } else {
+        reset.min(86_400)
+    })
+}
+
 fn estimate_request_tokens(request: &Value) -> u64 {
     let input_bytes = request
         .get("messages")
@@ -1488,26 +1532,31 @@ where
 
 async fn release_reservation(
     state: &AppState,
-    target: &SelectedTarget,
-    estimated_tokens: u64,
+    reservation: Option<ReservationToken>,
     release: ReservationRelease,
 ) {
-    if !target.managed {
+    let Some(reservation) = reservation else {
         return;
-    }
-    let provider = target.provider.clone();
-    let model = target.model.clone();
-    let quotas = target.quotas.clone();
-    let expected_cost_microusd = target.expected_cost_microusd;
+    };
     let _ = routing_operation(state.routing.clone(), move |routing| {
-        routing.release_reservation(
-            &provider,
-            &model,
-            estimated_tokens,
-            expected_cost_microusd,
-            &quotas,
-            release,
-        )
+        routing.release_reservation(reservation, release)
+    })
+    .await;
+}
+
+async fn invalidate_session_pin(
+    routing: &Arc<RoutingStore>,
+    session_hash: Option<&str>,
+    route: &str,
+) {
+    let Some(session_hash) = session_hash else {
+        return;
+    };
+    let routing = routing.clone();
+    let session_hash = session_hash.to_owned();
+    let route = route.to_owned();
+    let _ = routing_operation(routing, move |routing| {
+        routing.remove_session_pin(&session_hash, &route)
     })
     .await;
 }
@@ -1720,6 +1769,114 @@ struct StreamContext {
     started_at: Instant,
     global_permit: tokio::sync::OwnedSemaphorePermit,
     provider_permit: tokio::sync::OwnedSemaphorePermit,
+    reservation: Option<ReservationToken>,
+    session_hash: Option<String>,
+    input_price_per_million: Option<f64>,
+    output_price_per_million: Option<f64>,
+    routing: Arc<RoutingStore>,
+}
+
+async fn finalize_reservation(
+    routing: &Arc<RoutingStore>,
+    reservation: Option<ReservationToken>,
+    actual_tokens: Option<u64>,
+    actual_cost_microusd: Option<u64>,
+) {
+    let Some(reservation) = reservation else {
+        return;
+    };
+    let routing = routing.clone();
+    let _ = routing_operation(routing, move |routing| {
+        routing.finalize_reservation(reservation, actual_tokens, actual_cost_microusd)
+    })
+    .await;
+}
+
+async fn finalize_success(
+    routing: &Arc<RoutingStore>,
+    session_hash: Option<&str>,
+    route: &str,
+    provider: &str,
+    model: &str,
+) {
+    let routing = routing.clone();
+    let session_hash = session_hash.map(ToOwned::to_owned);
+    let route = route.to_owned();
+    let provider = provider.to_owned();
+    let model = model.to_owned();
+    let _ = routing_operation(routing, move |routing| {
+        routing.clear_cooldown(&provider, &model)?;
+        if let Some(session_hash) = session_hash {
+            routing.set_session_pin(&session_hash, &route, &provider, &model, 1_800)?;
+        }
+        Ok(())
+    })
+    .await;
+}
+
+fn usage_cost(
+    usage: Option<(u64, u64)>,
+    input_price_per_million: Option<f64>,
+    output_price_per_million: Option<f64>,
+) -> Option<u64> {
+    let (input, output) = usage?;
+    Some(expected_cost_microusd(
+        input,
+        output,
+        input_price_per_million?,
+        output_price_per_million?,
+    ))
+}
+
+fn parse_json_usage(body: &[u8]) -> Option<(u64, u64)> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    parse_usage_value(&value)
+}
+
+fn parse_sse_usage(event: &[u8]) -> Option<(u64, u64)> {
+    let text = std::str::from_utf8(event).ok()?;
+    let payload = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
+        .collect::<Vec<_>>()
+        .join("\n");
+    parse_usage_value(&serde_json::from_str(&payload).ok()?)
+}
+
+fn sse_model(event: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(event).ok()?;
+    let payload = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
+        .collect::<Vec<_>>()
+        .join("\n");
+    serde_json::from_str::<Value>(&payload)
+        .ok()?
+        .get("model")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn malformed_sse_event(event: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(event) else {
+        return event.starts_with(b"data:");
+    };
+    let payload = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
+        .collect::<Vec<_>>()
+        .join("\n");
+    !payload.is_empty()
+        && payload.trim() != "[DONE]"
+        && serde_json::from_str::<Value>(&payload).is_err()
+}
+
+fn parse_usage_value(value: &Value) -> Option<(u64, u64)> {
+    let usage = value.get("usage")?;
+    Some((
+        usage.get("prompt_tokens")?.as_u64()?,
+        usage.get("completion_tokens")?.as_u64()?,
+    ))
 }
 
 #[derive(Clone)]
@@ -1769,6 +1926,14 @@ impl ModelMetadata {
             "- {}: {} {}, {}",
             self.family, self.display, self.reasoning_effort, self.provider_display
         )
+    }
+
+    fn with_served_model(mut self, model: &str) -> Self {
+        self.upstream_model = model.to_owned();
+        let (family, display) = model_name_parts(model);
+        self.family = family;
+        self.display = display;
+        self
     }
 }
 
@@ -1821,18 +1986,24 @@ async fn relay_response(
         request_id,
         alias,
         provider,
-        model_metadata,
+        mut model_metadata,
         attempts,
         is_stream,
         started_at,
         global_permit,
         provider_permit,
+        reservation,
+        session_hash,
+        input_price_per_million,
+        output_price_per_million,
+        routing,
         ..
     } = context;
     if !is_stream {
         let body = match read_bounded(response, idle_timeout).await {
             Ok(body) => body,
             Err(_) => {
+                finalize_reservation(&routing, reservation, None, None).await;
                 drop(provider_permit);
                 drop(global_permit);
                 log_request(
@@ -1854,11 +2025,20 @@ async fn relay_response(
                 );
             }
         };
+        let usage = parse_json_usage(&body);
+        let actual_tokens = usage.map(|(input, output)| input.saturating_add(output));
+        let actual_cost_microusd =
+            usage_cost(usage, input_price_per_million, output_price_per_million);
         let served_model = response_model(&body)
             .or_else(|| provider_routed_model(&upstream_headers).map(ToOwned::to_owned));
+        if let Some(served_model) = served_model.as_deref() {
+            model_metadata = model_metadata.with_served_model(served_model);
+        }
         let body = match decorate_json_response(&body, &model_metadata.footer()) {
             Ok(body) => body,
             Err(message) => {
+                finalize_reservation(&routing, reservation, actual_tokens, actual_cost_microusd)
+                    .await;
                 drop(provider_permit);
                 drop(global_permit);
                 log_request(
@@ -1880,6 +2060,15 @@ async fn relay_response(
                 );
             }
         };
+        finalize_reservation(&routing, reservation, actual_tokens, actual_cost_microusd).await;
+        finalize_success(
+            &routing,
+            session_hash.as_deref(),
+            &alias,
+            &provider,
+            &model_metadata.upstream_model,
+        )
+        .await;
         drop(provider_permit);
         drop(global_permit);
         log_request(
@@ -1919,21 +2108,68 @@ async fn relay_response(
         fallbacks: attempts.saturating_sub(1),
     };
     let mut upstream = response.bytes_stream();
-    let footer = model_metadata.footer();
+    let mut footer = model_metadata.footer();
+    let stream_alias = alias.clone();
+    let stream_provider = provider.clone();
+    let stream_model = model_metadata.upstream_model.clone();
+    let stream_session_hash = session_hash.clone();
+    let mut stream_metadata = model_metadata.clone();
     let stream = async_stream::stream! {
         let mut buffer = Vec::new();
         let mut choices = BTreeMap::new();
-        loop {
+        let mut usage: Option<(u64, u64)> = None;
+        'stream: loop {
             match timeout(idle_timeout, upstream.next()).await {
                 Ok(Some(Ok(chunk))) => {
                     buffer.extend_from_slice(&chunk);
                     while let Some(event) = take_sse_event(&mut buffer) {
+                        if malformed_sse_event(&event) {
+                            let actual_tokens =
+                                usage.map(|(input, output)| input.saturating_add(output));
+                            let actual_cost_microusd = usage_cost(
+                                usage,
+                                input_price_per_million,
+                                output_price_per_million,
+                            );
+                            finalize_reservation(
+                                &routing,
+                                reservation,
+                                actual_tokens,
+                                actual_cost_microusd,
+                            )
+                            .await;
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                                b"data: {\"error\":{\"message\":\"upstream returned invalid Chat Completions SSE\",\"type\":\"upstream_error\",\"code\":\"invalid_upstream_stream\"}}\n\n",
+                            ));
+                            break 'stream;
+                        }
+                        if let Some(served_model) = sse_model(&event) {
+                            stream_metadata = stream_metadata.with_served_model(&served_model);
+                            footer = stream_metadata.footer();
+                        }
+                        if let Some(event_usage) = parse_sse_usage(&event) {
+                            usage = Some(event_usage);
+                        }
                         for transformed in transform_sse_event(&event, &footer, &mut choices) {
                             yield Ok::<Bytes, std::io::Error>(Bytes::from(transformed));
                         }
                     }
                 }
                 Ok(Some(Err(error))) => {
+                    let actual_tokens =
+                        usage.map(|(input, output)| input.saturating_add(output));
+                    let actual_cost_microusd = usage_cost(
+                        usage,
+                        input_price_per_million,
+                        output_price_per_million,
+                    );
+                    finalize_reservation(
+                        &routing,
+                        reservation,
+                        actual_tokens,
+                        actual_cost_microusd,
+                    )
+                    .await;
                     yield Err(std::io::Error::other(error));
                     break;
                 }
@@ -1941,9 +2177,44 @@ async fn relay_response(
                     if !buffer.is_empty() {
                         yield Ok::<Bytes, std::io::Error>(Bytes::from(std::mem::take(&mut buffer)));
                     }
+                    let actual_tokens = usage.map(|(input, output)| input.saturating_add(output));
+                    let actual_cost_microusd = usage_cost(
+                        usage,
+                        input_price_per_million,
+                        output_price_per_million,
+                    );
+                    finalize_reservation(
+                        &routing,
+                        reservation,
+                        actual_tokens,
+                        actual_cost_microusd,
+                    )
+                    .await;
+                    finalize_success(
+                        &routing,
+                        stream_session_hash.as_deref(),
+                        &stream_alias,
+                        &stream_provider,
+                        &stream_model,
+                    )
+                    .await;
                     break;
                 },
                 Err(_) => {
+                    let actual_tokens =
+                        usage.map(|(input, output)| input.saturating_add(output));
+                    let actual_cost_microusd = usage_cost(
+                        usage,
+                        input_price_per_million,
+                        output_price_per_million,
+                    );
+                    finalize_reservation(
+                        &routing,
+                        reservation,
+                        actual_tokens,
+                        actual_cost_microusd,
+                    )
+                    .await;
                     yield Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "upstream stream was idle",
@@ -2278,6 +2549,14 @@ fn add_model_headers(headers: &mut HeaderMap, metadata: &ModelMetadata) {
             "x-model-gateway-expected-cost-microusd",
             header_value(&selection.expected_cost_microusd.to_string()),
         );
+        headers.insert(
+            "x-model-gateway-benchmark-snapshot",
+            header_value(&selection.benchmark_snapshot_id.to_string()),
+        );
+        headers.insert(
+            "x-model-gateway-benchmark-as-of",
+            header_value(&selection.benchmark_as_of.to_string()),
+        );
     }
 }
 
@@ -2381,8 +2660,8 @@ mod tests {
 
     use super::{
         RequestRequirements, StreamChoice, decorate_json_response, estimate_request_tokens,
-        expected_cost_microusd, is_fallback_status, log_request, request_id, session_material,
-        take_sse_event, transform_sse_event,
+        expected_cost_microusd, is_fallback_status, log_request, malformed_sse_event,
+        rate_limit_reset_delay, request_id, session_material, take_sse_event, transform_sse_event,
     };
     use axum::http::{HeaderMap, StatusCode};
     use tracing_subscriber::fmt::MakeWriter;
@@ -2416,6 +2695,22 @@ mod tests {
         assert!(is_fallback_status(StatusCode::TOO_MANY_REQUESTS));
         assert!(is_fallback_status(StatusCode::BAD_GATEWAY));
         assert!(!is_fallback_status(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn malformed_sse_payloads_fail_closed() {
+        assert!(malformed_sse_event(b"data: not-json\n\n"));
+        assert!(!malformed_sse_event(b"data: {\"choices\":[]}\n\n"));
+        assert!(!malformed_sse_event(b"data: [DONE]\n\n"));
+    }
+
+    #[test]
+    fn rate_limit_reset_headers_are_converted_to_bounded_delays() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-reset", "60".parse().expect("header"));
+        assert_eq!(rate_limit_reset_delay(&headers), Some(60));
+        headers.insert("x-ratelimit-reset", "not-a-number".parse().expect("header"));
+        assert_eq!(rate_limit_reset_delay(&headers), None);
     }
 
     #[test]

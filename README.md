@@ -81,7 +81,8 @@ candidates, and chooses the lowest expected-cost model above the configured
 quality floor. Paid and subscription offerings are considered only when their
 provider has an explicit `billing_mode = "paid"` or `"subscription"`; providers
 default to free-only. Configure `cost_microusd` quota windows to impose
-transactional spend caps. If no benchmarked authorized candidate remains, the
+transactional spend caps. Reservations expire after abandoned requests and are
+reconciled against provider-reported token usage when available. If no benchmarked authorized candidate remains, the
 route falls back once through `auto-free` and then `local`.
 
 The `auto-frontier` model applies the same selector with an additional canonical
@@ -123,7 +124,10 @@ exports with `model-gateway benchmarks import --file <path>`:
     "output_price_per_million": 3.0,
     "latency_seconds": 0.5,
     "output_tokens_per_task": 1024,
-    "reasoning_effort": "high"
+    "reasoning_effort": "high",
+    "as_of": "2026-07-22",
+    "harness": "source-harness-v1",
+    "confidence": 0.95
   }]
 }
 ```

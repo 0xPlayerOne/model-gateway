@@ -363,11 +363,6 @@ impl Config {
                 "local model must be 1-512 non-whitespace characters".to_owned(),
             ));
         }
-        if self.providers.is_empty() {
-            return Err(ConfigError::Invalid(
-                "at least one provider is required".to_owned(),
-            ));
-        }
         let mut environment_names = BTreeSet::new();
         for (name, provider) in &self.providers {
             if !environment_names.insert(provider_environment_suffix(name)) {
@@ -376,11 +371,6 @@ impl Config {
                 )));
             }
             validate_provider(name, provider, secrets)?;
-        }
-        if self.models.is_empty() {
-            return Err(ConfigError::Invalid(
-                "at least one model alias is required".to_owned(),
-            ));
         }
         for (alias, model) in &self.models {
             validate_identifier(alias, "model alias")?;
@@ -453,6 +443,42 @@ fn apply_provider_environment_overrides(config: &mut Config) -> Result<(), Confi
                 _ => {
                     return Err(ConfigError::Invalid(format!(
                         "{variable} must be free, paid, or subscription"
+                    )));
+                }
+            };
+        }
+        let variable = format!("MODEL_GATEWAY_{suffix}_ACCOUNT_SCOPE");
+        if let Ok(value) = env::var(&variable) {
+            if value.trim().is_empty() || value.len() > 256 {
+                return Err(ConfigError::Invalid(format!(
+                    "{variable} must be 1-256 non-whitespace characters"
+                )));
+            }
+            provider.account_scope = Some(value);
+        }
+        for (suffix_name, destination) in [
+            ("FREE_MODELS", &mut provider.free_models),
+            ("MODEL_ALLOWLIST", &mut provider.model_allowlist),
+            ("MODEL_DENYLIST", &mut provider.model_denylist),
+        ] {
+            let variable = format!("MODEL_GATEWAY_{suffix}_{suffix_name}");
+            if let Ok(value) = env::var(&variable) {
+                *destination = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+        }
+        let variable = format!("MODEL_GATEWAY_{suffix}_ALLOW_PREVIEW_MODELS");
+        if let Ok(value) = env::var(&variable) {
+            provider.allow_preview_models = match value.as_str() {
+                "1" | "true" | "yes" => true,
+                "0" | "false" | "no" => false,
+                _ => {
+                    return Err(ConfigError::Invalid(format!(
+                        "{variable} must be true or false"
                     )));
                 }
             };
@@ -858,6 +884,18 @@ mod tests {
         assert_eq!(server.local_model, None);
         assert!(server.local_model_cache_seconds > 0);
         assert!(server.auto_frontier_enabled);
+    }
+
+    #[test]
+    fn local_only_configuration_is_valid() {
+        let config = Config {
+            server: ServerConfig::default(),
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+        };
+        config
+            .validate_structure()
+            .expect("built-in local route should not require aliases");
     }
 
     #[test]
