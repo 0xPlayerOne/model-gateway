@@ -250,11 +250,13 @@ async fn health_ready(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
-    let mut ids = vec![
-        "local".to_owned(),
-        "auto-free".to_owned(),
-        "auto-efficient".to_owned(),
-    ];
+    let mut ids = vec!["local".to_owned()];
+    if state.config.server.auto_free_enabled {
+        ids.push("auto-free".to_owned());
+    }
+    if state.config.server.auto_efficient_enabled {
+        ids.push("auto-efficient".to_owned());
+    }
     if state.config.server.auto_frontier_enabled {
         ids.push("auto-frontier".to_owned());
     }
@@ -901,9 +903,23 @@ async fn resolve_targets(
         }]);
     }
     if model == "auto-free" {
+        if !state.config.server.auto_free_enabled {
+            return Err((
+                StatusCode::NOT_FOUND,
+                "model 'auto-free' is disabled".to_owned(),
+                "route_disabled",
+            ));
+        }
         return resolve_auto_free_targets(state, request, session_hash).await;
     }
     if model == "auto-efficient" {
+        if !state.config.server.auto_efficient_enabled {
+            return Err((
+                StatusCode::NOT_FOUND,
+                "model 'auto-efficient' is disabled".to_owned(),
+                "route_disabled",
+            ));
+        }
         return resolve_auto_efficient_targets(state, request, session_hash).await;
     }
     if model == "auto-frontier" {
@@ -1113,6 +1129,9 @@ async fn resolve_auto_efficient_targets(
         .iter()
         .map(|target| (target.provider.clone(), target.model.clone()))
         .collect::<BTreeSet<_>>();
+    if !state.config.server.auto_free_enabled {
+        return Ok(targets);
+    }
     match resolve_auto_free_targets(state, request, session_hash).await {
         Ok(fallbacks) => {
             for target in fallbacks {

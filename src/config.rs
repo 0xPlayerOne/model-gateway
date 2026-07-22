@@ -81,6 +81,10 @@ pub struct ServerConfig {
     pub frontier_quality_floor_complex: f64,
     #[serde(default = "default_true")]
     pub auto_frontier_enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_free_enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_efficient_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -173,6 +177,7 @@ pub enum QuotaKind {
     Requests,
     Tokens,
     CostMicrousd,
+    Concurrency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -251,6 +256,8 @@ impl Default for ServerConfig {
             frontier_quality_floor_medium: default_frontier_quality_floor_medium(),
             frontier_quality_floor_complex: default_frontier_quality_floor_complex(),
             auto_frontier_enabled: true,
+            auto_free_enabled: true,
+            auto_efficient_enabled: true,
         }
     }
 }
@@ -884,6 +891,8 @@ mod tests {
         assert_eq!(server.local_model, None);
         assert!(server.local_model_cache_seconds > 0);
         assert!(server.auto_frontier_enabled);
+        assert!(server.auto_free_enabled);
+        assert!(server.auto_efficient_enabled);
     }
 
     #[test]

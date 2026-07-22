@@ -84,6 +84,10 @@ default to free-only. Configure `cost_microusd` quota windows to impose
 transactional spend caps. Reservations expire after abandoned requests and are
 reconciled against provider-reported token usage when available. If no benchmarked authorized candidate remains, the
 route falls back once through `auto-free` and then `local`.
+Each automatic route can be independently disabled with
+`server.auto_free_enabled`, `server.auto_efficient_enabled`, or
+`server.auto_frontier_enabled`; disabled routes are omitted from `/v1/models`
+and reject requests with `route_disabled`.
 
 The `auto-frontier` model applies the same selector with an additional canonical
 creator constraint: only benchmark entries identified exactly as OpenAI or

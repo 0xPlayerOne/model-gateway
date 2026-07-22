@@ -530,7 +530,13 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
     }
     apply_pending_secrets(&resolver, &config_path, &config, pending_secrets)?;
     println!("Saved {}", config_path.display());
-    let mut routes = vec!["local", "auto-free", "auto-efficient"];
+    let mut routes = vec!["local"];
+    if config.server.auto_free_enabled {
+        routes.push("auto-free");
+    }
+    if config.server.auto_efficient_enabled {
+        routes.push("auto-efficient");
+    }
     if config.server.auto_frontier_enabled {
         routes.push("auto-frontier");
     }

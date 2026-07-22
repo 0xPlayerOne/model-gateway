@@ -887,6 +887,7 @@ impl RoutingStore {
             let actual = match kind.as_str() {
                 "tokens" => actual_tokens,
                 "cost_microusd" => actual_cost_microusd,
+                "concurrency" => Some(0),
                 _ => None,
             };
             if let Some(actual) = actual {
@@ -1115,6 +1116,7 @@ fn quota_amount(kind: QuotaKind, estimated_tokens: u64, expected_cost_microusd: 
         QuotaKind::Requests => 1,
         QuotaKind::Tokens => estimated_tokens.max(1),
         QuotaKind::CostMicrousd => expected_cost_microusd,
+        QuotaKind::Concurrency => 1,
     }
 }
 
@@ -1123,6 +1125,7 @@ fn quota_kind(kind: QuotaKind) -> &'static str {
         QuotaKind::Requests => "requests",
         QuotaKind::Tokens => "tokens",
         QuotaKind::CostMicrousd => "cost_microusd",
+        QuotaKind::Concurrency => "concurrency",
     }
 }
 
@@ -1624,6 +1627,33 @@ mod tests {
             store
                 .reserve("p", "m", 80, 0, &quota)
                 .expect("expired reserve"),
+            ReservationOutcome::Reserved(_)
+        ));
+    }
+
+    #[test]
+    fn concurrency_reservations_release_on_finalization() {
+        let store = RoutingStore::open(None).expect("store");
+        let quota = [QuotaLimit {
+            kind: QuotaKind::Concurrency,
+            limit: 1,
+            window_seconds: 60,
+        }];
+        let token = match store.reserve("p", "m", 1, 0, &quota).expect("reserve") {
+            ReservationOutcome::Reserved(token) => token,
+            outcome => panic!("expected reservation, got {outcome:?}"),
+        };
+        assert_eq!(
+            store.reserve("p", "m", 1, 0, &quota).expect("busy reserve"),
+            ReservationOutcome::QuotaExceeded(QuotaKind::Concurrency)
+        );
+        store
+            .finalize_reservation(token, None, None)
+            .expect("finalize concurrency");
+        assert!(matches!(
+            store
+                .reserve("p", "m", 1, 0, &quota)
+                .expect("released reserve"),
             ReservationOutcome::Reserved(_)
         ));
     }
