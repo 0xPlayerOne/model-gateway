@@ -16,7 +16,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$STATE/state"
-cat > "$STATE/state/config.toml" <<'EOF'
+cat > "$STATE/state/config.toml" <<EOF
 [server]
 bind = "0.0.0.0:11434"
 exposure = "local_container"
