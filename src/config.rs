@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
@@ -11,6 +9,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::secrets::{SecretError, SecretResolver, validate_secret_name};
+use crate::storage::write_atomic;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -177,7 +176,8 @@ impl Config {
             ));
         }
         for (alias, model) in &self.models {
-            if alias.trim().is_empty() || alias.contains('/') {
+            validate_identifier(alias, "model alias")?;
+            if alias.contains('/') {
                 return Err(ConfigError::Invalid(format!(
                     "model alias '{alias}' must be non-empty and contain no '/': aliases are public names"
                 )));
@@ -194,7 +194,7 @@ impl Config {
                         target.provider
                     )));
                 }
-                if target.model.trim().is_empty() {
+                if target.model.trim().is_empty() || target.model.len() > 512 {
                     return Err(ConfigError::Invalid(format!(
                         "model alias '{alias}' has an empty upstream model"
                     )));
@@ -210,32 +210,7 @@ impl Config {
 
     pub fn save_atomic(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-            }
-        }
-        let temporary = path.with_extension("toml.tmp");
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&temporary)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
-        }
-        file.write_all(self.to_toml()?.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(temporary, path)?;
-        #[cfg(unix)]
-        if let Some(parent) = path.parent() {
-            OpenOptions::new().read(true).open(parent)?.sync_all()?;
-        }
+        write_atomic(path, self.to_toml()?.as_bytes())?;
         Ok(())
     }
 
@@ -282,6 +257,7 @@ fn validate_provider(
     provider: &ProviderConfig,
     secrets: Option<&SecretResolver>,
 ) -> Result<(), ConfigError> {
+    validate_identifier(name, "provider name")?;
     let url = Url::parse(&provider.base_url)
         .map_err(|error| ConfigError::Invalid(format!("provider '{name}' URL: {error}")))?;
     if !url.username().is_empty() || url.password().is_some() {
@@ -328,7 +304,10 @@ fn validate_provider(
         )));
     }
     for (header, value) in &provider.extra_headers {
-        if !is_safe_extra_header(header) || reqwest::header::HeaderValue::try_from(value).is_err() {
+        if !is_safe_extra_header(header)
+            || value.len() > 4096
+            || reqwest::header::HeaderValue::try_from(value).is_err()
+        {
             return Err(ConfigError::Invalid(format!(
                 "provider '{name}' contains unsafe extra header '{header}'"
             )));
@@ -386,6 +365,9 @@ fn is_safe_extra_header(header: &str) -> bool {
     let lower = header.to_ascii_lowercase();
     !header.is_empty()
         && !lower.starts_with("proxy-")
+        && !lower.contains("authorization")
+        && !lower.contains("api-key")
+        && !lower.contains("token")
         && !matches!(
             lower.as_str(),
             "authorization"
@@ -403,6 +385,20 @@ fn is_safe_extra_header(header: &str) -> bool {
         && header
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
+fn validate_identifier(value: &str, kind: &str) -> Result<(), ConfigError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(ConfigError::Invalid(format!(
+            "{kind} '{value}' must be 1-128 ASCII characters from A-Z, a-z, 0-9, '.', '_' or '-'"
+        )));
+    }
+    Ok(())
 }
 
 fn home_dir() -> PathBuf {
@@ -522,6 +518,42 @@ mod tests {
     fn rejects_unknown_configuration_fields() {
         let error = toml::from_str::<Config>("unknown = true").expect_err("unknown field");
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn rejects_unsafe_provider_and_alias_identifiers() {
+        let mut config = valid_config("http://localhost:11434/v1");
+        config.providers.insert(
+            "provider/name".to_owned(),
+            provider("http://localhost:11434/v1"),
+        );
+        assert!(config.validate(&SecretResolver::default()).is_err());
+
+        let mut config = valid_config("http://localhost:11434/v1");
+        config.models.insert(
+            "alias with spaces".to_owned(),
+            ModelConfig {
+                targets: vec![TargetConfig {
+                    provider: "local".to_owned(),
+                    model: "upstream".to_owned(),
+                }],
+            },
+        );
+        assert!(config.validate(&SecretResolver::default()).is_err());
+    }
+
+    #[test]
+    fn rejects_credential_like_extra_headers() {
+        for header in ["x-authorization-note", "provider-token", "x-api-key-id"] {
+            let mut config = valid_config("https://example.com/v1");
+            config
+                .providers
+                .get_mut("local")
+                .expect("provider")
+                .extra_headers
+                .insert(header.to_owned(), "metadata".to_owned());
+            assert!(config.validate(&SecretResolver::default()).is_err());
+        }
     }
 
     #[test]

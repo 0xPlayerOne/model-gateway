@@ -4,6 +4,7 @@ pub mod config;
 pub mod gateway;
 pub mod providers;
 pub mod secrets;
+mod storage;
 
 /// Returns the package version for the binary and tests.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

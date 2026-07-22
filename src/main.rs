@@ -235,11 +235,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
     {
         return Err("configuration was not changed".into());
     }
-    for (name, value) in pending_secrets {
-        resolver.set_preferred(&name, &value)?;
-    }
-    config.validate(&resolver)?;
-    config.save_atomic(&config_path)?;
+    apply_pending_secrets(&resolver, &config_path, &config, pending_secrets)?;
     println!("Saved {}", config_path.display());
     println!(
         "Aliases: {}",
@@ -254,6 +250,65 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
     println!("  default: {default_alias}");
     println!("curl http://127.0.0.1:11434/health/live");
     println!("curl http://127.0.0.1:11434/v1/models");
+    Ok(())
+}
+
+fn apply_pending_secrets(
+    resolver: &SecretResolver,
+    config_path: &std::path::Path,
+    config: &Config,
+    pending: BTreeMap<String, String>,
+) -> Result<(), Box<dyn Error>> {
+    let previous = pending
+        .keys()
+        .map(|name| Ok((name.clone(), resolver.get(name)?)))
+        .collect::<Result<BTreeMap<_, _>, model_gateway::secrets::SecretError>>()?;
+    let mut applied = Vec::new();
+    for (name, value) in &pending {
+        if let Err(error) = resolver.set_preferred(name, value) {
+            let rollback_error = rollback_secrets(resolver, &previous, &applied).err();
+            return Err(match rollback_error {
+                Some(rollback) => {
+                    format!("credential update failed; rollback also failed: {error}; {rollback}")
+                        .into()
+                }
+                None => error.into(),
+            });
+        }
+        applied.push(name.clone());
+    }
+
+    if let Err(error) = config
+        .validate(resolver)
+        .and_then(|_| config.save_atomic(config_path))
+    {
+        let rollback_error = rollback_secrets(resolver, &previous, &applied).err();
+        return Err(match rollback_error {
+            Some(rollback) => format!(
+                "configuration update failed; credential rollback also failed: {error}; {rollback}"
+            )
+            .into(),
+            None => error.into(),
+        });
+    }
+    Ok(())
+}
+
+fn rollback_secrets(
+    resolver: &SecretResolver,
+    previous: &BTreeMap<String, Option<String>>,
+    applied: &[String],
+) -> Result<(), model_gateway::secrets::SecretError> {
+    for name in applied {
+        match previous.get(name).and_then(Option::as_deref) {
+            Some(value) => {
+                resolver.set_preferred(name, value)?;
+            }
+            None => {
+                resolver.remove(name)?;
+            }
+        }
+    }
     Ok(())
 }
 

@@ -1,10 +1,11 @@
 use std::env;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use keyring::Entry;
 use thiserror::Error;
+
+use crate::storage::write_atomic;
 
 const SERVICE_NAME: &str = "model-gateway";
 
@@ -66,16 +67,7 @@ impl SecretStore for FileSecretStore {
     fn set(&self, name: &str, value: &str) -> Result<(), SecretError> {
         self.ensure_root()?;
         let path = self.path(name)?;
-        let temporary = path.with_extension("tmp");
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&temporary)?;
-        set_unix_mode(&temporary, 0o600)?;
-        file.write_all(value.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(temporary, path)?;
+        write_atomic(&path, value.as_bytes())?;
         Ok(())
     }
 
