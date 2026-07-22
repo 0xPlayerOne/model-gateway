@@ -13,8 +13,9 @@ not gateway providers.
 | OpenRouter | `openrouter` | OpenAI Chat / API key | Built-in profile; authenticated validation contract-tested |
 | Ollama | custom endpoint | OpenAI Chat / local | Built-in profile; profile and OpenAI wire contract-tested |
 | LM Studio | `lmstudio` | OpenAI Chat / optional local key | Built-in profile; profile and OpenAI wire contract-tested |
-| OpenAI API | `openai-api` | OpenAI Chat / API key | Planned profile |
-| Fireworks, Novita, z.ai | `fireworks`, `novita`, `zai` | OpenAI-compatible / API key | Planned profiles |
+| OpenAI API | `openai-api` | OpenAI Chat / API key | Built-in profile; OpenAI-wire bearer catalog contract-tested |
+| Fireworks, Novita, z.ai | `fireworks`, `novita`, `zai` | OpenAI-compatible / API key | Built-in profiles; OpenAI-wire bearer catalog contract-tested |
+| DeepSeek | `deepseek` | OpenAI-compatible / API key | Built-in profile; OpenAI-wire bearer catalog contract-tested |
 | Kimi, MiniMax, Alibaba | `kimi-coding`, `minimax`, `alibaba` and regional variants | OpenAI-compatible or native variant / API key | Planned profiles/adapters |
 | Arcee, GMI, DeepSeek, StepFun, Upstage | `arcee`, `gmi`, `deepseek`, `stepfun`, `upstage` | OpenAI-compatible / API key | Planned profiles |
 | Kilo Code, OpenCode Zen/Go, Nous API | `kilocode`, `opencode-zen`, `opencode-go`, `nous` | OpenAI-compatible / API key | Planned profiles |

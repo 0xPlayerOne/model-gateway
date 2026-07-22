@@ -60,6 +60,14 @@ Set `MODEL_GATEWAY_LOG_FORMAT=json` for structured logs. Both text and JSON
 formats contain fixed request metadata only; prompts, responses, tools,
 credentials, and arbitrary upstream errors are never logged.
 
+## Supported Profiles
+
+The setup wizard includes Custom OpenAI-compatible, OpenRouter, Ollama, LM
+Studio, OpenAI API, DeepSeek, Fireworks AI, Novita AI, and Z.AI/GLM profiles.
+The cloud profiles use OpenAI Chat Completions with bearer secrets. They are
+contract-tested against deterministic local fixtures; no provider credential is
+required for the test suite.
+
 ## Development
 
 ```bash

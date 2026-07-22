@@ -360,6 +360,37 @@ mod tests {
     }
 
     #[test]
+    fn openai_wire_profiles_use_bearer_catalog_auth() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock bind");
+        let address = listener.local_addr().expect("mock address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("mock accept");
+            let mut request = vec![0; 4096];
+            let size = socket.read(&mut request).expect("mock read");
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("GET /v1/models "));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer fixture")
+            );
+            let body = r#"{"data":[{"id":"fixture-model"}]}"#;
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("mock write");
+        });
+        let provider = BuiltinProvider::OpenaiApi.config(format!("http://{address}/v1"), None);
+        let models = BuiltinProvider::OpenaiApi
+            .validate_and_fetch_models(&provider, Some("fixture"))
+            .expect("catalog models");
+        assert_eq!(models, vec!["fixture-model"]);
+        server.join().expect("mock server");
+    }
+
+    #[test]
     fn openrouter_validates_key_before_catalog_discovery() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("mock bind");
         let address = listener.local_addr().expect("mock address");
