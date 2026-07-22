@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
@@ -619,6 +619,7 @@ impl RoutingStore {
                         as_of: row.get(11)?,
                         harness: row.get(12)?,
                         confidence: row.get(13)?,
+                        raw_metrics: BTreeMap::new(),
                     })
                 },
             )?

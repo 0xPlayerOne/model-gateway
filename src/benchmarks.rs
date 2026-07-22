@@ -1,5 +1,17 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RawBenchmarkMetric {
+    pub value: f64,
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +43,8 @@ pub struct BenchmarkModel {
     pub harness: Option<String>,
     #[serde(default)]
     pub confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub raw_metrics: BTreeMap<String, RawBenchmarkMetric>,
 }
 
 impl BenchmarkModel {
@@ -58,6 +72,7 @@ impl BenchmarkModel {
             as_of: None,
             harness: Some("fixture".to_owned()),
             confidence: Some(1.0),
+            raw_metrics: BTreeMap::new(),
         }
     }
 
@@ -116,6 +131,19 @@ impl BenchmarkModel {
                 self.id
             ));
         }
+        for (metric, raw) in &self.raw_metrics {
+            if metric.trim().is_empty()
+                || !raw.value.is_finite()
+                || raw.min.is_some_and(|value| !value.is_finite())
+                || raw.max.is_some_and(|value| !value.is_finite())
+                || raw.min.zip(raw.max).is_some_and(|(min, max)| max <= min)
+            {
+                return Err(format!(
+                    "raw benchmark metric '{metric}' for '{}' is invalid",
+                    self.id
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -129,6 +157,48 @@ pub struct BenchmarkImport {
 }
 
 impl BenchmarkImport {
+    pub fn normalize(mut self) -> Result<Self, String> {
+        for model in &mut self.models {
+            for (metric, raw) in &model.raw_metrics {
+                let normalized = match (raw.min, raw.max) {
+                    (Some(min), Some(max)) => {
+                        ((raw.value - min) / (max - min) * 100.0).clamp(0.0, 100.0)
+                    }
+                    (None, None) if (0.0..=100.0).contains(&raw.value) => raw.value,
+                    _ => {
+                        return Err(format!(
+                            "raw benchmark metric '{metric}' for '{}' needs a complete comparable min/max range",
+                            model.id
+                        ));
+                    }
+                };
+                match metric.to_ascii_lowercase().as_str() {
+                    "general" | "general_quality" | "intelligence" => {
+                        model.general_quality.get_or_insert(normalized);
+                    }
+                    "coding" | "coding_quality" => {
+                        model.coding_quality.get_or_insert(normalized);
+                    }
+                    "agentic" | "agentic_quality" | "tool_use" => {
+                        model.agentic_quality.get_or_insert(normalized);
+                    }
+                    "reasoning" | "reasoning_quality" | "math" => {
+                        model.reasoning_quality.get_or_insert(normalized);
+                    }
+                    _ => {
+                        return Err(format!(
+                            "raw benchmark metric '{metric}' for '{}' has no curated mapping",
+                            model.id
+                        ));
+                    }
+                }
+            }
+            model.validate()?;
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.source.trim().is_empty() || self.source.len() > 128 {
             return Err("benchmark source must be 1-128 characters".to_owned());
@@ -424,6 +494,7 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
                 confidence: item.get("confidence").and_then(Value::as_f64),
+                raw_metrics: BTreeMap::new(),
             };
             model.validate()?;
             Ok(model)
@@ -494,6 +565,43 @@ mod tests {
             models: vec![model.clone(), model],
         };
         assert!(duplicate.validate().is_err());
+    }
+
+    #[test]
+    fn normalizes_raw_metrics_only_with_explicit_comparable_ranges() {
+        let mut model = BenchmarkModel::fixture("raw", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        model.general_quality = None;
+        model.raw_metrics.insert(
+            "general".to_owned(),
+            super::RawBenchmarkMetric {
+                value: 50.0,
+                min: Some(0.0),
+                max: Some(100.0),
+            },
+        );
+        let import = BenchmarkImport {
+            source: "fixture".to_owned(),
+            attribution: "Fixture data".to_owned(),
+            models: vec![model],
+        };
+        let normalized = import.normalize().expect("normalize");
+        assert_eq!(normalized.models[0].general_quality, Some(50.0));
+
+        let mut incomparable = BenchmarkModel::fixture("bad", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        incomparable.raw_metrics.insert(
+            "general".to_owned(),
+            super::RawBenchmarkMetric {
+                value: 500.0,
+                min: None,
+                max: None,
+            },
+        );
+        let import = BenchmarkImport {
+            source: "fixture".to_owned(),
+            attribution: "Fixture data".to_owned(),
+            models: vec![incomparable],
+        };
+        assert!(import.normalize().is_err());
     }
 
     #[test]

@@ -153,8 +153,8 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
                 source: SOURCE.to_owned(),
                 attribution: ATTRIBUTION.to_owned(),
                 models: parse_artificial_analysis(&body)?,
-            };
-            import.validate()?;
+            }
+            .normalize()?;
             let snapshot =
                 store.replace_benchmarks(&import.source, &import.attribution, &import.models)?;
             println!(
@@ -166,7 +166,7 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
         }
         BenchmarkCommand::Import { file } => {
             let import: BenchmarkImport = serde_json::from_slice(&std::fs::read(file)?)?;
-            import.validate()?;
+            let import = import.normalize()?;
             let snapshot =
                 store.replace_benchmarks(&import.source, &import.attribution, &import.models)?;
             println!(

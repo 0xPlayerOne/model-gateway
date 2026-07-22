@@ -138,6 +138,10 @@ exports with `model-gateway benchmarks import --file <path>`:
 
 Provider offering IDs map to canonical benchmark IDs only through exact IDs or
 explicit `model_mappings`; similar names are never merged heuristically.
+Imports may provide `raw_metrics` entries with curated metric names and explicit
+`min`/`max` ranges; values are normalized to 0-100 only within that declared
+cohort. Unknown metric names or incomplete ranges are rejected rather than
+flattened into incomparable scores.
 Successful `auto-efficient` responses include fixed classifier, complexity,
 quality-floor, quality, and expected-cost headers without prompt content.
 
