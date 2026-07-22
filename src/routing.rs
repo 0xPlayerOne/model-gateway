@@ -9,7 +9,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::benchmarks::BenchmarkModel;
-use crate::config::{BillingMode, ProviderConfig, ProviderProfileId, QuotaKind, QuotaLimit};
+use crate::config::{
+    BillingMode, ProviderConfig, ProviderProfileId, QuotaBoundary, QuotaKind, QuotaLimit,
+};
 
 #[derive(Debug, Error)]
 pub enum RoutingError {
@@ -673,8 +675,7 @@ impl RoutingStore {
         }
         for quota in quotas {
             let amount = quota_amount(quota.kind, estimated_tokens, expected_cost_microusd);
-            let window = i64::try_from(quota.window_seconds).unwrap_or(i64::MAX);
-            let window_start = now - now.rem_euclid(window);
+            let window_start = quota_window_start(now, quota);
             let used: u64 = transaction
                 .query_row(
                     "SELECT used FROM usage_counters
@@ -697,8 +698,7 @@ impl RoutingStore {
         }
         for quota in quotas {
             let amount = quota_amount(quota.kind, estimated_tokens, expected_cost_microusd);
-            let window = i64::try_from(quota.window_seconds).unwrap_or(i64::MAX);
-            let window_start = now - now.rem_euclid(window);
+            let window_start = quota_window_start(now, quota);
             transaction.execute(
                 "INSERT INTO usage_counters(
                     provider, model, kind, window_seconds, window_start, used
@@ -1100,6 +1100,7 @@ fn requests(limit: u64, window_seconds: u64) -> QuotaLimit {
         kind: QuotaKind::Requests,
         limit,
         window_seconds,
+        boundary: QuotaBoundary::Rolling,
     }
 }
 
@@ -1108,6 +1109,7 @@ fn tokens(limit: u64, window_seconds: u64) -> QuotaLimit {
         kind: QuotaKind::Tokens,
         limit,
         window_seconds,
+        boundary: QuotaBoundary::Rolling,
     }
 }
 
@@ -1118,6 +1120,50 @@ fn quota_amount(kind: QuotaKind, estimated_tokens: u64, expected_cost_microusd: 
         QuotaKind::CostMicrousd => expected_cost_microusd,
         QuotaKind::Concurrency => 1,
     }
+}
+
+fn quota_window_start(now: i64, quota: &QuotaLimit) -> i64 {
+    let rolling = || now - now.rem_euclid(i64::try_from(quota.window_seconds).unwrap_or(i64::MAX));
+    match quota.boundary {
+        QuotaBoundary::Rolling => rolling(),
+        QuotaBoundary::UtcMinute => now - now.rem_euclid(60),
+        QuotaBoundary::UtcHour => now - now.rem_euclid(3_600),
+        QuotaBoundary::UtcDay => now - now.rem_euclid(86_400),
+        QuotaBoundary::UtcWeek => {
+            let days = now.div_euclid(86_400);
+            let weekday_from_monday = (days + 3).rem_euclid(7);
+            (days - weekday_from_monday) * 86_400
+        }
+        QuotaBoundary::UtcMonth => {
+            let days = now.div_euclid(86_400);
+            let (year, month, _) = civil_from_days(days);
+            days_from_civil(year, month, 1) * 86_400
+        }
+    }
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096).div_euclid(365);
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2).div_euclid(153);
+    let day = doy - (153 * mp + 2).div_euclid(5) + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 }.div_euclid(400);
+    let yoe = year - era * 400;
+    let month = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * month + 2).div_euclid(5) + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 fn quota_kind(kind: QuotaKind) -> &'static str {
@@ -1314,7 +1360,7 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
-    use crate::config::{ProviderConfig, QuotaKind, QuotaLimit};
+    use crate::config::{ProviderConfig, QuotaBoundary, QuotaKind, QuotaLimit};
 
     use crate::benchmarks::BenchmarkModel;
 
@@ -1344,6 +1390,7 @@ mod tests {
             kind: QuotaKind::Requests,
             limit: 1,
             window_seconds: 60,
+            boundary: QuotaBoundary::Rolling,
         }];
         let handles = (0..4)
             .map(|_| {
@@ -1417,11 +1464,13 @@ mod tests {
                 kind: QuotaKind::Requests,
                 limit: 2,
                 window_seconds: 60,
+                boundary: QuotaBoundary::Rolling,
             },
             QuotaLimit {
                 kind: QuotaKind::Tokens,
                 limit: 100,
                 window_seconds: 60,
+                boundary: QuotaBoundary::Rolling,
             },
         ];
         let first = match store.reserve("p", "m", 100, 0, &quotas).expect("first") {
@@ -1512,6 +1561,7 @@ mod tests {
             kind: QuotaKind::CostMicrousd,
             limit: 100,
             window_seconds: 86_400,
+            boundary: QuotaBoundary::Rolling,
         }];
         assert!(matches!(
             store.reserve("p", "m", 1, 60, &quotas).expect("first"),
@@ -1530,6 +1580,7 @@ mod tests {
             kind: QuotaKind::CostMicrousd,
             limit: 100,
             window_seconds: 86_400,
+            boundary: QuotaBoundary::Rolling,
         }];
         let cost_reservation = match store
             .reserve("p", "m", 1, 60, &cost_quota)
@@ -1553,6 +1604,7 @@ mod tests {
             kind: QuotaKind::Requests,
             limit: 1,
             window_seconds: 86_400,
+            boundary: QuotaBoundary::Rolling,
         }];
         let request_reservation = match request_store
             .reserve("p", "m", 1, 0, &request_quota)
@@ -1580,11 +1632,13 @@ mod tests {
                 kind: QuotaKind::Tokens,
                 limit: 100,
                 window_seconds: 86_400,
+                boundary: QuotaBoundary::Rolling,
             },
             QuotaLimit {
                 kind: QuotaKind::CostMicrousd,
                 limit: 100,
                 window_seconds: 86_400,
+                boundary: QuotaBoundary::Rolling,
             },
         ];
         let token = match store.reserve("p", "m", 80, 80, &quotas).expect("reserve") {
@@ -1609,6 +1663,7 @@ mod tests {
             kind: QuotaKind::Tokens,
             limit: 100,
             window_seconds: 86_400,
+            boundary: QuotaBoundary::Rolling,
         }];
         let token = match store.reserve("p", "m", 80, 0, &quota).expect("reserve") {
             ReservationOutcome::Reserved(token) => token,
@@ -1638,6 +1693,7 @@ mod tests {
             kind: QuotaKind::Concurrency,
             limit: 1,
             window_seconds: 60,
+            boundary: QuotaBoundary::Rolling,
         }];
         let token = match store.reserve("p", "m", 1, 0, &quota).expect("reserve") {
             ReservationOutcome::Reserved(token) => token,
@@ -1656,5 +1712,23 @@ mod tests {
                 .expect("released reserve"),
             ReservationOutcome::Reserved(_)
         ));
+    }
+
+    #[test]
+    fn calendar_boundaries_align_to_utc_periods() {
+        let week = QuotaLimit {
+            kind: QuotaKind::Requests,
+            limit: 1,
+            window_seconds: 604_800,
+            boundary: QuotaBoundary::UtcWeek,
+        };
+        assert_eq!(super::quota_window_start(0, &week), -259_200);
+        let month = QuotaLimit {
+            kind: QuotaKind::Requests,
+            limit: 1,
+            window_seconds: 2_592_000,
+            boundary: QuotaBoundary::UtcMonth,
+        };
+        assert_eq!(super::quota_window_start(0, &month), 0);
     }
 }

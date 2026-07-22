@@ -180,12 +180,26 @@ pub enum QuotaKind {
     Concurrency,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaBoundary {
+    #[default]
+    Rolling,
+    UtcMinute,
+    UtcHour,
+    UtcDay,
+    UtcWeek,
+    UtcMonth,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct QuotaLimit {
     pub kind: QuotaKind,
     pub limit: u64,
     pub window_seconds: u64,
+    #[serde(default)]
+    pub boundary: QuotaBoundary,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -827,8 +841,8 @@ const fn default_stream_idle_timeout_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BillingMode, Config, Exposure, ModelConfig, ProviderConfig, QuotaKind, QuotaLimit,
-        ServerConfig, TargetConfig, validate_server,
+        BillingMode, Config, Exposure, ModelConfig, ProviderConfig, QuotaBoundary, QuotaKind,
+        QuotaLimit, ServerConfig, TargetConfig, validate_server,
     };
     use crate::secrets::SecretResolver;
     use std::collections::BTreeMap;
@@ -924,6 +938,7 @@ mod tests {
             kind: QuotaKind::Requests,
             limit: 50,
             window_seconds: 86_400,
+            boundary: QuotaBoundary::Rolling,
         }];
         config.validate_structure().expect("valid quota override");
         config.providers.get_mut("local").expect("provider").quotas[0].limit = 0;

@@ -13,8 +13,8 @@ use axum::{Router, serve};
 use futures_util::{StreamExt, stream};
 use model_gateway::benchmarks::BenchmarkModel;
 use model_gateway::config::{
-    BillingMode, Config, ModelConfig, ProviderConfig, QuotaKind, QuotaLimit, ServerConfig,
-    TargetConfig,
+    BillingMode, Config, ModelConfig, ProviderConfig, QuotaBoundary, QuotaKind, QuotaLimit,
+    ServerConfig, TargetConfig,
 };
 use model_gateway::gateway::build_app;
 use model_gateway::routing::{CatalogRecord, RoutingStore};
@@ -677,6 +677,7 @@ async fn auto_free_falls_back_to_local_after_configured_quota() {
         kind: QuotaKind::Requests,
         limit: 1,
         window_seconds: 3_600,
+        boundary: QuotaBoundary::Rolling,
     }];
     let mut config = config_for(
         BTreeMap::from([("free".to_owned(), free_provider)]),
@@ -947,6 +948,7 @@ async fn auto_efficient_honors_explicit_paid_authorization_and_spend_caps() {
         kind: QuotaKind::CostMicrousd,
         limit: 1_100,
         window_seconds: 86_400,
+        boundary: QuotaBoundary::Rolling,
     }];
     let mut free_provider = provider(format!("http://{free}/v1"));
     free_provider.free_models = vec!["free-model".to_owned()];
@@ -1435,6 +1437,7 @@ async fn auto_frontier_reports_quality_capability_and_spend_exclusions() {
         kind: QuotaKind::CostMicrousd,
         limit: 1,
         window_seconds: 86_400,
+        boundary: QuotaBoundary::Rolling,
     }];
     let spend_gateway = spawn_gateway(config).await;
     let response = client
