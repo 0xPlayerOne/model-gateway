@@ -11,8 +11,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Router, serve};
 use futures_util::{StreamExt, stream};
-use model_gateway::config::{Config, ModelConfig, ProviderConfig, ServerConfig, TargetConfig};
+use model_gateway::config::{
+    Config, ModelConfig, ProviderConfig, QuotaKind, QuotaLimit, ServerConfig, TargetConfig,
+};
 use model_gateway::gateway::build_app;
+use model_gateway::routing::{CatalogRecord, RoutingStore};
 use model_gateway::secrets::SecretResolver;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -411,7 +414,8 @@ async fn model_and_health_endpoints_are_detail_free() {
         .await
         .expect("models json");
     assert_eq!(models["data"][0]["id"], "local");
-    assert_eq!(models["data"][1]["id"], "smoke");
+    assert_eq!(models["data"][1]["id"], "auto-free");
+    assert_eq!(models["data"][2]["id"], "smoke");
     let ready: Value = client
         .get(format!("{gateway}/health/ready"))
         .send()
@@ -513,6 +517,245 @@ async fn local_route_rediscovers_after_model_not_found() {
     let body: Value = response.json().await.expect("reloaded local json");
     assert_eq!(body["model"], "loaded-model");
     assert_eq!(discoveries.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn auto_free_selects_only_verified_free_models() {
+    let free = spawn_provider(ProviderResponse::Success).await;
+    let mut free_provider = provider(format!("http://{free}/v1"));
+    free_provider.free_models = vec!["verified-free".to_owned()];
+    let gateway = spawn_gateway(config_for(
+        BTreeMap::from([("free".to_owned(), free_provider)]),
+        vec![TargetConfig {
+            provider: "free".to_owned(),
+            model: "verified-free".to_owned(),
+        }],
+    ))
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-free", "messages": []}))
+        .send()
+        .await
+        .expect("auto-free response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "free");
+    let body: Value = response.json().await.expect("auto-free json");
+    assert_eq!(body["model"], "verified-free");
+}
+
+#[tokio::test]
+async fn auto_free_filters_catalog_capability_mismatches() {
+    let unsupported = spawn_provider(ProviderResponse::Success).await;
+    let supported = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "unsupported",
+            &[CatalogRecord {
+                model: "no-tools".to_owned(),
+                is_free: true,
+                context_length: Some(128_000),
+                supports_tools: Some(false),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+            }],
+        )
+        .expect("unsupported catalog");
+    store
+        .replace_catalog(
+            "supported",
+            &[CatalogRecord {
+                model: "with-tools".to_owned(),
+                is_free: true,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(true),
+            }],
+        )
+        .expect("supported catalog");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([
+            (
+                "unsupported".to_owned(),
+                provider(format!("http://{unsupported}/v1")),
+            ),
+            (
+                "supported".to_owned(),
+                provider(format!("http://{supported}/v1")),
+            ),
+        ]),
+        vec![TargetConfig {
+            provider: "unsupported".to_owned(),
+            model: "advanced-only".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-free",
+            "messages": [],
+            "tools": [{"type": "function", "function": {"name": "fixture"}}]
+        }))
+        .send()
+        .await
+        .expect("capability response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "supported");
+}
+
+#[tokio::test]
+async fn auto_free_falls_back_to_local_after_configured_quota() {
+    let free = spawn_provider(ProviderResponse::Success).await;
+    let local = spawn_local_provider(vec!["local-model"]).await;
+    let mut free_provider = provider(format!("http://{free}/v1"));
+    free_provider.free_models = vec!["limited-free".to_owned()];
+    free_provider.quotas = vec![QuotaLimit {
+        kind: QuotaKind::Requests,
+        limit: 1,
+        window_seconds: 3_600,
+    }];
+    let mut config = config_for(
+        BTreeMap::from([("free".to_owned(), free_provider)]),
+        vec![TargetConfig {
+            provider: "free".to_owned(),
+            model: "limited-free".to_owned(),
+        }],
+    );
+    config.server.local_base_url = format!("http://{local}/v1");
+    let gateway = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-free", "messages": []}))
+        .send()
+        .await
+        .expect("first free response");
+    assert_eq!(first.headers()["x-model-gateway-provider"], "free");
+
+    let second = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-free", "messages": []}))
+        .send()
+        .await
+        .expect("local fallback response");
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(second.headers()["x-model-gateway-provider"], "local");
+    let body: Value = second.json().await.expect("fallback json");
+    assert_eq!(body["model"], "local-model");
+}
+
+#[tokio::test]
+async fn auto_free_ignores_provider_with_missing_key() {
+    let keyed = spawn_provider(ProviderResponse::Success).await;
+    let local = spawn_local_provider(vec!["local-model"]).await;
+    let mut keyed_provider = provider(format!("http://{keyed}/v1"));
+    keyed_provider.api_key_secret = Some("UNAVAILABLE_TEST_KEY".to_owned());
+    keyed_provider.free_models = vec!["keyed-free".to_owned()];
+    let mut config = config_for(
+        BTreeMap::from([("keyed".to_owned(), keyed_provider)]),
+        vec![TargetConfig {
+            provider: "keyed".to_owned(),
+            model: "keyed-free".to_owned(),
+        }],
+    );
+    config.server.local_base_url = format!("http://{local}/v1");
+    let gateway = spawn_gateway(config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-free", "messages": []}))
+        .send()
+        .await
+        .expect("missing-key fallback");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "local");
+}
+
+#[tokio::test]
+async fn auto_free_cools_down_a_rate_limited_model() {
+    let throttled_calls = Arc::new(AtomicUsize::new(0));
+    let calls = throttled_calls.clone();
+    let throttled = spawn_router(Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                ProviderResponse::Failure(StatusCode::TOO_MANY_REQUESTS, "limited").respond(body)
+            }
+        }),
+    ))
+    .await;
+    let healthy = spawn_provider(ProviderResponse::Success).await;
+    let mut throttled_provider = provider(format!("http://{throttled}/v1"));
+    throttled_provider.free_models = vec!["free-a".to_owned()];
+    let mut healthy_provider = provider(format!("http://{healthy}/v1"));
+    healthy_provider.free_models = vec!["free-b".to_owned()];
+    let gateway = spawn_gateway(config_for(
+        BTreeMap::from([
+            ("a-throttled".to_owned(), throttled_provider),
+            ("b-healthy".to_owned(), healthy_provider),
+        ]),
+        vec![TargetConfig {
+            provider: "a-throttled".to_owned(),
+            model: "free-a".to_owned(),
+        }],
+    ))
+    .await;
+    let client = reqwest::Client::new();
+
+    for _ in 0..2 {
+        let response = client
+            .post(format!("{gateway}/v1/chat/completions"))
+            .json(&json!({"model": "auto-free", "messages": []}))
+            .send()
+            .await
+            .expect("auto-free response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-model-gateway-provider"], "b-healthy");
+    }
+    assert_eq!(throttled_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn direct_alias_reports_missing_provider_key_in_openai_shape() {
+    let keyed = spawn_provider(ProviderResponse::Success).await;
+    let mut keyed_provider = provider(format!("http://{keyed}/v1"));
+    keyed_provider.api_key_secret = Some("UNAVAILABLE_DIRECT_KEY".to_owned());
+    let gateway = spawn_gateway(config_for(
+        BTreeMap::from([("keyed".to_owned(), keyed_provider)]),
+        vec![TargetConfig {
+            provider: "keyed".to_owned(),
+            model: "keyed-model".to_owned(),
+        }],
+    ))
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "smoke", "messages": []}))
+        .send()
+        .await
+        .expect("missing direct key response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response.json().await.expect("OpenAI error body");
+    assert_eq!(body["error"]["type"], "upstream_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("credential")
+    );
 }
 
 #[tokio::test]

@@ -20,6 +20,7 @@ use tokio::time::timeout;
 
 use crate::config::{Config, ProviderConfig, TargetConfig};
 use crate::providers::prepare_request;
+use crate::routing::{RoutingError, RoutingStore, is_verified_free, quota_reference};
 use crate::secrets::{SecretError, SecretResolver};
 
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -34,6 +35,8 @@ pub enum GatewayBuildError {
     Client { provider: String, message: String },
     #[error("secret store error: {0}")]
     Secret(#[from] SecretError),
+    #[error(transparent)]
+    Routing(#[from] RoutingError),
 }
 
 #[derive(Clone)]
@@ -42,6 +45,7 @@ pub struct AppState {
     providers: Arc<BTreeMap<String, ProviderRuntime>>,
     global_permits: Arc<Semaphore>,
     local_model: Arc<Mutex<Option<CachedLocalModel>>>,
+    routing: Arc<RoutingStore>,
 }
 
 struct CachedLocalModel {
@@ -54,6 +58,7 @@ struct ProviderRuntime {
     api_key: Option<String>,
     client: Client,
     permits: Arc<Semaphore>,
+    available: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,17 +103,24 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
             Some(name) => secrets.get(name)?,
             None => None,
         };
+        let available = provider.api_key_secret.is_none() || api_key.is_some();
+        let provider_limit = provider.max_in_flight.unwrap_or_else(|| {
+            if provider.billing_mode == crate::config::BillingMode::Free
+                && quota_reference(provider, "").is_none()
+            {
+                1
+            } else {
+                config.server.max_in_flight
+            }
+        });
         providers.insert(
             name.clone(),
             ProviderRuntime {
                 config: provider.clone(),
                 api_key,
                 client,
-                permits: Arc::new(Semaphore::new(
-                    provider
-                        .max_in_flight
-                        .unwrap_or(config.server.max_in_flight),
-                )),
+                permits: Arc::new(Semaphore::new(provider_limit)),
+                available,
             },
         );
     }
@@ -136,13 +148,30 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
             api_key: None,
             client: local_client,
             permits: Arc::new(Semaphore::new(config.server.max_in_flight)),
+            available: true,
         },
     );
+    let routing = Arc::new(RoutingStore::open(config.server.state_path.as_deref())?);
+    for (provider_name, provider) in &config.providers {
+        for model in &provider.free_models {
+            routing.upsert_offering(provider_name, model, true)?;
+        }
+    }
+    for model in config.models.values() {
+        for target in &model.targets {
+            if let Some(provider) = config.providers.get(&target.provider) {
+                if is_verified_free(provider, &target.model, false) {
+                    routing.upsert_offering(&target.provider, &target.model, true)?;
+                }
+            }
+        }
+    }
     let state = AppState {
         global_permits: Arc::new(Semaphore::new(config.server.max_in_flight)),
         config: Arc::new(config),
         providers: Arc::new(providers),
         local_model: Arc::new(Mutex::new(None)),
+        routing,
     };
     Ok(Router::new()
         .route("/health/live", get(health_live))
@@ -208,13 +237,13 @@ async fn health_ready(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
-    let mut ids = vec!["local".to_owned()];
+    let mut ids = vec!["local".to_owned(), "auto-free".to_owned()];
     ids.extend(
         state
             .config
             .models
             .keys()
-            .filter(|id| id.as_str() != "local")
+            .filter(|id| !matches!(id.as_str(), "local" | "auto-free"))
             .cloned(),
     );
     let data = ids
@@ -352,7 +381,15 @@ async fn chat_completions(
             );
         }
     };
-    let targets = match resolve_targets(&state, &model).await {
+    let session_hash = match session_material(&headers, &request) {
+        Some(material) => routing_operation(state.routing.clone(), move |routing| {
+            routing.session_hash(&material)
+        })
+        .await
+        .ok(),
+        None => None,
+    };
+    let targets = match resolve_targets(&state, &model, &request, session_hash.as_deref()).await {
         Ok(targets) => targets,
         Err((status, message, code)) => {
             log_request(&request_id, &model, "", status, started_at, is_stream, 0);
@@ -396,6 +433,28 @@ async fn chat_completions(
     while target_index < targets.len() {
         let target = targets[target_index].clone();
         target_index += 1;
+        let estimated_tokens = estimate_request_tokens(&request);
+        if target.managed {
+            let provider = target.provider.clone();
+            let upstream_model = target.model.clone();
+            let quotas = target.quotas.clone();
+            match routing_operation(state.routing.clone(), move |routing| {
+                routing.reserve(&provider, &upstream_model, estimated_tokens, &quotas)
+            })
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        event = "routing_state_error",
+                        provider = target.provider,
+                        error = %error
+                    );
+                    continue;
+                }
+            }
+        }
         attempts += 1;
         let mut target_request = request.clone();
         let Some(provider) = state.providers.get(&target.runtime_provider) else {
@@ -407,7 +466,37 @@ async fn chat_completions(
             ));
             continue;
         };
+        if !provider.available {
+            if target_index >= targets.len() {
+                drop(global_permit);
+                log_request(
+                    &request_id,
+                    &model,
+                    &target.provider,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    started_at,
+                    is_stream,
+                    attempts.saturating_sub(1),
+                );
+                return selected_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    request_id,
+                    "configured provider credential is unavailable",
+                    &model,
+                    &target.provider,
+                    attempts,
+                );
+            }
+            last_error = Some((
+                StatusCode::SERVICE_UNAVAILABLE,
+                HeaderMap::new(),
+                Bytes::new(),
+                target.provider.clone(),
+            ));
+            continue;
+        }
         if prepare_request(provider.config.adapter, &mut target_request, &target.model).is_err() {
+            release_token_reservation(&state, &target, estimated_tokens).await;
             drop(global_permit);
             log_request(
                 &request_id,
@@ -435,6 +524,7 @@ async fn chat_completions(
         {
             Ok(Ok(permit)) => permit,
             _ => {
+                release_token_reservation(&state, &target, estimated_tokens).await;
                 log_request(
                     &request_id,
                     &model,
@@ -472,6 +562,7 @@ async fn chat_completions(
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
                 drop(provider_permit);
+                release_token_reservation(&state, &target, estimated_tokens).await;
                 log_request(
                     &request_id,
                     &model,
@@ -492,6 +583,7 @@ async fn chat_completions(
             }
             Err(_) => {
                 drop(provider_permit);
+                release_token_reservation(&state, &target, estimated_tokens).await;
                 log_request(
                     &request_id,
                     &model,
@@ -514,6 +606,30 @@ async fn chat_completions(
         let status = response.status();
         let response_headers = response.headers().clone();
         if status.is_success() {
+            if target.managed {
+                let provider = target.provider.clone();
+                let upstream_model = target.model.clone();
+                let _ = routing_operation(state.routing.clone(), move |routing| {
+                    routing.clear_cooldown(&provider, &upstream_model)
+                })
+                .await;
+                if let Some(session_hash) = &session_hash {
+                    let session_hash = session_hash.clone();
+                    let route = model.clone();
+                    let provider = target.provider.clone();
+                    let upstream_model = target.model.clone();
+                    let _ = routing_operation(state.routing.clone(), move |routing| {
+                        routing.set_session_pin(
+                            &session_hash,
+                            &route,
+                            &provider,
+                            &upstream_model,
+                            1_800,
+                        )
+                    })
+                    .await;
+                }
+            }
             return relay_response(
                 response,
                 status,
@@ -543,6 +659,7 @@ async fn chat_completions(
             Err(_) if is_fallback_status(status) => Bytes::new(),
             Err(_) => {
                 drop(provider_permit);
+                release_token_reservation(&state, &target, estimated_tokens).await;
                 log_request(
                     &request_id,
                     &model,
@@ -563,6 +680,27 @@ async fn chat_completions(
             }
         };
         drop(provider_permit);
+        release_token_reservation(&state, &target, estimated_tokens).await;
+        if target.managed
+            && matches!(
+                status,
+                StatusCode::TOO_MANY_REQUESTS | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            )
+        {
+            let retry_after = response_headers
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok());
+            let retry_after = retry_after.or_else(|| {
+                matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN).then_some(300)
+            });
+            let provider = target.provider.clone();
+            let upstream_model = target.model.clone();
+            let _ = routing_operation(state.routing.clone(), move |routing| {
+                routing.apply_cooldown(&provider, &upstream_model, retry_after)
+            })
+            .await;
+        }
         if target.runtime_provider == LOCAL_RUNTIME_PROVIDER
             && status == StatusCode::NOT_FOUND
             && state.config.server.local_model.is_none()
@@ -653,11 +791,15 @@ struct SelectedTarget {
     provider: String,
     provider_display: String,
     model: String,
+    managed: bool,
+    quotas: Vec<crate::config::QuotaLimit>,
 }
 
 async fn resolve_targets(
     state: &AppState,
     model: &str,
+    request: &Value,
+    session_hash: Option<&str>,
 ) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
     if model == "local" {
         let local_model = resolve_local_model(state).await?;
@@ -666,7 +808,12 @@ async fn resolve_targets(
             provider: "local".to_owned(),
             provider_display: "Local".to_owned(),
             model: local_model,
+            managed: false,
+            quotas: Vec::new(),
         }]);
+    }
+    if model == "auto-free" {
+        return resolve_auto_free_targets(state, request, session_hash).await;
     }
     if let Some(config) = state.config.models.get(model) {
         return Ok(config
@@ -711,7 +858,224 @@ fn selected_target(state: &AppState, target: &TargetConfig) -> SelectedTarget {
         provider: target.provider.clone(),
         provider_display,
         model: target.model.clone(),
+        managed: false,
+        quotas: Vec::new(),
     }
+}
+
+async fn resolve_auto_free_targets(
+    state: &AppState,
+    request: &Value,
+    session_hash: Option<&str>,
+) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
+    let max_age = state.config.server.catalog_max_age_seconds;
+    let offerings = routing_operation(state.routing.clone(), move |routing| {
+        routing.free_candidates(max_age)
+    })
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "routing state is unavailable".to_owned(),
+            "routing_state_unavailable",
+        )
+    })?;
+    let requirements = RequestRequirements::from_request(request);
+    let mut targets = offerings
+        .into_iter()
+        .filter_map(|offering| {
+            let provider = state.config.providers.get(&offering.provider)?;
+            let runtime = state.providers.get(&offering.provider)?;
+            if !runtime.available
+                || (!provider.model_allowlist.is_empty()
+                    && !provider
+                        .model_allowlist
+                        .iter()
+                        .any(|model| model == &offering.model))
+                || provider
+                    .model_denylist
+                    .iter()
+                    .any(|model| model == &offering.model)
+            {
+                return None;
+            }
+            if offering
+                .context_length
+                .is_some_and(|context| context < requirements.estimated_tokens)
+                || requirements.tools && offering.supports_tools == Some(false)
+                || requirements.vision && offering.supports_vision == Some(false)
+                || requirements.structured && offering.supports_structured_output == Some(false)
+            {
+                return None;
+            }
+            let unknown_capabilities =
+                u8::from(requirements.tools && offering.supports_tools.is_none())
+                    + u8::from(requirements.vision && offering.supports_vision.is_none())
+                    + u8::from(
+                        requirements.structured && offering.supports_structured_output.is_none(),
+                    );
+            let reference = quota_reference(provider, &offering.model);
+            Some((
+                reference.is_none(),
+                unknown_capabilities,
+                SelectedTarget {
+                    runtime_provider: offering.provider.clone(),
+                    provider: offering.provider,
+                    provider_display: provider
+                        .profile
+                        .map(|profile| profile.definition().display_name.to_owned())
+                        .unwrap_or_else(|| "Custom OpenAI-compatible".to_owned()),
+                    model: offering.model,
+                    managed: true,
+                    quotas: reference
+                        .map(|reference| reference.rules)
+                        .unwrap_or_default(),
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    let pinned = match session_hash {
+        Some(session_hash) => {
+            let session_hash = session_hash.to_owned();
+            routing_operation(state.routing.clone(), move |routing| {
+                routing.session_pin(&session_hash, "auto-free")
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+        None => None,
+    };
+    targets.sort_by(|left, right| {
+        let left_pinned = pinned
+            .as_ref()
+            .is_some_and(|pin| pin.0 == left.2.provider && pin.1 == left.2.model);
+        let right_pinned = pinned
+            .as_ref()
+            .is_some_and(|pin| pin.0 == right.2.provider && pin.1 == right.2.model);
+        right_pinned
+            .cmp(&left_pinned)
+            .then_with(|| left.0.cmp(&right.0))
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| {
+                (&left.2.provider, &left.2.model).cmp(&(&right.2.provider, &right.2.model))
+            })
+    });
+    let mut targets = targets
+        .into_iter()
+        .map(|(_, _, target)| target)
+        .collect::<Vec<_>>();
+    match resolve_local_model(state).await {
+        Ok(model) => targets.push(SelectedTarget {
+            runtime_provider: LOCAL_RUNTIME_PROVIDER.to_owned(),
+            provider: "local".to_owned(),
+            provider_display: "Local".to_owned(),
+            model,
+            managed: false,
+            quotas: Vec::new(),
+        }),
+        Err(error) if targets.is_empty() => return Err(error),
+        Err(_) => {}
+    }
+    Ok(targets)
+}
+
+fn estimate_request_tokens(request: &Value) -> u64 {
+    let input_bytes = request
+        .get("messages")
+        .and_then(|messages| serde_json::to_vec(messages).ok())
+        .map_or(0, |messages| messages.len());
+    let input_tokens = u64::try_from(input_bytes.div_ceil(4)).unwrap_or(u64::MAX);
+    let output_tokens = request
+        .get("max_completion_tokens")
+        .or_else(|| request.get("max_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1_024);
+    input_tokens.saturating_add(output_tokens)
+}
+
+async fn routing_operation<T, F>(
+    routing: Arc<RoutingStore>,
+    operation: F,
+) -> Result<T, RoutingError>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<RoutingStore>) -> Result<T, RoutingError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || operation(routing))
+        .await
+        .map_err(|error| RoutingError::Background(error.to_string()))?
+}
+
+async fn release_token_reservation(
+    state: &AppState,
+    target: &SelectedTarget,
+    estimated_tokens: u64,
+) {
+    if !target.managed {
+        return;
+    }
+    let provider = target.provider.clone();
+    let model = target.model.clone();
+    let quotas = target.quotas.clone();
+    let _ = routing_operation(state.routing.clone(), move |routing| {
+        routing.release_token_reservation(&provider, &model, estimated_tokens, &quotas)
+    })
+    .await;
+}
+
+struct RequestRequirements {
+    estimated_tokens: u64,
+    tools: bool,
+    vision: bool,
+    structured: bool,
+}
+
+impl RequestRequirements {
+    fn from_request(request: &Value) -> Self {
+        let messages = request.get("messages");
+        let serialized_messages = messages
+            .and_then(|messages| serde_json::to_string(messages).ok())
+            .unwrap_or_default();
+        Self {
+            estimated_tokens: estimate_request_tokens(request),
+            tools: request
+                .get("tools")
+                .and_then(Value::as_array)
+                .is_some_and(|tools| !tools.is_empty()),
+            vision: serialized_messages.contains("image_url")
+                || serialized_messages.contains("input_image"),
+            structured: request
+                .get("response_format")
+                .is_some_and(|format| !format.is_null()),
+        }
+    }
+}
+
+fn session_material(headers: &HeaderMap, request: &Value) -> Option<String> {
+    if let Some(session_id) = request.get("session_id").and_then(Value::as_str) {
+        return (!session_id.is_empty()).then(|| format!("body:{session_id}"));
+    }
+    if let Some(session_id) = headers
+        .get("x-session-id")
+        .and_then(|value| value.to_str().ok())
+    {
+        return (!session_id.is_empty()).then(|| format!("header:{session_id}"));
+    }
+    let messages = request.get("messages")?.as_array()?;
+    let first = messages
+        .iter()
+        .filter(|message| {
+            message
+                .get("role")
+                .and_then(Value::as_str)
+                .is_some_and(|role| matches!(role, "system" | "user"))
+        })
+        .take(2)
+        .collect::<Vec<_>>();
+    (!first.is_empty()).then(|| {
+        serde_json::to_string(&first).unwrap_or_else(|_| "unserializable-session".to_owned())
+    })
 }
 
 async fn resolve_local_model(
@@ -1454,8 +1818,9 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        StreamChoice, decorate_json_response, is_fallback_status, log_request, request_id,
-        take_sse_event, transform_sse_event,
+        RequestRequirements, StreamChoice, decorate_json_response, estimate_request_tokens,
+        is_fallback_status, log_request, request_id, session_material, take_sse_event,
+        transform_sse_event,
     };
     use axum::http::{HeaderMap, StatusCode};
     use tracing_subscriber::fmt::MakeWriter;
@@ -1592,5 +1957,44 @@ mod tests {
         let _ = transform_sse_event(content.as_bytes(), footer, &mut state);
         let output = transform_sse_event(b"data: [DONE]\n\n", footer, &mut state);
         assert_eq!(output, vec![b"data: [DONE]\n\n".to_vec()]);
+    }
+
+    #[test]
+    fn request_estimates_and_capabilities_are_deterministic() {
+        let request = serde_json::json!({
+            "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}],
+            "max_tokens": 50,
+            "tools": [{"type": "function"}],
+            "response_format": {"type": "json_object"}
+        });
+        assert!(estimate_request_tokens(&request) >= 50);
+        let requirements = RequestRequirements::from_request(&request);
+        assert!(requirements.tools);
+        assert!(requirements.vision);
+        assert!(requirements.structured);
+    }
+
+    #[test]
+    fn session_material_prefers_body_then_header_then_messages() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", "header-session".parse().expect("header"));
+        let body = serde_json::json!({
+            "session_id": "body-session",
+            "messages": [{"role": "user", "content": "private"}]
+        });
+        assert_eq!(
+            session_material(&headers, &body).as_deref(),
+            Some("body:body-session")
+        );
+        let without_body = serde_json::json!({
+            "messages": [{"role": "user", "content": "private"}]
+        });
+        assert_eq!(
+            session_material(&headers, &without_body).as_deref(),
+            Some("header:header-session")
+        );
+        headers.remove("x-session-id");
+        let material = session_material(&headers, &without_body).expect("message material");
+        assert!(material.contains("private"));
     }
 }

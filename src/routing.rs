@@ -1,0 +1,936 @@
+use std::fs;
+use std::path::Path;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+use crate::config::{BillingMode, ProviderConfig, ProviderProfileId, QuotaKind, QuotaLimit};
+
+#[derive(Debug, Error)]
+pub enum RoutingError {
+    #[error("routing state I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("routing state database failed: {0}")]
+    Database(#[from] rusqlite::Error),
+    #[error("routing state lock was poisoned")]
+    Lock,
+    #[error("routing state schema version {0} is newer than this gateway supports")]
+    UnsupportedSchema(i64),
+    #[error("routing background operation failed: {0}")]
+    Background(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogOffering {
+    pub provider: String,
+    pub model: String,
+    pub refreshed_at: i64,
+    pub context_length: Option<u64>,
+    pub supports_tools: Option<bool>,
+    pub supports_vision: Option<bool>,
+    pub supports_structured_output: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogRecord {
+    pub model: String,
+    pub is_free: bool,
+    pub context_length: Option<u64>,
+    pub supports_tools: Option<bool>,
+    pub supports_vision: Option<bool>,
+    pub supports_structured_output: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuotaReference {
+    pub rules: Vec<QuotaLimit>,
+    pub source_url: &'static str,
+    pub as_of: &'static str,
+    pub scope: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderLimitReference {
+    pub profile: ProviderProfileId,
+    pub source_url: &'static str,
+    pub status: &'static str,
+}
+
+pub const PROVIDER_LIMIT_REFERENCES: &[ProviderLimitReference] = &[
+    limit(ProviderProfileId::Custom, "", "user_defined"),
+    limit(
+        ProviderProfileId::OpenRouter,
+        "https://openrouter.ai/docs/api/reference/limits",
+        "published_static",
+    ),
+    limit(
+        ProviderProfileId::Ollama,
+        "https://github.com/ollama/ollama",
+        "local_capacity",
+    ),
+    limit(
+        ProviderProfileId::LmStudio,
+        "https://lmstudio.ai/docs",
+        "local_capacity",
+    ),
+    limit(
+        ProviderProfileId::OpenaiApi,
+        "https://platform.openai.com/docs/guides/rate-limits",
+        "account_specific",
+    ),
+    limit(
+        ProviderProfileId::Deepseek,
+        "https://api-docs.deepseek.com/quick_start/rate_limit",
+        "dynamic_concurrency",
+    ),
+    limit(
+        ProviderProfileId::Fireworks,
+        "https://docs.fireworks.ai/serverless/rate-limits",
+        "adaptive",
+    ),
+    limit(
+        ProviderProfileId::Novita,
+        "https://novita.ai/docs/api-reference/quota-list",
+        "account_api",
+    ),
+    limit(
+        ProviderProfileId::Zai,
+        "https://docs.z.ai/devpack/usage-policy",
+        "published_partial",
+    ),
+    limit(
+        ProviderProfileId::GoogleGemini,
+        "https://ai.google.dev/gemini-api/docs/rate-limits",
+        "published_static",
+    ),
+    limit(
+        ProviderProfileId::KiloCode,
+        "https://kilo.ai/docs/gateway/usage-and-billing",
+        "published_static",
+    ),
+    limit(
+        ProviderProfileId::OpenCode,
+        "https://opencode.ai/docs/go/",
+        "subscription_value_windows",
+    ),
+    limit(
+        ProviderProfileId::Cerebras,
+        "https://inference-docs.cerebras.ai/support/rate-limits",
+        "published_static",
+    ),
+    limit(
+        ProviderProfileId::Mistral,
+        "https://docs.mistral.ai/admin/billing-usage/usage-limits",
+        "account_api",
+    ),
+    limit(
+        ProviderProfileId::NousPortal,
+        "https://portal.nousresearch.com/",
+        "published_partial",
+    ),
+    limit(
+        ProviderProfileId::NvidiaNim,
+        "https://build.nvidia.com",
+        "dashboard_only",
+    ),
+    limit(
+        ProviderProfileId::Groq,
+        "https://console.groq.com/docs/rate-limits",
+        "published_static",
+    ),
+    limit(
+        ProviderProfileId::OrcaRouter,
+        "https://docs.orcarouter.ai/operations/billing-and-usage",
+        "account_api",
+    ),
+    limit(
+        ProviderProfileId::OllamaCloud,
+        "https://docs.ollama.com/cloud",
+        "gpu_time_windows",
+    ),
+    limit(
+        ProviderProfileId::Cline,
+        "https://docs.cline.bot/getting-started/clinepass",
+        "account_specific",
+    ),
+    limit(
+        ProviderProfileId::Gitlawb,
+        "https://gitlawb.com/opengateway",
+        "undocumented",
+    ),
+    limit(
+        ProviderProfileId::SiliconFlow,
+        "https://docs.siliconflow.com/en/userguide/rate-limits/rate-limit-and-upgradation",
+        "published_model_tiers",
+    ),
+];
+
+const fn limit(
+    profile: ProviderProfileId,
+    source_url: &'static str,
+    status: &'static str,
+) -> ProviderLimitReference {
+    ProviderLimitReference {
+        profile,
+        source_url,
+        status,
+    }
+}
+
+pub fn provider_limit_reference(
+    profile: ProviderProfileId,
+) -> Option<&'static ProviderLimitReference> {
+    PROVIDER_LIMIT_REFERENCES
+        .iter()
+        .find(|reference| reference.profile == profile)
+}
+
+pub struct RoutingStore {
+    connection: Mutex<Connection>,
+}
+
+impl RoutingStore {
+    pub fn open(path: Option<&Path>) -> Result<Self, RoutingError> {
+        let connection = match path {
+            Some(path) => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                    set_unix_mode(parent, 0o700)?;
+                }
+                let connection = Connection::open(path)?;
+                set_unix_mode(path, 0o600)?;
+                connection
+            }
+            None => Connection::open_in_memory()?,
+        };
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version > 1 {
+            return Err(RoutingError::UnsupportedSchema(version));
+        }
+        connection.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA foreign_keys=ON;
+             CREATE TABLE IF NOT EXISTS catalog_models (
+                 provider TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 is_free INTEGER NOT NULL,
+                 refreshed_at INTEGER NOT NULL,
+                 context_length INTEGER,
+                 supports_tools INTEGER,
+                 supports_vision INTEGER,
+                 supports_structured_output INTEGER,
+                 PRIMARY KEY (provider, model)
+             );
+             CREATE TABLE IF NOT EXISTS usage_counters (
+                 provider TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 kind TEXT NOT NULL,
+                 window_seconds INTEGER NOT NULL,
+                 window_start INTEGER NOT NULL,
+                 used INTEGER NOT NULL,
+                 PRIMARY KEY (provider, model, kind, window_seconds, window_start)
+             );
+             CREATE TABLE IF NOT EXISTS cooldowns (
+                 provider TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 until_epoch INTEGER NOT NULL,
+                 failures INTEGER NOT NULL,
+                 PRIMARY KEY (provider, model)
+             );
+             CREATE TABLE IF NOT EXISTS session_pins (
+                 session_hash TEXT NOT NULL,
+                 route TEXT NOT NULL,
+                 provider TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 expires_at INTEGER NOT NULL,
+                 PRIMARY KEY (session_hash, route)
+             );
+             CREATE TABLE IF NOT EXISTS routing_meta (
+                 key TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS benchmark_snapshots (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 source TEXT NOT NULL,
+                 fetched_at INTEGER NOT NULL,
+                 active INTEGER NOT NULL DEFAULT 0,
+                 attribution TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS benchmark_scores (
+                 snapshot_id INTEGER NOT NULL,
+                 canonical_model TEXT NOT NULL,
+                 metric TEXT NOT NULL,
+                 score REAL NOT NULL,
+                 input_price REAL,
+                 output_price REAL,
+                 latency_seconds REAL,
+                 PRIMARY KEY (snapshot_id, canonical_model, metric),
+                 FOREIGN KEY (snapshot_id) REFERENCES benchmark_snapshots(id) ON DELETE CASCADE
+             );",
+        )?;
+        ensure_catalog_columns(&connection)?;
+        connection.pragma_update(None, "user_version", 1)?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+        })
+    }
+
+    pub fn replace_catalog(
+        &self,
+        provider: &str,
+        models: &[CatalogRecord],
+    ) -> Result<(), RoutingError> {
+        let now = epoch_seconds();
+        let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM catalog_models WHERE provider = ?1", [provider])?;
+        for model in models {
+            transaction.execute(
+                "INSERT INTO catalog_models(
+                    provider, model, is_free, refreshed_at, context_length,
+                    supports_tools, supports_vision, supports_structured_output
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    provider,
+                    model.model,
+                    i64::from(model.is_free),
+                    now,
+                    model.context_length,
+                    optional_bool(model.supports_tools),
+                    optional_bool(model.supports_vision),
+                    optional_bool(model.supports_structured_output)
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn upsert_offering(
+        &self,
+        provider: &str,
+        model: &str,
+        is_free: bool,
+    ) -> Result<(), RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        connection.execute(
+            "INSERT INTO catalog_models(provider, model, is_free, refreshed_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(provider, model) DO UPDATE SET
+                 is_free = excluded.is_free,
+                 refreshed_at = excluded.refreshed_at",
+            params![provider, model, i64::from(is_free), epoch_seconds()],
+        )?;
+        Ok(())
+    }
+
+    pub fn free_candidates(
+        &self,
+        max_age_seconds: u64,
+    ) -> Result<Vec<CatalogOffering>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT provider, model, refreshed_at, context_length,
+                    supports_tools, supports_vision, supports_structured_output
+             FROM catalog_models
+             WHERE is_free = 1 AND refreshed_at >= ?1
+             ORDER BY provider, model",
+        )?;
+        Ok(statement
+            .query_map(
+                [epoch_seconds()
+                    .saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX))],
+                |row| {
+                    Ok(CatalogOffering {
+                        provider: row.get(0)?,
+                        model: row.get(1)?,
+                        refreshed_at: row.get(2)?,
+                        context_length: row.get(3)?,
+                        supports_tools: database_bool(row.get(4)?),
+                        supports_vision: database_bool(row.get(5)?),
+                        supports_structured_output: database_bool(row.get(6)?),
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn catalog_summary(&self) -> Result<Vec<(String, u64, i64)>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT provider, COUNT(*), MAX(refreshed_at)
+             FROM catalog_models GROUP BY provider ORDER BY provider",
+        )?;
+        Ok(statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn reserve(
+        &self,
+        provider: &str,
+        model: &str,
+        estimated_tokens: u64,
+        quotas: &[QuotaLimit],
+    ) -> Result<bool, RoutingError> {
+        let now = epoch_seconds();
+        let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let transaction = connection.transaction()?;
+        let cooldown: Option<i64> = transaction
+            .query_row(
+                "SELECT until_epoch FROM cooldowns WHERE provider = ?1 AND model = ?2",
+                params![provider, model],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if cooldown.is_some_and(|until| until > now) {
+            return Ok(false);
+        }
+        for quota in quotas {
+            let amount = quota_amount(quota.kind, estimated_tokens);
+            let window = i64::try_from(quota.window_seconds).unwrap_or(i64::MAX);
+            let window_start = now - now.rem_euclid(window);
+            let used: u64 = transaction
+                .query_row(
+                    "SELECT used FROM usage_counters
+                     WHERE provider = ?1 AND model = ?2 AND kind = ?3
+                       AND window_seconds = ?4 AND window_start = ?5",
+                    params![
+                        provider,
+                        model,
+                        quota_kind(quota.kind),
+                        quota.window_seconds,
+                        window_start
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            if used.saturating_add(amount) > quota.limit {
+                return Ok(false);
+            }
+        }
+        for quota in quotas {
+            let amount = quota_amount(quota.kind, estimated_tokens);
+            let window = i64::try_from(quota.window_seconds).unwrap_or(i64::MAX);
+            let window_start = now - now.rem_euclid(window);
+            transaction.execute(
+                "INSERT INTO usage_counters(
+                    provider, model, kind, window_seconds, window_start, used
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(provider, model, kind, window_seconds, window_start)
+                 DO UPDATE SET used = used + excluded.used",
+                params![
+                    provider,
+                    model,
+                    quota_kind(quota.kind),
+                    quota.window_seconds,
+                    window_start,
+                    amount
+                ],
+            )?;
+        }
+        transaction.execute(
+            "DELETE FROM usage_counters WHERE window_start + window_seconds < ?1",
+            [now],
+        )?;
+        transaction.execute("DELETE FROM session_pins WHERE expires_at < ?1", [now])?;
+        transaction.execute("DELETE FROM cooldowns WHERE until_epoch < ?1", [now])?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub fn apply_cooldown(
+        &self,
+        provider: &str,
+        model: &str,
+        retry_after_seconds: Option<u64>,
+    ) -> Result<(), RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let failures: u32 = connection
+            .query_row(
+                "SELECT failures FROM cooldowns WHERE provider = ?1 AND model = ?2",
+                params![provider, model],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let next_failures = failures.saturating_add(1);
+        let backoff = retry_after_seconds
+            .unwrap_or_else(|| 2_u64.saturating_pow(next_failures.min(8)).clamp(2, 300));
+        connection.execute(
+            "INSERT INTO cooldowns(provider, model, until_epoch, failures)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(provider, model) DO UPDATE SET
+                 until_epoch = excluded.until_epoch,
+                 failures = excluded.failures",
+            params![
+                provider,
+                model,
+                epoch_seconds().saturating_add(i64::try_from(backoff).unwrap_or(300)),
+                next_failures
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_cooldown(&self, provider: &str, model: &str) -> Result<(), RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        connection.execute(
+            "DELETE FROM cooldowns WHERE provider = ?1 AND model = ?2",
+            params![provider, model],
+        )?;
+        Ok(())
+    }
+
+    pub fn release_token_reservation(
+        &self,
+        provider: &str,
+        model: &str,
+        estimated_tokens: u64,
+        quotas: &[QuotaLimit],
+    ) -> Result<(), RoutingError> {
+        let now = epoch_seconds();
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        for quota in quotas
+            .iter()
+            .filter(|quota| quota.kind == QuotaKind::Tokens)
+        {
+            let window = i64::try_from(quota.window_seconds).unwrap_or(i64::MAX);
+            let window_start = now - now.rem_euclid(window);
+            connection.execute(
+                "UPDATE usage_counters SET used = MAX(0, used - ?1)
+                 WHERE provider = ?2 AND model = ?3 AND kind = 'tokens'
+                   AND window_seconds = ?4 AND window_start = ?5",
+                params![
+                    estimated_tokens.max(1),
+                    provider,
+                    model,
+                    quota.window_seconds,
+                    window_start
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn session_hash(&self, material: &str) -> Result<String, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let salt: Option<String> = connection
+            .query_row(
+                "SELECT value FROM routing_meta WHERE key = 'session_salt'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let salt = match salt {
+            Some(salt) => salt,
+            None => {
+                let seed = format!(
+                    "{}:{}:{:p}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos(),
+                    std::process::id(),
+                    &connection
+                );
+                let salt = format!("{:x}", Sha256::digest(seed.as_bytes()));
+                connection.execute(
+                    "INSERT OR IGNORE INTO routing_meta(key, value) VALUES ('session_salt', ?1)",
+                    [&salt],
+                )?;
+                connection.query_row(
+                    "SELECT value FROM routing_meta WHERE key = 'session_salt'",
+                    [],
+                    |row| row.get(0),
+                )?
+            }
+        };
+        let mut digest = Sha256::new();
+        digest.update(salt.as_bytes());
+        digest.update(material.as_bytes());
+        Ok(format!("{:x}", digest.finalize()))
+    }
+
+    pub fn session_pin(
+        &self,
+        session_hash: &str,
+        route: &str,
+    ) -> Result<Option<(String, String)>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        Ok(connection
+            .query_row(
+                "SELECT provider, model FROM session_pins
+                 WHERE session_hash = ?1 AND route = ?2 AND expires_at > ?3",
+                params![session_hash, route, epoch_seconds()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    pub fn set_session_pin(
+        &self,
+        session_hash: &str,
+        route: &str,
+        provider: &str,
+        model: &str,
+        ttl_seconds: u64,
+    ) -> Result<(), RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        connection.execute(
+            "INSERT INTO session_pins(session_hash, route, provider, model, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(session_hash, route) DO UPDATE SET
+                 provider = excluded.provider,
+                 model = excluded.model,
+                 expires_at = excluded.expires_at",
+            params![
+                session_hash,
+                route,
+                provider,
+                model,
+                epoch_seconds().saturating_add(i64::try_from(ttl_seconds).unwrap_or(1_800))
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+pub fn is_verified_free(provider: &ProviderConfig, model: &str, zero_priced: bool) -> bool {
+    if zero_priced || provider.free_models.iter().any(|free| free == model) {
+        return true;
+    }
+    if provider.billing_mode != BillingMode::Free {
+        return false;
+    }
+    match provider.profile {
+        Some(ProviderProfileId::OpenRouter) | Some(ProviderProfileId::KiloCode) => {
+            model.ends_with(":free")
+        }
+        Some(ProviderProfileId::GoogleGemini) | Some(ProviderProfileId::Groq) => true,
+        Some(ProviderProfileId::Zai) => model.to_ascii_lowercase().contains("flash"),
+        _ => false,
+    }
+}
+
+pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaReference> {
+    if !provider.quotas.is_empty() {
+        return Some(QuotaReference {
+            rules: provider.quotas.clone(),
+            source_url: "user-configured",
+            as_of: "runtime",
+            scope: provider
+                .account_scope
+                .clone()
+                .unwrap_or_else(|| "provider".to_owned()),
+        });
+    }
+    if provider.billing_mode != BillingMode::Free {
+        return None;
+    }
+    let (rules, source_url, scope) = match provider.profile {
+        Some(ProviderProfileId::OpenRouter) => (
+            vec![requests(20, 60), requests(50, 86_400)],
+            "https://openrouter.ai/docs/api/reference/limits",
+            "account",
+        ),
+        Some(ProviderProfileId::KiloCode) => (
+            vec![requests(200, 3_600)],
+            "https://kilo.ai/docs/gateway/usage-and-billing",
+            "ip",
+        ),
+        Some(ProviderProfileId::Groq) => (
+            vec![requests(30, 60), requests(1_000, 86_400), tokens(6_000, 60)],
+            "https://console.groq.com/docs/rate-limits",
+            "organization_model",
+        ),
+        Some(ProviderProfileId::Cerebras) => (
+            vec![
+                requests(5, 60),
+                tokens(30_000, 60),
+                tokens(1_000_000, 86_400),
+            ],
+            "https://inference-docs.cerebras.ai/support/rate-limits",
+            "organization_model",
+        ),
+        Some(ProviderProfileId::GoogleGemini) => {
+            let lower = model.to_ascii_lowercase();
+            let (rpm, rpd) = if lower.contains("pro") {
+                (5, 100)
+            } else if lower.contains("flash-lite") {
+                (15, 1_000)
+            } else {
+                (10, 250)
+            };
+            (
+                vec![
+                    requests(rpm, 60),
+                    requests(rpd, 86_400),
+                    tokens(250_000, 60),
+                ],
+                "https://ai.google.dev/gemini-api/docs/rate-limits",
+                "project_model",
+            )
+        }
+        Some(ProviderProfileId::Zai) => (
+            vec![requests(1, 1)],
+            "https://docs.z.ai/guides/overview/pricing",
+            "account_model",
+        ),
+        _ => return None,
+    };
+    Some(QuotaReference {
+        rules,
+        source_url,
+        as_of: "2026-07-22",
+        scope: scope.to_owned(),
+    })
+}
+
+fn requests(limit: u64, window_seconds: u64) -> QuotaLimit {
+    QuotaLimit {
+        kind: QuotaKind::Requests,
+        limit,
+        window_seconds,
+    }
+}
+
+fn tokens(limit: u64, window_seconds: u64) -> QuotaLimit {
+    QuotaLimit {
+        kind: QuotaKind::Tokens,
+        limit,
+        window_seconds,
+    }
+}
+
+fn quota_amount(kind: QuotaKind, estimated_tokens: u64) -> u64 {
+    match kind {
+        QuotaKind::Requests => 1,
+        QuotaKind::Tokens => estimated_tokens.max(1),
+        QuotaKind::CostMicrousd => 0,
+    }
+}
+
+fn quota_kind(kind: QuotaKind) -> &'static str {
+    match kind {
+        QuotaKind::Requests => "requests",
+        QuotaKind::Tokens => "tokens",
+        QuotaKind::CostMicrousd => "cost_microusd",
+    }
+}
+
+fn optional_bool(value: Option<bool>) -> Option<i64> {
+    value.map(i64::from)
+}
+
+fn database_bool(value: Option<i64>) -> Option<bool> {
+    value.map(|value| value != 0)
+}
+
+fn ensure_catalog_columns(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare("PRAGMA table_info(catalog_models)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (name, sql_type) in [
+        ("context_length", "INTEGER"),
+        ("supports_tools", "INTEGER"),
+        ("supports_vision", "INTEGER"),
+        ("supports_structured_output", "INTEGER"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            connection.execute(
+                &format!("ALTER TABLE catalog_models ADD COLUMN {name} {sql_type}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn epoch_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
+fn set_unix_mode(path: &Path, mode: u32) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::Arc;
+
+    use crate::config::{ProviderConfig, QuotaKind, QuotaLimit};
+
+    use super::{CatalogRecord, RoutingStore};
+
+    #[test]
+    fn catalog_replacement_is_atomic_per_provider() {
+        let store = RoutingStore::open(None).expect("store");
+        store
+            .replace_catalog("one", &[catalog("free-a", true)])
+            .expect("first catalog");
+        store
+            .replace_catalog("one", &[catalog("paid-b", false)])
+            .expect("second catalog");
+        assert!(
+            store
+                .free_candidates(86_400)
+                .expect("candidates")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn quota_reservations_are_atomic_across_threads() {
+        let store = Arc::new(RoutingStore::open(None).expect("store"));
+        let quota = vec![QuotaLimit {
+            kind: QuotaKind::Requests,
+            limit: 1,
+            window_seconds: 60,
+        }];
+        let handles = (0..4)
+            .map(|_| {
+                let store = store.clone();
+                let quota = quota.clone();
+                std::thread::spawn(move || store.reserve("p", "m", 1, &quota).expect("reserve"))
+            })
+            .collect::<Vec<_>>();
+        let accepted = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread"))
+            .filter(|accepted| *accepted)
+            .count();
+        assert_eq!(accepted, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_store_is_protected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("state").join("routing.sqlite3");
+        let _store = RoutingStore::open(Some(&path)).expect("store");
+        assert_eq!(
+            fs::metadata(path).expect("metadata").permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn configured_free_override_is_required_for_custom_provider() {
+        let mut provider = ProviderConfig::default();
+        assert!(!super::is_verified_free(&provider, "model", false));
+        provider.free_models.push("model".to_owned());
+        assert!(super::is_verified_free(&provider, "model", false));
+    }
+
+    fn catalog(model: &str, is_free: bool) -> CatalogRecord {
+        CatalogRecord {
+            model: model.to_owned(),
+            is_free,
+            context_length: None,
+            supports_tools: None,
+            supports_vision: None,
+            supports_structured_output: None,
+        }
+    }
+
+    #[test]
+    fn cooldown_prevents_a_new_reservation() {
+        let store = RoutingStore::open(None).expect("store");
+        store
+            .apply_cooldown("provider", "model", Some(60))
+            .expect("cooldown");
+        assert!(!store.reserve("provider", "model", 1, &[]).expect("reserve"));
+    }
+
+    #[test]
+    fn failed_attempt_can_release_tokens_without_refunding_requests() {
+        let store = RoutingStore::open(None).expect("store");
+        let quotas = vec![
+            QuotaLimit {
+                kind: QuotaKind::Requests,
+                limit: 2,
+                window_seconds: 60,
+            },
+            QuotaLimit {
+                kind: QuotaKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            },
+        ];
+        assert!(store.reserve("p", "m", 100, &quotas).expect("first"));
+        store
+            .release_token_reservation("p", "m", 100, &quotas)
+            .expect("release tokens");
+        assert!(store.reserve("p", "m", 100, &quotas).expect("second"));
+        assert!(!store.reserve("p", "m", 1, &quotas).expect("third"));
+    }
+
+    #[test]
+    fn stale_catalog_entries_are_not_candidates() {
+        let store = RoutingStore::open(None).expect("store");
+        store
+            .replace_catalog("provider", &[catalog("free", true)])
+            .expect("catalog");
+        store
+            .connection
+            .lock()
+            .expect("connection")
+            .execute("UPDATE catalog_models SET refreshed_at = 0", [])
+            .expect("age catalog");
+        assert!(store.free_candidates(60).expect("candidates").is_empty());
+    }
+
+    #[test]
+    fn session_hashes_and_pins_persist_in_the_store() {
+        let store = RoutingStore::open(None).expect("store");
+        let hash = store.session_hash("private session").expect("hash");
+        assert!(!hash.contains("private"));
+        store
+            .set_session_pin(&hash, "auto-free", "provider", "model", 60)
+            .expect("pin");
+        assert_eq!(
+            store.session_pin(&hash, "auto-free").expect("read pin"),
+            Some(("provider".to_owned(), "model".to_owned()))
+        );
+    }
+
+    #[test]
+    fn every_provider_profile_has_a_limit_reference() {
+        for definition in crate::providers::PROFILE_DEFINITIONS {
+            assert!(super::provider_limit_reference(definition.id).is_some());
+        }
+    }
+
+    #[test]
+    fn explicit_zero_price_is_free_even_on_a_paid_account() {
+        let provider = ProviderConfig {
+            billing_mode: crate::config::BillingMode::Paid,
+            ..ProviderConfig::default()
+        };
+        assert!(super::is_verified_free(&provider, "zero-price", true));
+        assert!(!super::is_verified_free(&provider, "unknown-price", false));
+    }
+}

@@ -6,7 +6,11 @@ COPY --chown=1000:1000 gateway.core.example.toml /app/gateway.core.example.toml
 COPY --chown=1000:1000 gateway.secondary.example.toml /app/gateway.secondary.example.toml
 COPY --chown=1000:1000 gateway.optional.example.toml /app/gateway.optional.example.toml
 
+RUN mkdir -p /app/state /var/lib/model-gateway \
+    && chown -R 1000:1000 /app /var/lib/model-gateway
+
 ENV MODEL_GATEWAY_CONFIG=/app/state/config.toml \
+    MODEL_GATEWAY_STATE_PATH=/var/lib/model-gateway/routing.sqlite3 \
     RUST_LOG=info
 
 USER 1000:1000

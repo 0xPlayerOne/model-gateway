@@ -52,6 +52,7 @@ done
 curl --noproxy '*' --silent --fail "http://127.0.0.1:${PROVIDER_PORT}/v1/models" >/dev/null
 HOME="$STATE/home" \
 MODEL_GATEWAY_CONFIG="$STATE/config/config.toml" \
+MODEL_GATEWAY_STATE_PATH="$STATE/routing.sqlite3" \
 MODEL_GATEWAY_SECRET_STORE=environment \
 LOCAL_API_KEY=fixture-secret \
 NO_PROXY=127.0.0.1,localhost \
@@ -73,7 +74,7 @@ for _ in $(seq 1 100); do
 done
 curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/health/ready" >/dev/null
 curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/models" \
-    | python3 -c 'import json,sys; assert [item["id"] for item in json.load(sys.stdin)["data"]][:2] == ["local", "smoke"]'
+    | python3 -c 'import json,sys; assert [item["id"] for item in json.load(sys.stdin)["data"]][:3] == ["local", "auto-free", "smoke"]'
 curl --silent --show-error --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
     -d '{"model":"smoke","messages":[]}' \

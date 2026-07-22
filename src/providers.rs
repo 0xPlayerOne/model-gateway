@@ -341,6 +341,16 @@ impl ProviderProfileId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogModel {
+    pub id: String,
+    pub zero_priced: bool,
+    pub context_length: Option<u64>,
+    pub supports_tools: Option<bool>,
+    pub supports_vision: Option<bool>,
+    pub supports_structured_output: Option<bool>,
+}
+
 pub fn prepare_request(
     adapter: AdapterKind,
     request: &mut serde_json::Value,
@@ -394,6 +404,16 @@ pub fn fetch_models(
     provider: &ProviderConfig,
     api_key: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    Ok(fetch_catalog(provider, api_key)?
+        .into_iter()
+        .map(|model| model.id)
+        .collect())
+}
+
+pub fn fetch_catalog(
+    provider: &ProviderConfig,
+    api_key: Option<&str>,
+) -> Result<Vec<CatalogModel>, String> {
     let endpoint = format!("{}/models", provider.base_url.trim_end_matches('/'));
     let mut request = client(provider)?
         .get(endpoint)
@@ -416,9 +436,59 @@ pub fn fetch_models(
         .ok_or_else(|| "provider model response did not contain a data array".to_owned())?;
     Ok(items
         .iter()
-        .filter_map(|item| item.get("id").and_then(serde_json::Value::as_str))
-        .map(ToOwned::to_owned)
+        .filter_map(|item| {
+            let id = item.get("id").and_then(serde_json::Value::as_str)?;
+            let pricing = item.get("pricing");
+            let input = pricing.and_then(|pricing| {
+                number_at(pricing, "prompt")
+                    .or_else(|| number_at(pricing, "input"))
+                    .or_else(|| number_at(pricing, "input_price"))
+            });
+            let output = pricing.and_then(|pricing| {
+                number_at(pricing, "completion")
+                    .or_else(|| number_at(pricing, "output"))
+                    .or_else(|| number_at(pricing, "output_price"))
+            });
+            let parameters = item
+                .get("supported_parameters")
+                .and_then(serde_json::Value::as_array);
+            let supports_parameter = |names: &[&str]| {
+                parameters.map(|parameters| {
+                    parameters.iter().any(|parameter| {
+                        parameter
+                            .as_str()
+                            .is_some_and(|parameter| names.contains(&parameter))
+                    })
+                })
+            };
+            let modalities = item
+                .get("architecture")
+                .and_then(|architecture| architecture.get("input_modalities"))
+                .and_then(serde_json::Value::as_array);
+            Some(CatalogModel {
+                id: id.to_owned(),
+                zero_priced: matches!((input, output), (Some(input), Some(output)) if input == 0.0 && output == 0.0),
+                context_length: item.get("context_length").and_then(serde_json::Value::as_u64),
+                supports_tools: supports_parameter(&["tools", "tool_choice"]),
+                supports_vision: modalities.map(|modalities| {
+                    modalities
+                        .iter()
+                        .any(|modality| modality.as_str() == Some("image"))
+                }),
+                supports_structured_output: supports_parameter(&[
+                    "response_format",
+                    "structured_outputs",
+                ]),
+            })
+        })
         .collect())
+}
+
+fn number_at(value: &serde_json::Value, key: &str) -> Option<f64> {
+    let value = value.get(key)?;
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
 }
 
 #[cfg(test)]
@@ -427,7 +497,7 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
-    use super::{BuiltinProvider, PROFILE_DEFINITIONS};
+    use super::{BuiltinProvider, CatalogModel, PROFILE_DEFINITIONS, number_at};
     use crate::config::AdapterKind;
 
     #[test]
@@ -471,6 +541,23 @@ mod tests {
         );
         assert_eq!(BuiltinProvider::Gitlawb.suggested_model(), "mimo-v2.5-pro");
         assert!(BuiltinProvider::SiliconFlow.needs_api_key());
+    }
+
+    #[test]
+    fn catalog_pricing_accepts_numeric_and_string_zeroes() {
+        let numeric = serde_json::json!({"input": 0, "output": 0.0});
+        let strings = serde_json::json!({"prompt": "0", "completion": "0.000"});
+        assert_eq!(number_at(&numeric, "input"), Some(0.0));
+        assert_eq!(number_at(&strings, "completion"), Some(0.0));
+        let model = CatalogModel {
+            id: "fixture".to_owned(),
+            zero_priced: true,
+            context_length: Some(128_000),
+            supports_tools: Some(true),
+            supports_vision: Some(false),
+            supports_structured_output: Some(true),
+        };
+        assert!(model.zero_priced);
     }
 
     #[test]

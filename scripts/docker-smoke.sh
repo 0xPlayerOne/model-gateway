@@ -72,6 +72,7 @@ services:
       MODEL_GATEWAY_CONFIG: /app/state/config.toml
       MODEL_GATEWAY_CONTAINER_MODE: "1"
       MODEL_GATEWAY_SECRET_DIR: /run/model-gateway/secrets
+      MODEL_GATEWAY_STATE_PATH: /var/lib/model-gateway/routing.sqlite3
     ports:
        - "127.0.0.1:${GATEWAY_PORT}:8008"
     extra_hosts:
@@ -79,6 +80,7 @@ services:
     volumes:
       - "$STATE/state:/app/state:ro"
       - secrets:/run/model-gateway/secrets:ro
+      - state:/var/lib/model-gateway
   setup:
     build:
       context: "$ROOT"
@@ -95,6 +97,7 @@ services:
       - secrets:/run/model-gateway/secrets
 volumes:
   secrets:
+  state:
 EOF
 
 MOCK_PROVIDER_API_KEY=fixture-secret MOCK_PROVIDER_HOST=0.0.0.0 \
@@ -121,7 +124,7 @@ for _ in $(seq 1 30); do
 done
 test "$(docker inspect "$(docker compose -f "$STATE/compose.yml" ps -q gateway)" --format '{{.State.Health.Status}}')" = healthy
 curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/models" \
-    | python3 -c 'import json,sys; assert [item["id"] for item in json.load(sys.stdin)["data"]][:2] == ["local", "smoke"]'
+    | python3 -c 'import json,sys; assert [item["id"] for item in json.load(sys.stdin)["data"]][:3] == ["local", "auto-free", "smoke"]'
 
 curl --silent --show-error --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \

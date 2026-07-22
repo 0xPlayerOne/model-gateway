@@ -64,6 +64,7 @@ cargo build --release --manifest-path "$ROOT/Cargo.toml"
 MOCK_PROVIDER_LOG="$PROVIDER_LOG" python3 "$ROOT/scripts/mock_provider.py" "$PROVIDER_PORT" &
 PROVIDER_PID=$!
 MODEL_GATEWAY_CONFIG="$STATE/gateway.toml" \
+    MODEL_GATEWAY_STATE_PATH="$STATE/routing.sqlite3" \
     MODEL_GATEWAY_SECRET_STORE=environment \
     "$ROOT/target/release/model-gateway" serve > "$STATE/gateway.log" 2>&1 &
 GATEWAY_PID=$!
@@ -79,7 +80,7 @@ curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/health/ready" >/dev/null
 
 MODELS=$(curl --silent --show-error --fail --retry 3 \
     "http://127.0.0.1:${GATEWAY_PORT}/v1/models")
-python3 -c 'import json,sys; assert [item["id"] for item in json.loads(sys.argv[1])["data"]][:2] == ["local", "smoke"]' "$MODELS"
+python3 -c 'import json,sys; assert [item["id"] for item in json.loads(sys.argv[1])["data"]][:3] == ["local", "auto-free", "smoke"]' "$MODELS"
 
 NON_STREAMING=$(curl --silent --show-error --fail --retry 3 \
     "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \

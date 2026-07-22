@@ -23,6 +23,7 @@ services:
       MODEL_GATEWAY_CONFIG: /app/state/config.toml
       MODEL_GATEWAY_SECRET_DIR: /run/model-gateway/secrets
       MODEL_GATEWAY_CONTAINER_MODE: "1"
+      MODEL_GATEWAY_STATE_PATH: /var/lib/model-gateway/routing.sqlite3
       RUST_LOG: info
     ports:
       - "127.0.0.1:8008:8008"
@@ -31,6 +32,7 @@ services:
     volumes:
       - ./.model-gateway:/app/state:ro
       - model-gateway-secrets:/run/model-gateway/secrets:ro
+      - model-gateway-state:/var/lib/model-gateway
 
   setup:
     build:
@@ -53,3 +55,4 @@ services:
 
 volumes:
   model-gateway-secrets:
+  model-gateway-state:

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -61,6 +61,10 @@ pub struct ServerConfig {
     pub local_model: Option<String>,
     #[serde(default = "default_local_model_cache_seconds")]
     pub local_model_cache_seconds: u64,
+    #[serde(default)]
+    pub state_path: Option<PathBuf>,
+    #[serde(default = "default_catalog_max_age_seconds")]
+    pub catalog_max_age_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +98,18 @@ pub struct ProviderConfig {
     pub response_header_timeout_seconds: u64,
     #[serde(default = "default_stream_idle_timeout_seconds")]
     pub stream_idle_timeout_seconds: u64,
+    #[serde(default)]
+    pub billing_mode: BillingMode,
+    #[serde(default)]
+    pub account_scope: Option<String>,
+    #[serde(default)]
+    pub free_models: Vec<String>,
+    #[serde(default)]
+    pub model_allowlist: Vec<String>,
+    #[serde(default)]
+    pub model_denylist: Vec<String>,
+    #[serde(default)]
+    pub quotas: Vec<QuotaLimit>,
 }
 
 impl Default for ProviderConfig {
@@ -110,8 +126,39 @@ impl Default for ProviderConfig {
             connect_timeout_seconds: default_connect_timeout_seconds(),
             response_header_timeout_seconds: default_response_header_timeout_seconds(),
             stream_idle_timeout_seconds: default_stream_idle_timeout_seconds(),
+            billing_mode: BillingMode::Free,
+            account_scope: None,
+            free_models: Vec::new(),
+            model_allowlist: Vec::new(),
+            model_denylist: Vec::new(),
+            quotas: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingMode {
+    #[default]
+    Free,
+    Paid,
+    Subscription,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaKind {
+    Requests,
+    Tokens,
+    CostMicrousd,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaLimit {
+    pub kind: QuotaKind,
+    pub limit: u64,
+    pub window_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,6 +219,8 @@ impl Default for ServerConfig {
             local_base_url: default_local_base_url(),
             local_model: None,
             local_model_cache_seconds: default_local_model_cache_seconds(),
+            state_path: None,
+            catalog_max_age_seconds: default_catalog_max_age_seconds(),
         }
     }
 }
@@ -192,6 +241,12 @@ impl Config {
             env::var("MODEL_GATEWAY_LOCAL_BASE_URL").ok().as_deref(),
             env::var("MODEL_GATEWAY_LOCAL_MODEL").ok().as_deref(),
         )?;
+        if let Some(path) = env::var_os("MODEL_GATEWAY_STATE_PATH") {
+            config.server.state_path = Some(PathBuf::from(path));
+        } else if config.server.state_path.is_none() {
+            config.server.state_path = Some(home_dir().join("routing.sqlite3"));
+        }
+        apply_provider_environment_overrides(&mut config)?;
         config.validate(secrets)?;
         Ok(config)
     }
@@ -246,6 +301,11 @@ impl Config {
                 "local model cache duration must be greater than zero".to_owned(),
             ));
         }
+        if self.server.catalog_max_age_seconds == 0 {
+            return Err(ConfigError::Invalid(
+                "catalog maximum age must be greater than zero".to_owned(),
+            ));
+        }
         if self
             .server
             .local_model
@@ -261,7 +321,13 @@ impl Config {
                 "at least one provider is required".to_owned(),
             ));
         }
+        let mut environment_names = BTreeSet::new();
         for (name, provider) in &self.providers {
+            if !environment_names.insert(provider_environment_suffix(name)) {
+                return Err(ConfigError::Invalid(format!(
+                    "provider '{name}' collides with another provider's environment override name"
+                )));
+            }
             validate_provider(name, provider, secrets)?;
         }
         if self.models.is_empty() {
@@ -271,10 +337,10 @@ impl Config {
         }
         for (alias, model) in &self.models {
             validate_identifier(alias, "model alias")?;
-            if alias == "local" {
-                return Err(ConfigError::Invalid(
-                    "model alias 'local' is reserved for the built-in local route".to_owned(),
-                ));
+            if matches!(alias.as_str(), "local" | "auto-free") {
+                return Err(ConfigError::Invalid(format!(
+                    "model alias '{alias}' is reserved for a built-in route"
+                )));
             }
             if alias.contains('/') {
                 return Err(ConfigError::Invalid(format!(
@@ -323,6 +389,38 @@ impl Config {
     pub fn home_dir() -> PathBuf {
         home_dir()
     }
+}
+
+fn apply_provider_environment_overrides(config: &mut Config) -> Result<(), ConfigError> {
+    for (name, provider) in &mut config.providers {
+        let suffix = provider_environment_suffix(name);
+        let variable = format!("MODEL_GATEWAY_{suffix}_BILLING_MODE");
+        if let Ok(value) = env::var(&variable) {
+            provider.billing_mode = match value.as_str() {
+                "free" => BillingMode::Free,
+                "paid" => BillingMode::Paid,
+                "subscription" => BillingMode::Subscription,
+                _ => {
+                    return Err(ConfigError::Invalid(format!(
+                        "{variable} must be free, paid, or subscription"
+                    )));
+                }
+            };
+        }
+    }
+    Ok(())
+}
+
+fn provider_environment_suffix(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn validate_server(server: &ServerConfig) -> Result<(), ConfigError> {
@@ -412,16 +510,57 @@ fn validate_provider(
             )));
         }
     }
+    for model in provider
+        .free_models
+        .iter()
+        .chain(&provider.model_allowlist)
+        .chain(&provider.model_denylist)
+    {
+        if model.trim().is_empty() || model.len() > 512 {
+            return Err(ConfigError::Invalid(format!(
+                "provider '{name}' contains an invalid routing model ID"
+            )));
+        }
+    }
+    if provider
+        .model_allowlist
+        .iter()
+        .any(|model| provider.model_denylist.iter().any(|denied| denied == model))
+    {
+        return Err(ConfigError::Invalid(format!(
+            "provider '{name}' allows and denies the same model"
+        )));
+    }
+    if provider
+        .quotas
+        .iter()
+        .any(|quota| quota.limit == 0 || quota.window_seconds == 0)
+    {
+        return Err(ConfigError::Invalid(format!(
+            "provider '{name}' quota limits and windows must be greater than zero"
+        )));
+    }
+    if provider
+        .quotas
+        .iter()
+        .any(|quota| quota.kind == QuotaKind::CostMicrousd)
+    {
+        return Err(ConfigError::Invalid(format!(
+            "provider '{name}' cost quotas require the auto-efficient route"
+        )));
+    }
+    if provider
+        .account_scope
+        .as_ref()
+        .is_some_and(|scope| scope.trim().is_empty() || scope.len() > 128)
+    {
+        return Err(ConfigError::Invalid(format!(
+            "provider '{name}' account scope must be 1-128 characters"
+        )));
+    }
     if let Some(secret) = &provider.api_key_secret {
         validate_secret_name(secret)?;
-        match secrets {
-            Some(resolver) if resolver.get(secret)?.is_none() => {
-                return Err(ConfigError::MissingSecret {
-                    name: secret.clone(),
-                });
-            }
-            _ => {}
-        }
+        let _ = secrets;
     }
     Ok(())
 }
@@ -538,6 +677,10 @@ const fn default_local_model_cache_seconds() -> u64 {
     60
 }
 
+const fn default_catalog_max_age_seconds() -> u64 {
+    86_400
+}
+
 const fn default_connect_timeout_seconds() -> u64 {
     10
 }
@@ -553,7 +696,8 @@ const fn default_stream_idle_timeout_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, Exposure, ModelConfig, ProviderConfig, ServerConfig, TargetConfig, validate_server,
+        BillingMode, Config, Exposure, ModelConfig, ProviderConfig, QuotaKind, QuotaLimit,
+        ServerConfig, TargetConfig, validate_server,
     };
     use crate::secrets::SecretResolver;
     use std::collections::BTreeMap;
@@ -571,6 +715,12 @@ mod tests {
             connect_timeout_seconds: 10,
             response_header_timeout_seconds: 300,
             stream_idle_timeout_seconds: 180,
+            billing_mode: BillingMode::Free,
+            account_scope: None,
+            free_models: Vec::new(),
+            model_allowlist: Vec::new(),
+            model_denylist: Vec::new(),
+            quotas: Vec::new(),
         }
     }
 
@@ -607,6 +757,46 @@ mod tests {
         assert_eq!(server.local_base_url, "http://127.0.0.1:8000/v1");
         assert_eq!(server.local_model, None);
         assert!(server.local_model_cache_seconds > 0);
+    }
+
+    #[test]
+    fn providers_default_to_free_billing_with_no_unverified_models() {
+        let provider = ProviderConfig::default();
+        assert_eq!(provider.billing_mode, BillingMode::Free);
+        assert!(provider.free_models.is_empty());
+        assert!(provider.model_allowlist.is_empty());
+        assert!(provider.model_denylist.is_empty());
+        assert!(provider.quotas.is_empty());
+    }
+
+    #[test]
+    fn validates_typed_quota_overrides() {
+        let mut config = valid_config("https://example.com/v1");
+        config.providers.get_mut("local").expect("provider").quotas = vec![QuotaLimit {
+            kind: QuotaKind::Requests,
+            limit: 50,
+            window_seconds: 86_400,
+        }];
+        config.validate_structure().expect("valid quota override");
+        config.providers.get_mut("local").expect("provider").quotas[0].limit = 0;
+        assert!(config.validate_structure().is_err());
+        let quota = &mut config.providers.get_mut("local").expect("provider").quotas[0];
+        quota.limit = 50;
+        quota.kind = QuotaKind::CostMicrousd;
+        assert!(config.validate_structure().is_err());
+    }
+
+    #[test]
+    fn rejects_provider_environment_name_collisions() {
+        let mut config = valid_config("https://example.com/v1");
+        let provider = config.providers.get("local").expect("provider").clone();
+        config.providers.clear();
+        config.providers.insert("a-b".to_owned(), provider.clone());
+        config.providers.insert("a_b".to_owned(), provider);
+        for model in config.models.values_mut() {
+            model.targets[0].provider = "a-b".to_owned();
+        }
+        assert!(config.validate_structure().is_err());
     }
 
     #[test]

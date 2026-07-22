@@ -9,7 +9,10 @@ use tracing_subscriber::prelude::*;
 
 use model_gateway::config::{Config, ConfigError, Exposure, ModelConfig, TargetConfig};
 use model_gateway::gateway::run_server;
-use model_gateway::providers::BuiltinProvider;
+use model_gateway::providers::{BuiltinProvider, ConnectionCheck, fetch_catalog};
+use model_gateway::routing::{
+    CatalogRecord, RoutingStore, is_verified_free, provider_limit_reference,
+};
 use model_gateway::secrets::SecretResolver;
 
 #[derive(Debug, Parser)]
@@ -33,6 +36,10 @@ enum Command {
     Credentials {
         #[command(subcommand)]
         command: CredentialCommand,
+    },
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommand,
     },
     Healthcheck {
         #[arg(
@@ -69,6 +76,15 @@ enum CredentialCommand {
     List,
 }
 
+#[derive(Debug, Subcommand)]
+enum CatalogCommand {
+    Refresh {
+        #[arg(long, help = "Refresh only one configured provider")]
+        provider: Option<String>,
+    },
+    Status,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     init_logging()?;
     let cli = Cli::parse();
@@ -81,8 +97,81 @@ fn main() -> Result<(), Box<dyn Error>> {
             command: ConfigCommand::Show,
         } => config_show()?,
         Command::Credentials { command } => credentials(command)?,
+        Command::Catalog { command } => catalog(command)?,
         Command::Healthcheck { endpoint } => healthcheck(&endpoint)?,
         Command::Serve => tokio::runtime::Runtime::new()?.block_on(serve())?,
+    }
+    Ok(())
+}
+
+fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
+    let resolver = SecretResolver::default();
+    let config = Config::load(Config::default_path(), &resolver)?;
+    let store = RoutingStore::open(config.server.state_path.as_deref())?;
+    match command {
+        CatalogCommand::Refresh { provider } => {
+            let mut refreshed = 0usize;
+            for (name, provider_config) in &config.providers {
+                if provider.as_deref().is_some_and(|selected| selected != name) {
+                    continue;
+                }
+                if provider_config.profile.is_some_and(|profile| {
+                    profile.definition().connection_check == ConnectionCheck::ConfigurationOnly
+                }) {
+                    println!("Skipped {name}: provider has no documented model catalog");
+                    continue;
+                }
+                let api_key = match provider_config.api_key_secret.as_deref() {
+                    Some(secret) => match resolver.get(secret)? {
+                        Some(api_key) => Some(api_key),
+                        None => {
+                            println!("Skipped {name}: credential is unavailable");
+                            continue;
+                        }
+                    },
+                    None => None,
+                };
+                let models = fetch_catalog(provider_config, api_key.as_deref())?;
+                let models = models
+                    .into_iter()
+                    .map(|model| {
+                        let is_free =
+                            is_verified_free(provider_config, &model.id, model.zero_priced);
+                        CatalogRecord {
+                            model: model.id,
+                            is_free,
+                            context_length: model.context_length,
+                            supports_tools: model.supports_tools,
+                            supports_vision: model.supports_vision,
+                            supports_structured_output: model.supports_structured_output,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                store.replace_catalog(name, &models)?;
+                println!("Refreshed {name}: {} models", models.len());
+                refreshed += 1;
+            }
+            if provider.is_some() && refreshed == 0 {
+                return Err("selected provider was not refreshed".into());
+            }
+        }
+        CatalogCommand::Status => {
+            let summary = store.catalog_summary()?;
+            if summary.is_empty() {
+                println!("No cached provider catalogs");
+            }
+            for (provider, models, refreshed_at) in summary {
+                println!("{provider}: {models} models, refreshed_at={refreshed_at}");
+            }
+            for (name, provider) in &config.providers {
+                if let Some(reference) = provider.profile.and_then(provider_limit_reference) {
+                    println!(
+                        "{name}: quota_status={}, source={}",
+                        reference.status, reference.source_url
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -345,16 +434,15 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
     apply_pending_secrets(&resolver, &config_path, &config, pending_secrets)?;
     println!("Saved {}", config_path.display());
     println!(
-        "Aliases: {}",
+        "Models: local, auto-free, {}",
         config.models.keys().cloned().collect::<Vec<_>>().join(", ")
     );
     let endpoint = "http://127.0.0.1:8008/v1";
-    let default_alias = config.models.keys().next().expect("validated alias");
     println!("Hermes custom-endpoint YAML:");
     println!("model:");
     println!("  provider: custom");
     println!("  base_url: {endpoint}");
-    println!("  default: {default_alias}");
+    println!("  default: local");
     println!("curl http://127.0.0.1:8008/health/live");
     println!("curl http://127.0.0.1:8008/v1/models");
     Ok(())

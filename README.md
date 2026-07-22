@@ -68,6 +68,17 @@ multiple models, an explicit model is required. Terminal assistant text is
 decorated with one final model, reasoning-effort, and provider line; this
 gateway-added text is not included in upstream token usage.
 
+The `auto-free` model selects only models proven free by zero-price catalog
+metadata, an official free-tier rule, or a `free_models` provider override.
+Providers without an available API key are ignored. Request and token windows,
+cooldowns, catalog snapshots, and opaque session pins are stored locally in a
+protected SQLite database; prompts and responses are never stored. If all free
+capacity is exhausted, routing falls back to `local`.
+
+Refresh dynamic provider catalogs explicitly with `model-gateway catalog
+refresh`, and inspect cache age with `model-gateway catalog status`. Override
+the state location with `MODEL_GATEWAY_STATE_PATH`.
+
 ## Supported Profiles
 
 The setup wizard uses one declarative registry. Provider recommendations follow

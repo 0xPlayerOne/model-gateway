@@ -12,8 +12,8 @@ ARG MODEL_GATEWAY_GID=10001
 
 RUN if ! getent group "$MODEL_GATEWAY_GID" >/dev/null; then groupadd --gid "$MODEL_GATEWAY_GID" model-gateway; fi \
     && useradd --uid "$MODEL_GATEWAY_UID" --gid "$MODEL_GATEWAY_GID" --create-home model-gateway \
-    && mkdir -p /app/state /run/model-gateway/secrets \
-    && chown -R "$MODEL_GATEWAY_UID:$MODEL_GATEWAY_GID" /app /run/model-gateway
+    && mkdir -p /app/state /run/model-gateway/secrets /var/lib/model-gateway \
+    && chown -R "$MODEL_GATEWAY_UID:$MODEL_GATEWAY_GID" /app /run/model-gateway /var/lib/model-gateway
 
 COPY --from=builder /src/target/release/model-gateway /usr/local/bin/model-gateway
 COPY gateway.example.toml /app/gateway.example.toml
@@ -24,6 +24,7 @@ COPY gateway.optional.example.toml /app/gateway.optional.example.toml
 USER model-gateway
 WORKDIR /app
 ENV MODEL_GATEWAY_CONFIG=/app/state/config.toml \
+    MODEL_GATEWAY_STATE_PATH=/var/lib/model-gateway/routing.sqlite3 \
     RUST_LOG=info
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 CMD ["model-gateway", "healthcheck"]
