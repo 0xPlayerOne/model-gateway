@@ -1421,6 +1421,141 @@ async fn auto_free_quality_bar_filters_by_context() {
 }
 
 #[tokio::test]
+async fn auto_free_does_not_invalidate_pin_on_rate_limit() {
+    let throttled_calls = Arc::new(AtomicUsize::new(0));
+    let calls = throttled_calls.clone();
+    let throttled = spawn_router(Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                ProviderResponse::Failure(StatusCode::TOO_MANY_REQUESTS, "limited").respond(body)
+            }
+        }),
+    ))
+    .await;
+    let healthy = spawn_provider(ProviderResponse::Success).await;
+    let mut throttled_provider = provider(format!("http://{throttled}/v1"));
+    throttled_provider.free_models = vec!["free-a".to_owned()];
+    let mut healthy_provider = provider(format!("http://{healthy}/v1"));
+    healthy_provider.free_models = vec!["free-b".to_owned()];
+    let gateway = spawn_gateway(config_for(
+        BTreeMap::from([
+            ("a-throttled".to_owned(), throttled_provider),
+            ("b-healthy".to_owned(), healthy_provider),
+        ]),
+        vec![TargetConfig {
+            provider: "a-throttled".to_owned(),
+            model: "free-a".to_owned(),
+        }],
+    ))
+    .await;
+    let client = reqwest::Client::new();
+
+    // Pin is NOT invalidated on 429 (only on 401/403 auth failures).
+    // Cooldown handles temporary routing; cooldown skips A on second request.
+    for _ in 0..2 {
+        let response = client
+            .post(format!("{gateway}/v1/chat/completions"))
+            .json(&json!({"model": "auto-free", "messages": []}))
+            .send()
+            .await
+            .expect("auto-free response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-model-gateway-provider"], "b-healthy");
+    }
+    assert_eq!(throttled_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn auto_free_abandons_pin_on_auth_failure() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let count = call_count.clone();
+    let provider_a = spawn_router(Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let count = count.clone();
+            async move {
+                let n = count.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    ProviderResponse::Failure(StatusCode::UNAUTHORIZED, "bad key").respond(body)
+                } else {
+                    ProviderResponse::Success.respond(body)
+                }
+            }
+        }),
+    ))
+    .await;
+    let provider_b = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (prov, model, quality) in [("a", "model-a", 90.0), ("b", "model-b", 50.0)] {
+        store
+            .replace_catalog(
+                prov,
+                &[CatalogRecord {
+                    model: model.to_owned(),
+                    is_free: true,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(0.0),
+                    output_price_per_million: Some(0.0),
+                }],
+            )
+            .expect("catalog");
+        store
+            .replace_benchmarks(
+                "fixture",
+                "Fixture",
+                &[BenchmarkModel::fixture(
+                    model, quality, quality, quality, 0.0, 0.0,
+                )],
+            )
+            .expect("benchmarks");
+    }
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([
+            ("a".to_owned(), provider(format!("http://{provider_a}/v1"))),
+            ("b".to_owned(), provider(format!("http://{provider_b}/v1"))),
+        ]),
+        vec![TargetConfig {
+            provider: "a".to_owned(),
+            model: "model-a".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+
+    // First request: A returns 401 (permanent auth failure), falls back to B
+    let first = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .header("x-session-id", "auth-test")
+        .json(&json!({"model": "auto-free", "messages": []}))
+        .send()
+        .await
+        .expect("first response");
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(first.headers()["x-model-gateway-provider"], "b");
+
+    // Second request: pin was invalidated on 401, B has new pin
+    let second = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .header("x-session-id", "auth-test")
+        .json(&json!({"model": "auto-free", "messages": []}))
+        .send()
+        .await
+        .expect("second response");
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(second.headers()["x-model-gateway-provider"], "b");
+}
+
+#[tokio::test]
 async fn direct_alias_reports_missing_provider_key_in_openai_shape() {
     let keyed = spawn_provider(ProviderResponse::Success).await;
     let mut keyed_provider = provider(format!("http://{keyed}/v1"));
