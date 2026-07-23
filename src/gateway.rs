@@ -925,6 +925,14 @@ async fn list_free_models(
         ));
     }
 
+    // Deduplicate: if two offerings have the same normalized canonical ID,
+    // keep the one with higher quality (or the first if equal).
+    let mut seen = std::collections::HashSet::new();
+    data.retain(|(_, _, offering, _, _)| {
+        let normalized = normalize_identifier(&offering.model);
+        seen.insert(normalized)
+    });
+
     data.sort_by(
         |(left_q, _, left_o, left_kind, _), (right_q, _, right_o, right_kind, _)| {
             let left_benchmarked = left_q.is_some();
