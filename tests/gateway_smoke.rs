@@ -1025,6 +1025,402 @@ async fn auto_free_cools_down_a_rate_limited_model() {
 }
 
 #[tokio::test]
+async fn auto_free_prefers_higher_quality_model() {
+    let weak = spawn_provider(ProviderResponse::Success).await;
+    let strong = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (provider, model) in [("weak", "weak-model"), ("strong", "strong-model")] {
+        store
+            .replace_catalog(
+                provider,
+                &[CatalogRecord {
+                    model: model.to_owned(),
+                    is_free: true,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(0.0),
+                    output_price_per_million: Some(0.0),
+                }],
+            )
+            .expect("catalog");
+    }
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[
+                BenchmarkModel::fixture("weak-model", 40.0, 30.0, 20.0, 0.0, 0.0),
+                BenchmarkModel::fixture("strong-model", 90.0, 85.0, 80.0, 0.0, 0.0),
+            ],
+        )
+        .expect("benchmarks");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([
+            ("weak".to_owned(), provider(format!("http://{weak}/v1"))),
+            ("strong".to_owned(), provider(format!("http://{strong}/v1"))),
+        ]),
+        vec![TargetConfig {
+            provider: "weak".to_owned(),
+            model: "weak-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-free", "messages": []}))
+        .send()
+        .await
+        .expect("auto-free response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "strong");
+}
+
+#[tokio::test]
+async fn auto_free_quality_bar_filters_low_quality() {
+    let provider_address = spawn_provider(ProviderResponse::Success).await;
+    let local = spawn_local_provider(vec!["local-model"]).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "free",
+            &[CatalogRecord {
+                model: "low-quality-model".to_owned(),
+                is_free: true,
+                context_length: Some(128_000),
+                supports_tools: Some(false),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: Some(0.0),
+                output_price_per_million: Some(0.0),
+            }],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "low-quality-model",
+                10.0,
+                10.0,
+                10.0,
+                0.0,
+                0.0,
+            )],
+        )
+        .expect("benchmarks");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([(
+            "free".to_owned(),
+            provider(format!("http://{provider_address}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "free".to_owned(),
+            model: "low-quality-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.local_base_url = format!("http://{local}/v1");
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-free", "messages": []}))
+        .send()
+        .await
+        .expect("auto-free response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "local");
+}
+
+#[tokio::test]
+async fn auto_free_selects_task_appropriate_model() {
+    let general = spawn_provider(ProviderResponse::Success).await;
+    let coding = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (provider, model) in [
+        ("general-specialist", "general-model"),
+        ("coding-specialist", "coding-model"),
+    ] {
+        store
+            .replace_catalog(
+                provider,
+                &[CatalogRecord {
+                    model: model.to_owned(),
+                    is_free: true,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(0.0),
+                    output_price_per_million: Some(0.0),
+                }],
+            )
+            .expect("catalog");
+    }
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[
+                BenchmarkModel::fixture("general-model", 90.0, 30.0, 30.0, 0.0, 0.0),
+                BenchmarkModel::fixture("coding-model", 60.0, 95.0, 60.0, 0.0, 0.0),
+            ],
+        )
+        .expect("benchmarks");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([
+            (
+                "general-specialist".to_owned(),
+                provider(format!("http://{general}/v1")),
+            ),
+            (
+                "coding-specialist".to_owned(),
+                provider(format!("http://{coding}/v1")),
+            ),
+        ]),
+        vec![TargetConfig {
+            provider: "general-specialist".to_owned(),
+            model: "general-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+
+    // Coding request should pick the coding specialist
+    let coding_response = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-free",
+            "messages": [{"role": "user", "content": "Implement a Rust service with concurrency."}]
+        }))
+        .send()
+        .await
+        .expect("coding auto-free response");
+    assert_eq!(coding_response.status(), StatusCode::OK);
+    assert_eq!(
+        coding_response.headers()["x-model-gateway-provider"],
+        "coding-specialist"
+    );
+
+    // General request should pick the general specialist
+    let general_response = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-free",
+            "messages": [{"role": "user", "content": "Summarize this paragraph."}]
+        }))
+        .send()
+        .await
+        .expect("general auto-free response");
+    assert_eq!(general_response.status(), StatusCode::OK);
+    assert_eq!(
+        general_response.headers()["x-model-gateway-provider"],
+        "general-specialist"
+    );
+}
+
+#[tokio::test]
+async fn auto_free_emits_selection_headers() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "free",
+            &[CatalogRecord {
+                model: "benchmarked-free".to_owned(),
+                is_free: true,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: Some(0.0),
+                output_price_per_million: Some(0.0),
+            }],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "benchmarked-free",
+                85.0,
+                80.0,
+                75.0,
+                0.0,
+                0.0,
+            )],
+        )
+        .expect("benchmarks");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([("free".to_owned(), provider(format!("http://{upstream}/v1")))]),
+        vec![TargetConfig {
+            provider: "free".to_owned(),
+            model: "benchmarked-free".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-free", "messages": []}))
+        .send()
+        .await
+        .expect("auto-free response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-task"], "general");
+    assert_eq!(response.headers()["x-model-gateway-quality"], "85");
+    assert_eq!(response.headers()["x-model-gateway-complexity"], "simple");
+    assert_eq!(response.headers()["x-model-gateway-classifier"], "rules-v1");
+}
+
+#[tokio::test]
+async fn auto_free_falls_back_through_multiple_providers() {
+    let calls_a = Arc::new(AtomicUsize::new(0));
+    let calls_b = Arc::new(AtomicUsize::new(0));
+    let a_ref = calls_a.clone();
+    let b_ref = calls_b.clone();
+    let provider_a = spawn_router(Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let calls = a_ref.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                ProviderResponse::Failure(StatusCode::TOO_MANY_REQUESTS, "limited").respond(body)
+            }
+        }),
+    ))
+    .await;
+    let provider_b = spawn_router(Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let calls = b_ref.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                ProviderResponse::Failure(StatusCode::TOO_MANY_REQUESTS, "limited").respond(body)
+            }
+        }),
+    ))
+    .await;
+    let provider_c = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (prov, model) in [("a", "free-a"), ("b", "free-b"), ("c", "free-c")] {
+        store
+            .replace_catalog(
+                prov,
+                &[CatalogRecord {
+                    model: model.to_owned(),
+                    is_free: true,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(0.0),
+                    output_price_per_million: Some(0.0),
+                }],
+            )
+            .expect("catalog");
+    }
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[
+                BenchmarkModel::fixture("free-a", 50.0, 50.0, 50.0, 0.0, 0.0),
+                BenchmarkModel::fixture("free-b", 50.0, 50.0, 50.0, 0.0, 0.0),
+                BenchmarkModel::fixture("free-c", 50.0, 50.0, 50.0, 0.0, 0.0),
+            ],
+        )
+        .expect("benchmarks");
+    drop(store);
+    let config = config_for(
+        BTreeMap::from([
+            ("a".to_owned(), provider(format!("http://{provider_a}/v1"))),
+            ("b".to_owned(), provider(format!("http://{provider_b}/v1"))),
+            ("c".to_owned(), provider(format!("http://{provider_c}/v1"))),
+        ]),
+        vec![TargetConfig {
+            provider: "a".to_owned(),
+            model: "free-a".to_owned(),
+        }],
+    );
+    let mut config = config;
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-free", "messages": []}))
+        .send()
+        .await
+        .expect("auto-free response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "c");
+    assert!(calls_a.load(Ordering::SeqCst) >= 1);
+    assert!(calls_b.load(Ordering::SeqCst) >= 1);
+}
+
+#[tokio::test]
+async fn auto_free_quality_bar_filters_by_context() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let local = spawn_local_provider(vec!["local-model"]).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "free",
+            &[CatalogRecord {
+                model: "tiny-context".to_owned(),
+                is_free: true,
+                context_length: Some(4_096),
+                supports_tools: Some(false),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: Some(0.0),
+                output_price_per_million: Some(0.0),
+            }],
+        )
+        .expect("catalog");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([("free".to_owned(), provider(format!("http://{upstream}/v1")))]),
+        vec![TargetConfig {
+            provider: "free".to_owned(),
+            model: "tiny-context".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.local_base_url = format!("http://{local}/v1");
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-free", "messages": []}))
+        .send()
+        .await
+        .expect("auto-free response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "local");
+}
+
+#[tokio::test]
 async fn direct_alias_reports_missing_provider_key_in_openai_shape() {
     let keyed = spawn_provider(ProviderResponse::Success).await;
     let mut keyed_provider = provider(format!("http://{keyed}/v1"));

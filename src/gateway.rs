@@ -1738,16 +1738,30 @@ fn selected_target(state: &AppState, target: &TargetConfig) -> SelectedTarget {
     }
 }
 
+struct FreeCandidate {
+    target: SelectedTarget,
+    quality: Option<f64>,
+    unknown_capabilities: u8,
+}
+
 async fn resolve_auto_free_targets(
     state: &AppState,
     request: &Value,
     session_hash: Option<&str>,
 ) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
     let max_age = state.config.server.catalog_max_age_seconds;
-    let offerings = routing_operation(state.routing.clone(), move |routing| {
-        routing.free_candidates(max_age)
-    })
-    .await
+    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
+    let (offerings, benchmarks, benchmark_snapshot) = tokio::try_join!(
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.free_candidates(max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.benchmark_models(benchmark_max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.active_benchmark_snapshot(benchmark_max_age)
+        })
+    )
     .map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1755,8 +1769,17 @@ async fn resolve_auto_free_targets(
             "routing_state_unavailable",
         )
     })?;
+    let (benchmark_snapshot_id, benchmark_as_of) = benchmark_snapshot.unwrap_or((0, 0));
+    let mut benchmark_map = BTreeMap::new();
+    for b in &benchmarks {
+        benchmark_map
+            .entry(b.id.clone())
+            .or_insert_with(Vec::new)
+            .push(b.clone());
+    }
+    let classification = classify(request);
     let requirements = RequestRequirements::from_request(request);
-    let mut targets = offerings
+    let mut candidates = offerings
         .into_iter()
         .filter_map(|offering| {
             let provider = state.config.providers.get(&offering.provider)?;
@@ -1790,10 +1813,34 @@ async fn resolve_auto_free_targets(
                         requirements.structured && offering.supports_structured_output.is_none(),
                     );
             let reference = quota_reference(provider, &offering.model);
-            Some((
-                reference.is_none(),
+            let canonical = provider
+                .model_mappings
+                .get(&offering.model)
+                .cloned()
+                .unwrap_or_else(|| offering.model.clone());
+            let benchmark = find_benchmark(&benchmark_map, &canonical, classification.task);
+            let quality = benchmark.and_then(|b| quality_for(b, classification.task));
+            let effective_input = offering
+                .input_price_per_million
+                .or_else(|| benchmark.and_then(|b| b.input_price_per_million));
+            let effective_output = offering
+                .output_price_per_million
+                .or_else(|| benchmark.and_then(|b| b.output_price_per_million));
+            if !state.config.server.free_models_quality.passes(
+                classification.task,
+                benchmark,
+                offering.refreshed_at,
+                effective_input,
+                effective_output,
+                offering.context_length,
+                &canonical,
+            ) {
+                return None;
+            }
+            Some(FreeCandidate {
                 unknown_capabilities,
-                SelectedTarget {
+                quality,
+                target: SelectedTarget {
                     runtime_provider: offering.provider.clone(),
                     provider: offering.provider.clone(),
                     quota_scope: provider
@@ -1813,9 +1860,19 @@ async fn resolve_auto_free_targets(
                     input_price_per_million: offering.input_price_per_million,
                     output_price_per_million: offering.output_price_per_million,
                     reasoning_effort: None,
-                    selection: None,
+                    selection: Some(SelectionMetadata {
+                        canonical_model: canonical,
+                        task: classification.task.as_str(),
+                        complexity: classification.complexity.as_str(),
+                        classifier_version: classification.version,
+                        quality_floor: 0.0,
+                        quality: quality.unwrap_or(0.0),
+                        expected_cost_microusd: 0,
+                        benchmark_snapshot_id,
+                        benchmark_as_of,
+                    }),
                 },
-            ))
+            })
         })
         .collect::<Vec<_>>();
     let pinned = match session_hash {
@@ -1830,24 +1887,34 @@ async fn resolve_auto_free_targets(
         }
         None => None,
     };
-    targets.sort_by(|left, right| {
+    candidates.sort_by(|left, right| {
         let left_pinned = pinned
             .as_ref()
-            .is_some_and(|pin| pin.0 == left.2.provider && pin.1 == left.2.model);
+            .is_some_and(|pin| pin.0 == left.target.provider && pin.1 == left.target.model);
         let right_pinned = pinned
             .as_ref()
-            .is_some_and(|pin| pin.0 == right.2.provider && pin.1 == right.2.model);
+            .is_some_and(|pin| pin.0 == right.target.provider && pin.1 == right.target.model);
         right_pinned
             .cmp(&left_pinned)
-            .then_with(|| left.0.cmp(&right.0))
-            .then_with(|| left.1.cmp(&right.1))
             .then_with(|| {
-                (&left.2.provider, &left.2.model).cmp(&(&right.2.provider, &right.2.model))
+                let left_q = left.quality;
+                let right_q = right.quality;
+                match (left_q, right_q) {
+                    (Some(lq), Some(rq)) => rq.total_cmp(&lq),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            })
+            .then_with(|| left.unknown_capabilities.cmp(&right.unknown_capabilities))
+            .then_with(|| {
+                (&left.target.provider, &left.target.model)
+                    .cmp(&(&right.target.provider, &right.target.model))
             })
     });
-    let mut targets = targets
+    let mut targets = candidates
         .into_iter()
-        .map(|(_, _, target)| target)
+        .map(|candidate| candidate.target)
         .collect::<Vec<_>>();
     match resolve_local_model(state).await {
         Ok(model) => targets.push(SelectedTarget {
