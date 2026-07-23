@@ -7,8 +7,23 @@ hosted service.
 ## Native quickstart
 
 ```bash
-cargo run -- setup
+cargo run -- setup          # interactive one-time wizard
+cargo run -- serve          # starts the server
+```
+
+The gateway never loads `.env` files automatically. API keys must be exported
+before starting:
+
+```bash
+export OPENROUTER_API_KEY="..."
 cargo run -- serve
+```
+
+Or use the convenience scripts, which source `.env.local` automatically:
+
+```bash
+./scripts/start-server.sh     # fresh start (builds + runs)
+./scripts/restart-server.sh   # stop old process + rebuild + start
 ```
 
 `setup` stores provider keys in the macOS Keychain or Linux Secret Service and

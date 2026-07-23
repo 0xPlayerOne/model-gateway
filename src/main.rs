@@ -104,6 +104,9 @@ enum BenchmarkCommand {
         file: PathBuf,
     },
     Status,
+    Delete {
+        source: String,
+    },
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -186,6 +189,10 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
                     "{source}: {models} models, fetched_at={fetched_at}, attribution={attribution}"
                 );
             }
+        }
+        BenchmarkCommand::Delete { source } => {
+            store.remove_benchmark_source(&source)?;
+            println!("Deleted benchmark snapshot '{source}'");
         }
     }
     Ok(())

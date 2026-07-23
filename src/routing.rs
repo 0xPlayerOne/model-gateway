@@ -641,6 +641,20 @@ impl RoutingStore {
             .collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn remove_benchmark_source(&self, source: &str) -> Result<(), RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let deleted = connection.execute(
+            "DELETE FROM benchmark_snapshots WHERE source = ?1",
+            [source],
+        )?;
+        if deleted == 0 {
+            return Err(RoutingError::Background(format!(
+                "no active snapshot for source '{source}'"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn active_benchmark_snapshot(
         &self,
         max_age_seconds: u64,
