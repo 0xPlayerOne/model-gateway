@@ -351,7 +351,6 @@ pub enum ProviderProfileId {
     OpenaiApi,
     Deepseek,
     Fireworks,
-    Novita,
     Zai,
     GoogleGemini,
     KiloCode,
@@ -2063,8 +2062,8 @@ mod tests {
         config
             .validate_structure()
             .expect("secondary provider example must validate");
-        assert_eq!(config.providers.len(), 6);
-        assert_eq!(config.models.len(), 6);
+        assert_eq!(config.providers.len(), 5);
+        assert_eq!(config.models.len(), 5);
         assert!(
             config.providers.values().all(|provider| {
                 provider.profile.is_some() && provider.api_key_secret.is_some()

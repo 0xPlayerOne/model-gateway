@@ -103,17 +103,6 @@ pub const PROFILE_DEFINITIONS: &[ProfileDefinition] = &[
         connection_check: ConnectionCheck::OpenAiModels,
     },
     ProfileDefinition {
-        id: ProviderProfileId::Novita,
-        config_key: "novita",
-        display_name: "Novita AI",
-        adapter: AdapterKind::OpenaiChat,
-        default_secret_name: Some("NOVITA_INFRA_KEY"),
-        native_base_url: "https://api.novita.ai/openai/v1",
-        docker_base_url: None,
-        suggested_model: "meta-llama/llama-3.1-8b-instruct",
-        connection_check: ConnectionCheck::OpenAiModels,
-    },
-    ProfileDefinition {
         id: ProviderProfileId::Zai,
         config_key: "zai",
         display_name: "Z.AI / GLM",

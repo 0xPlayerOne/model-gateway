@@ -12,17 +12,16 @@ echo ""
 cat <<TABLE
 | Provider           | RPM | RPD   | TPM      | Scope              | Status              |
 |--------------------|----:|------:|---------:|--------------------|---------------------|
-| OpenRouter         |  20 |    50 |       —  | account            | published_static    |
+| OpenRouter         |  20 |  1000 |       —  | account            | user_specified      |
 | Kilo Code          | 200 |     — |       —  | ip                 | published_static    |
 | Groq               |  30 | 14400 |    6,000 | organization       | published_static    |
 | Google Gemini Pro  |   5 |   100 |1,000,000 | project_model      | published_static    |
 | Google Gemini Flash|  10 |  1500 |1,000,000 | project_model      | published_static    |
 | Google Flash-Lite  |  30 |  1500 |1,000,000 | project_model      | published_static    |
-| Mistral            |   1 |     — |  500,000 | organization_model | published_partial   |
-| Novita             |  60 |     — |       —   | account_model      | published_partial   |
-| NVIDIA NIM         |  10 |     — |       —   | account            | dashboard_only      |
+| Mistral            | 188 |     — |  625,000 | organization_model | probe_verified      |
+| NVIDIA NIM         |  40 |     — |       —   | account            | user_reported       |
 | Ollama Cloud       |  30 |     — |       —   | account            | best_effort         |
-| Nous Portal        |  10 |     — |       —   | account            | published_partial   |
+| Nous Portal        |  50 |     — |  500,000 | account_model      | probe_verified      |
 | SiliconFlow        |1000 |     — |   40,000 | account_model      | published_static    |
 | OrcaRouter         |  10 |     — |       —   | account            | account_api         |
 | OpenCode           |  50 |     — |   10,000 | account            | best_effort         |
@@ -42,7 +41,6 @@ declare -A URLS=(
   ["OpenCode Go"]="https://opencode.ai/docs/go/"
   ["Z.AI"]="https://docs.z.ai/guides/overview/pricing"
   ["Mistral"]="https://docs.mistral.ai/admin/billing-usage/usage-limits"
-  ["Novita"]="https://novita.ai/docs/guides/llm-rate-limits"
   ["NVIDIA NIM"]="https://build.nvidia.com"
   ["Ollama Cloud"]="https://docs.ollama.com/cloud"
   ["Nous Portal"]="https://inference-api.nousresearch.com/v1"

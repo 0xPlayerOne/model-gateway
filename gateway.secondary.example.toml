@@ -27,12 +27,6 @@ adapter = "openai_chat"
 base_url = "https://api.groq.com/openai/v1"
 api_key_secret = "GROQ_API_KEY"
 
-[providers.novita]
-profile = "novita"
-adapter = "openai_chat"
-base_url = "https://api.novita.ai/openai/v1"
-api_key_secret = "NOVITA_INFRA_KEY"
-
 [providers.silicon-flow]
 profile = "silicon_flow"
 adapter = "openai_chat"
@@ -50,9 +44,6 @@ targets = [{ provider = "nvidia-nim", model = "nvidia/llama-3.1-nemotron-ultra-2
 
 [models.groq]
 targets = [{ provider = "groq", model = "llama-3.3-70b-versatile" }]
-
-[models.novita]
-targets = [{ provider = "novita", model = "meta-llama/llama-3.1-8b-instruct" }]
 
 [models.silicon-flow]
 targets = [{ provider = "silicon-flow", model = "deepseek-ai/DeepSeek-V3" }]

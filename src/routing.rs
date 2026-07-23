@@ -111,11 +111,6 @@ pub const PROVIDER_LIMIT_REFERENCES: &[ProviderLimitReference] = &[
         "adaptive",
     ),
     limit(
-        ProviderProfileId::Novita,
-        "https://novita.ai/docs/api-reference/quota-list",
-        "account_api",
-    ),
-    limit(
         ProviderProfileId::Zai,
         "https://docs.z.ai/devpack/usage-policy",
         "published_partial",
@@ -1110,7 +1105,6 @@ pub fn is_verified_free(provider: &ProviderConfig, model: &str, zero_priced: boo
             | Some(ProviderProfileId::Groq)
             | Some(ProviderProfileId::Mistral)
             | Some(ProviderProfileId::NvidiaNim)
-            | Some(ProviderProfileId::Novita)
             | Some(ProviderProfileId::OllamaCloud)
             | Some(ProviderProfileId::SiliconFlow)
     )
@@ -1133,9 +1127,9 @@ pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaRe
     }
     let (rules, source_url, as_of, scope) = match provider.profile {
         Some(ProviderProfileId::OpenRouter) => (
-            vec![requests(20, 60), requests(50, 86_400)],
+            vec![requests(20, 60), requests(1_000, 86_400)],
             "https://openrouter.ai/docs/api/reference/limits",
-            "published_static",
+            "user_specified_$10_spent",
             "account",
         ),
         Some(ProviderProfileId::KiloCode) => (
@@ -1196,16 +1190,10 @@ pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaRe
             "probe_verified_2026-07-23",
             "organization_model",
         ),
-        Some(ProviderProfileId::Novita) => (
-            vec![requests(60, 60)],
-            "https://novita.ai/docs/guides/llm-rate-limits",
-            "published_partial",
-            "account_model",
-        ),
         Some(ProviderProfileId::NvidiaNim) => (
-            vec![requests(10, 60)],
+            vec![requests(40, 60)],
             "https://build.nvidia.com",
-            "dashboard_only",
+            "user_reported_40_rpm",
             "account",
         ),
         Some(ProviderProfileId::OllamaCloud) => (

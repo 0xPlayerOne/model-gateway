@@ -100,7 +100,7 @@ protected SQLite database; prompts and responses are never stored. If all free
 capacity is exhausted, routing falls back to `local`.
 
 Free-tier provider rules are provider-specific: Google Gemini, Groq, Mistral,
-NVIDIA NIM, Novita, Ollama Cloud, and SiliconFlow treat their
+NVIDIA NIM, Ollama Cloud, and SiliconFlow treat their
 cataloged models as free-tier eligible and enforce the provider's configured or
 published limits. Kilo Code refreshes its live model list and includes models
 whose IDs contain `free`; Kilo's free model names change periodically. OpenCode
@@ -221,7 +221,7 @@ The setup wizard uses one declarative registry. Provider recommendations follow
 `.env.example`: CORE profiles are highly encouraged, SECONDARY profiles are
 useful additions, and OPTIONAL PAID profiles require subscriptions or credits.
 The CORE profiles are Google Gemini, Kilo Code, Ollama Cloud, OpenCode Zen, and
-OpenRouter. SECONDARY profiles are Groq, Mistral, Nous Portal, Novita, NVIDIA
+OpenRouter. SECONDARY profiles are Groq, Mistral, Nous Portal, NVIDIA
 NIM, and SiliconFlow. OPTIONAL PAID profiles are DeepSeek, Fireworks, OpenAI
 API, OpenCode Go, OrcaRouter, and Z.AI. All profiles use OpenAI Chat
 Completions with bearer secrets. They are contract-tested against deterministic

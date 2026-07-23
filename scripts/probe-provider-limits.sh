@@ -64,18 +64,17 @@ K="${NOUS_PORTAL_API_KEY:-}"
 [ -n "$K" ] && probe "nous-portal" "https://inference-api.nousresearch.com/v1/chat/completions" "$K" \
   "$(echo "$BODY" | sed 's/MODEL/stepfun\/step-3.7-flash:free/')"
 
-# Google Gemini (native endpoint, not OpenAI-compat)
+# Google Gemini (native endpoint)
 K="${GOOGLE_API_KEY:-}"
 [ -n "$K" ] && probe "gemini" \
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$K" "$K" \
   '{"contents":[{"parts":[{"text":"hello"}]}],"generationConfig":{"maxOutputTokens":10}}' \
   "Content-Type: application/json"
 
-# Novita — credit exhausted, skip
-[ -n "${NOVITA_INFRA_KEY:-}" ] && echo "[novita] SKIP (free credit exhausted, 403)"
-
-# SiliconFlow — key invalid on .cn, skip
-[ -n "${SILICON_FLOW_API_KEY:-}" ] && echo "[siliconflow] SKIP (API key invalid)"
+# SiliconFlow (.com domain)
+K="${SILICON_FLOW_API_KEY:-}"
+[ -n "$K" ] && probe "siliconflow" "https://api.siliconflow.com/v1/chat/completions" "$K" \
+  "$(echo "$BODY" | sed 's/MODEL/deepseek-ai\/DeepSeek-V4-Pro/')"
 
 echo "=== Verified limits ==="
 echo "  Groq: 14,400 RPD / 6,000 TPM"
