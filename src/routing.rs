@@ -527,8 +527,8 @@ impl RoutingStore {
                     snapshot_id, model_id, creator, general_quality, coding_quality,
                     agentic_quality, input_price, output_price,
                     latency_seconds, output_tokens_per_task, reasoning_effort,
-                    as_of, harness, release_date
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    as_of, release_date
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     snapshot_id,
                     model.id,
@@ -542,7 +542,6 @@ impl RoutingStore {
                     model.output_tokens_per_task,
                     model.reasoning_effort.as_deref().unwrap_or(""),
                     model.as_of,
-                    model.harness,
                     model.release_date,
                 ],
             )?;
@@ -591,7 +590,7 @@ impl RoutingStore {
             "SELECT m.model_id, m.creator, m.general_quality, m.coding_quality,
                     m.agentic_quality, m.input_price,
                     m.output_price, m.latency_seconds, m.output_tokens_per_task,
-                     NULLIF(m.reasoning_effort, ''), m.as_of, m.harness,
+                     NULLIF(m.reasoning_effort, ''), m.as_of,
                      m.release_date
              FROM benchmark_models m
              JOIN benchmark_snapshots s ON s.id = m.snapshot_id
@@ -615,8 +614,7 @@ impl RoutingStore {
                         output_tokens_per_task: row.get(8)?,
                         reasoning_effort: row.get(9)?,
                         as_of: row.get(10)?,
-                        harness: row.get(11)?,
-                        release_date: row.get(12)?,
+                        release_date: row.get(11)?,
                         raw_metrics: BTreeMap::new(),
                     })
                 },
@@ -1399,11 +1397,7 @@ fn ensure_benchmark_columns(connection: &Connection) -> Result<(), rusqlite::Err
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    for (name, sql_type) in [
-        ("as_of", "TEXT"),
-        ("harness", "TEXT"),
-        ("release_date", "TEXT"),
-    ] {
+    for (name, sql_type) in [("as_of", "TEXT"), ("release_date", "TEXT")] {
         if !columns.iter().any(|column| column == name) {
             connection.execute(
                 &format!("ALTER TABLE benchmark_models ADD COLUMN {name} {sql_type}"),

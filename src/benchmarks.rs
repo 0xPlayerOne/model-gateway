@@ -38,8 +38,6 @@ pub struct BenchmarkModel {
     #[serde(default)]
     pub as_of: Option<String>,
     #[serde(default)]
-    pub harness: Option<String>,
-    #[serde(default)]
     pub release_date: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub raw_metrics: BTreeMap<String, RawBenchmarkMetric>,
@@ -66,7 +64,6 @@ impl BenchmarkModel {
             output_tokens_per_task: Some(1_024),
             reasoning_effort: None,
             as_of: None,
-            harness: Some("fixture".to_owned()),
             release_date: None,
             raw_metrics: BTreeMap::new(),
         }
@@ -106,17 +103,6 @@ impl BenchmarkModel {
             .as_of
             .as_ref()
             .is_some_and(|value| value.trim().is_empty() || value.len() > 64)
-            || self
-                .harness
-                .as_ref()
-                .is_some_and(|value| value.trim().is_empty() || value.len() > 128)
-        {
-            return Err(format!("benchmark provenance for '{}' is invalid", self.id));
-        }
-        if self
-            .harness
-            .as_ref()
-            .is_some_and(|value| value.trim().is_empty() || value.len() > 128)
         {
             return Err(format!("benchmark provenance for '{}' is invalid", self.id));
         }
@@ -481,7 +467,6 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                 output_tokens_per_task: None,
                 reasoning_effort: aa_reasoning_effort(item),
                 as_of: Some(epoch_date_string()),
-                harness: None,
                 release_date: item
                     .get("release_date")
                     .and_then(Value::as_str)

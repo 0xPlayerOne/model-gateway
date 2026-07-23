@@ -403,7 +403,6 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
                 "latency_seconds": model.latency_seconds,
                 "reasoning_effort": model.reasoning_effort,
                 "as_of": model.as_of,
-                "harness": model.harness,
                 "release_date": model.release_date
             })
         })
