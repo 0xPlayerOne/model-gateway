@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+echo "=== pre-commit: cargo fmt --check ==="
+cargo fmt --check
+
+echo "=== pre-commit: cargo clippy ==="
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "=== pre-commit: cargo test --all-features ==="
+cargo test --all-features 2>&1

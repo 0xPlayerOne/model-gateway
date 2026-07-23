@@ -497,96 +497,149 @@ pub fn fetch_catalog(
         .collect())
 }
 
-pub fn is_specialty_model(model: &str) -> bool {
+pub fn is_embedding_model(model: &str) -> bool {
     let normalized = model.to_ascii_lowercase();
     let tokens: Vec<&str> = normalized
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
         .collect();
-
-    // Embedding models
-    if tokens
+    tokens
         .iter()
-        .any(|token| matches!(*token, "embed" | "embeddings" | "embedding"))
+        .any(|token| matches!(*token, "embed" | "embeddings" | "embedding" | "clip"))
         || normalized.contains("text-embedding")
         || normalized.contains("mistral-embed")
         || normalized.contains("jina-embeddings")
         || normalized.contains("nomic-embed")
         || normalized.contains("nv-embed")
+        || normalized.contains("nvclip")
         || normalized.contains("bge-")
         || normalized.contains("gte-")
         || normalized.contains("e5-")
-    {
-        return true;
-    }
+}
 
-    // Audio/Speech/TTS models
-    if tokens
-        .iter()
-        .any(|token| matches!(*token, "whisper" | "tts" | "speech" | "audio" | "transcribe" | "voxtral"))
-    {
-        return true;
-    }
-    if normalized.contains("fish-speech")
+fn is_audio_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    let tokens: Vec<&str> = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    tokens.iter().any(|token| {
+        matches!(
+            *token,
+            "whisper" | "tts" | "speech" | "audio" | "transcribe" | "voxtral" | "lyria"
+        )
+    }) || normalized.contains("fish-speech")
         || normalized.contains("cosyvoice")
         || normalized.contains("indextts")
         || normalized.contains("orpheus")
-    {
-        return true;
-    }
-
-    // Image/Video generation models
-    if tokens
-        .iter()
-        .any(|token| matches!(*token, "flux" | "imagen" | "sdxl" | "dalle" | "dall"))
-    {
-        return true;
-    }
-    if normalized.contains("stable-diffusion") {
-        return true;
-    }
-    // Wan video generation (T2V/I2V)
-    if normalized.contains("wan") && tokens.iter().any(|t| *t == "v" || t.ends_with("v")) {
-        return true;
-    }
-    // Models with "-image" suffix that aren't vision-language
-    if normalized.ends_with("-image") || normalized.contains("-image-") || normalized.contains("-image-preview") {
-        return true;
-    }
-    // Standalone "image" token that isn't VL/vision
-    if tokens.contains(&"image") && !normalized.contains("vl") && !normalized.contains("-vision") {
-        return true;
-    }
-
-    // Reranker, Moderation, OCR models
-    if tokens
-        .iter()
-        .any(|token| matches!(*token, "rerank" | "reranker"))
-        || tokens.iter().any(|token| token.starts_with("moderat") || *token == "ocr" || token.ends_with("ocr"))
-    {
-        return true;
-    }
-
-    false
 }
 
-pub fn is_embedding_model(model: &str) -> bool {
+fn is_image_gen_model(model: &str) -> bool {
     let normalized = model.to_ascii_lowercase();
-    let tokens = normalized
+    let tokens: Vec<&str> = normalized
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
+        .collect();
     tokens
         .iter()
-        .any(|token| matches!(*token, "embed" | "embeddings" | "embedding"))
-        || normalized.contains("text-embedding")
-        || normalized.contains("mistral-embed")
-        || normalized.contains("jina-embeddings")
-        || normalized.contains("nomic-embed")
-        || normalized.contains("nv-embed")
-        || normalized.contains("bge-")
-        || normalized.contains("gte-")
-        || normalized.contains("e5-")
+        .any(|token| matches!(*token, "flux" | "imagen" | "sdxl" | "dalle" | "dall"))
+        || normalized.contains("stable-diffusion")
+        || normalized.contains("diffusion")
+        || normalized.ends_with("-image")
+        || normalized.contains("-image-")
+        || normalized.contains("-image-preview")
+        || (tokens.contains(&"image")
+            && !normalized.contains("vl")
+            && !normalized.contains("-vision"))
+}
+
+fn is_video_gen_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    let tokens: Vec<&str> = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    tokens.iter().any(|token| {
+        matches!(*token, "veo" | "cosmos")
+            || (normalized.contains("wan") && (*token == "v" || token.ends_with('v')))
+    })
+}
+
+fn is_reranker_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    let tokens: Vec<&str> = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    tokens
+        .iter()
+        .any(|token| matches!(*token, "rerank" | "reranker"))
+}
+
+fn is_moderation_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    let tokens: Vec<&str> = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    tokens.iter().any(|token| token.starts_with("moderat"))
+}
+
+fn is_ocr_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    let tokens: Vec<&str> = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    tokens
+        .iter()
+        .any(|token| *token == "ocr" || token.ends_with("ocr"))
+}
+
+fn is_safety_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    let tokens: Vec<&str> = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    tokens
+        .iter()
+        .any(|token| token.ends_with("guard") || matches!(*token, "safety" | "safeguard"))
+}
+
+fn is_classifier_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    let tokens: Vec<&str> = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    tokens.iter().any(|token| {
+        *token == "reward" || *token == "pii" || *token == "detect" || *token == "detector"
+    })
+}
+
+fn is_retrieval_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    let tokens: Vec<&str> = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    tokens
+        .iter()
+        .any(|token| *token == "parse" || token.starts_with("retriev"))
+}
+
+pub fn is_specialty_model(model: &str) -> bool {
+    is_embedding_model(model)
+        || is_audio_model(model)
+        || is_image_gen_model(model)
+        || is_video_gen_model(model)
+        || is_reranker_model(model)
+        || is_moderation_model(model)
+        || is_ocr_model(model)
+        || is_safety_model(model)
+        || is_classifier_model(model)
+        || is_retrieval_model(model)
 }
 
 fn number_at(value: &serde_json::Value, key: &str) -> Option<f64> {
@@ -603,7 +656,9 @@ mod tests {
     use std::thread;
 
     use super::{
-        BuiltinProvider, CatalogModel, PROFILE_DEFINITIONS, is_embedding_model, is_specialty_model, number_at,
+        BuiltinProvider, CatalogModel, PROFILE_DEFINITIONS, is_audio_model, is_classifier_model,
+        is_embedding_model, is_image_gen_model, is_retrieval_model, is_safety_model,
+        is_specialty_model, is_video_gen_model, number_at,
     };
     use crate::config::AdapterKind;
 
@@ -734,6 +789,63 @@ mod tests {
                 "expected non-specialty model: {model}"
             );
         }
+    }
+
+    #[test]
+    fn new_specialty_categories_catch_previously_missed_models() {
+        // DiffusionGemma — image generation
+        assert!(is_image_gen_model("google/diffusiongemma-26b-a4b-it"));
+        assert!(is_specialty_model("google/diffusiongemma-26b-a4b-it"));
+        // Veo — video generation
+        assert!(is_video_gen_model("models/veo-3.1-fast-generate-preview"));
+        assert!(is_video_gen_model("models/veo-3.1-generate-preview"));
+        assert!(is_video_gen_model("models/veo-3.1-lite-generate-preview"));
+        // Cosmos — world model / video understanding
+        assert!(is_video_gen_model("nvidia/cosmos-reason2-8b"));
+        assert!(is_specialty_model("nvidia/cosmos-reason2-8b"));
+        // Lyria — music generation (audio)
+        assert!(is_audio_model("google/lyria-3-pro-preview"));
+        assert!(is_audio_model("models/lyria-realtime-exp"));
+        assert!(is_specialty_model("google/lyria-3-pro-preview"));
+        // CLIP — vision-language embedding
+        assert!(is_embedding_model("nvidia/nvclip"));
+        assert!(is_embedding_model("google/lyria-3-clip-preview"));
+        assert!(is_specialty_model("nvidia/nvclip"));
+        // Guard / safety models
+        assert!(is_safety_model("meta-llama/llama-prompt-guard-2-86m"));
+        assert!(is_safety_model("meta-llama/llama-guard-4-12b"));
+        assert!(is_safety_model("nvidia/nemotron-3.5-content-safety"));
+        assert!(is_safety_model(
+            "nvidia/llama-3.1-nemoguard-8b-content-safety"
+        ));
+        assert!(is_safety_model(
+            "nvidia/llama-3.1-nemoguard-8b-topic-control"
+        ));
+        assert!(is_safety_model("openai/gpt-oss-safeguard-20b"));
+        assert!(is_specialty_model("meta-llama/llama-prompt-guard-2-86m"));
+        assert!(is_specialty_model(
+            "nvidia/llama-3.1-nemoguard-8b-content-safety"
+        ));
+        assert!(is_specialty_model(
+            "nvidia/llama-3.1-nemoguard-8b-topic-control"
+        ));
+        // Reward / classifier models
+        assert!(is_classifier_model("nvidia/nemotron-4-340b-reward"));
+        assert!(is_classifier_model("nvidia/gliner-pii"));
+        assert!(is_specialty_model("nvidia/nemotron-4-340b-reward"));
+        assert!(is_specialty_model("nvidia/gliner-pii"));
+        // Retrieval / parse models
+        assert!(is_retrieval_model("nvidia/nemoretriever-parse"));
+        assert!(is_retrieval_model("nvidia/nemotron-parse"));
+        assert!(is_specialty_model("nvidia/nemoretriever-parse"));
+        assert!(is_specialty_model("nvidia/nemotron-parse"));
+        // Video detector — classifier
+        assert!(is_classifier_model("nvidia/ai-synthetic-video-detector"));
+        assert!(is_specialty_model("nvidia/ai-synthetic-video-detector"));
+        // Negative: general chat models should NOT be caught
+        assert!(!is_safety_model("gemini-2.5-flash"));
+        assert!(!is_classifier_model("deepseek-v4-flash"));
+        assert!(!is_retrieval_model("llama-3.3-70b-versatile"));
     }
 
     #[test]
