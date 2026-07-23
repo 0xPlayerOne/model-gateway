@@ -933,6 +933,43 @@ async fn list_free_models(
         seen.insert(normalized)
     });
 
+    // Auto-route models (kilo-auto/free, openrouter/free, orcarouter/free, etc.)
+    // can't be benchmarked individually. Assign them the best quality of any
+    // non-auto-route model from the same provider, so they rank at the top
+    // of their provider's offerings.
+    // Note: :free suffixed models (kat-coder-pro-v2.5:free) are regular free-tier
+    // models with benchmarks — they are NOT auto-routes.
+    let is_auto_route = |model: &str| -> bool {
+        model.ends_with("/free")
+            && (model.contains("kilo-auto")
+                || model.contains("openrouter")
+                || model.contains("orcarouter"))
+    };
+
+    let mut best_per_provider: BTreeMap<String, (f64, BenchmarkModel)> = BTreeMap::new();
+    for (quality, benchmark, offering, _, _) in &data {
+        if is_auto_route(&offering.model) {
+            continue;
+        }
+        if let (Some(quality), Some(benchmark)) = (quality, benchmark) {
+            let entry = best_per_provider
+                .entry(offering.provider.clone())
+                .or_insert_with(|| (*quality, benchmark.clone()));
+            if *quality > entry.0 {
+                *entry = (*quality, benchmark.clone());
+            }
+        }
+    }
+    for entry in &mut data {
+        if entry.0.is_some() || !is_auto_route(&entry.2.model) {
+            continue;
+        }
+        if let Some((best_q, best_bm)) = best_per_provider.get(&entry.2.provider) {
+            entry.0 = Some(*best_q);
+            entry.1 = Some(best_bm.clone());
+        }
+    }
+
     data.sort_by(
         |(left_q, _, left_o, left_kind, _), (right_q, _, right_o, right_kind, _)| {
             let left_benchmarked = left_q.is_some();
