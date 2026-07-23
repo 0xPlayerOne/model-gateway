@@ -356,9 +356,13 @@ impl RoutingStore {
         let now = epoch_seconds();
         let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let transaction = connection.transaction()?;
+        let version_map = build_version_map(&transaction);
         transaction.execute("DELETE FROM catalog_models WHERE provider = ?1", [provider])?;
         for model in models {
             if is_specialty_model(&model.model) {
+                continue;
+            }
+            if is_stale_generation(&model.model, &version_map) {
                 continue;
             }
             transaction.execute(
@@ -1494,6 +1498,86 @@ fn epoch_seconds() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+/// Extracts (family_name, version_number) from a normalized model ID.
+/// Handles both embedded versions (gemma4 → gemma+4) and tokenized versions
+/// (mistral-3 → mistral+3, mistral-medium-3-5 → mistral+3).
+fn extract_model_family_version(normalized: &str) -> Option<(String, u64)> {
+    let tokens: Vec<&str> = normalized.split('-').collect();
+
+    // Case 1: letter-digit boundary within a single token (gemma4, qwen3)
+    for token in &tokens {
+        let bytes = token.as_bytes();
+        for i in 0..bytes.len().saturating_sub(1) {
+            // Family prefix must be at least 2 chars to avoid matching r1, a100, etc.
+            if i >= 1 && bytes[i].is_ascii_alphabetic() && bytes[i + 1].is_ascii_digit() {
+                let family = std::str::from_utf8(&bytes[..=i]).ok()?.to_lowercase();
+                let mut version_end = i + 1;
+                while version_end < bytes.len() && bytes[version_end].is_ascii_digit() {
+                    version_end += 1;
+                }
+                let version_str = std::str::from_utf8(&bytes[i + 1..version_end]).ok()?;
+                let version: u64 = version_str.parse().ok()?;
+                return Some((family, version));
+            }
+        }
+    }
+
+    // Case 2: find first all-alpha family token where the NEXT token
+    // is a numeric version (handles google/gemma-3 → gemma+3,
+    // skips provider prefixes like "google" since the next token isn't a number)
+    for i in 0..tokens.len() {
+        let token = tokens[i];
+        if token.is_empty() || !token.chars().all(|c| c.is_ascii_alphabetic()) || token.len() < 2 {
+            continue;
+        }
+        if i + 1 < tokens.len() {
+            if let Ok(version) = tokens[i + 1].parse::<u64>() {
+                return Some((token.to_lowercase(), version));
+            }
+        }
+    }
+
+    None
+}
+
+/// Builds a map of model family → max version from active AA benchmarks.
+/// Used to detect stale catalog models from older generations.
+fn build_version_map(connection: &Connection) -> BTreeMap<String, u64> {
+    let mut map = BTreeMap::new();
+    if let Ok(mut statement) =
+        connection.prepare("SELECT model_id FROM benchmark_models WHERE snapshot_id IN (SELECT id FROM benchmark_snapshots WHERE active = 1)")
+    {
+        if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
+            for row in rows.flatten() {
+                if let Some((family, version)) = extract_model_family_version(&row) {
+                    let entry = map.entry(family).or_insert(0);
+                    if version > *entry {
+                        *entry = version;
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Returns true if a catalog model is from an older generation than what AA benchmarks.
+fn is_stale_generation(model: &str, version_map: &BTreeMap<String, u64>) -> bool {
+    let normalized = model
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+
+    if let Some((family, cat_version)) = extract_model_family_version(&normalized) {
+        if let Some(&aa_max_version) = version_map.get(&family) {
+            return cat_version < aa_max_version;
+        }
+    }
+    false
+}
+
 fn set_unix_mode(path: &Path, mode: u32) -> Result<(), std::io::Error> {
     #[cfg(unix)]
     {
@@ -1944,5 +2028,71 @@ mod tests {
         assert_eq!(status[0].0, "openrouter");
         assert_eq!(status[0].4, Some(8.0));
         assert_eq!(status[0].5, Some(true));
+    }
+
+    #[test]
+    fn extract_model_family_version_handles_embedded_versions() {
+        use super::extract_model_family_version;
+        assert_eq!(
+            extract_model_family_version("gemma4"),
+            Some(("gemma".to_owned(), 4))
+        );
+        assert_eq!(
+            extract_model_family_version("qwen3"),
+            Some(("qwen".to_owned(), 3))
+        );
+    }
+
+    #[test]
+    fn extract_model_family_version_handles_separated_versions() {
+        use super::extract_model_family_version;
+        assert_eq!(
+            extract_model_family_version("gemma-3-12b"),
+            Some(("gemma".to_owned(), 3))
+        );
+        assert_eq!(
+            extract_model_family_version("phi-3-vision"),
+            Some(("phi".to_owned(), 3))
+        );
+        // With j=1 only, mistral-medium-3-5 picks "medium" as the
+        // closest alpha token with a number as the next token
+        assert_eq!(
+            extract_model_family_version("mistral-medium-3-5"),
+            Some(("medium".to_owned(), 3))
+        );
+        assert_eq!(
+            extract_model_family_version("gemini-3-5-flash"),
+            Some(("gemini".to_owned(), 3))
+        );
+        assert_eq!(
+            extract_model_family_version("llama-3-1-8b"),
+            Some(("llama".to_owned(), 3))
+        );
+    }
+
+    #[test]
+    fn extract_model_family_version_returns_none_for_unversioned() {
+        use super::extract_model_family_version;
+        assert!(extract_model_family_version("deepseek-r1").is_none());
+        assert!(extract_model_family_version("kilo-auto/free").is_none());
+        assert!(extract_model_family_version("codestral").is_none());
+    }
+
+    #[test]
+    fn is_stale_generation_detects_older_versions() {
+        use super::is_stale_generation;
+        use std::collections::BTreeMap;
+
+        let mut versions = BTreeMap::new();
+        versions.insert("gemma".to_owned(), 4u64);
+        versions.insert("phi".to_owned(), 4u64);
+
+        assert!(is_stale_generation("google/gemma-3-12b-it", &versions));
+        assert!(!is_stale_generation("gemma-4-12b-it", &versions));
+        assert!(is_stale_generation(
+            "microsoft/phi-3-vision-128k",
+            &versions
+        ));
+        assert!(!is_stale_generation("kilo-auto/free", &versions));
     }
 }
