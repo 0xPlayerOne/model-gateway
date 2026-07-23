@@ -1191,9 +1191,9 @@ pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaRe
             "account_model",
         ),
         Some(ProviderProfileId::Mistral) => (
-            vec![requests(1, 60), tokens(500_000, 60)],
+            vec![requests(188, 60), tokens(625_000, 60)],
             "https://docs.mistral.ai/admin/billing-usage/usage-limits",
-            "published_partial",
+            "probe_verified_2026-07-23",
             "organization_model",
         ),
         Some(ProviderProfileId::Novita) => (
