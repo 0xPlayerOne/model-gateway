@@ -476,10 +476,43 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                     .and_then(|creator| creator.get("name"))
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
-                general_quality: number(evaluations, "artificial_analysis_intelligence_index"),
-                coding_quality: number(evaluations, "artificial_analysis_coding_index"),
-                agentic_quality: None,
-                reasoning_quality: number(evaluations, "artificial_analysis_math_index"),
+                general_quality: scaled_number(
+                    evaluations,
+                    &[
+                        ("artificial_analysis_intelligence_index", 1.0),
+                        ("mmlu_pro", 100.0),
+                        ("gpqa", 100.0),
+                    ],
+                ),
+                coding_quality: scaled_number(
+                    evaluations,
+                    &[
+                        ("artificial_analysis_coding_index", 1.0),
+                        ("livecodebench", 100.0),
+                        ("scicode", 100.0),
+                    ],
+                ),
+                agentic_quality: scaled_number(
+                    evaluations,
+                    &[
+                        ("tau2", 100.0),
+                        ("terminalbench_v2_1", 100.0),
+                        ("terminalbench_hard", 100.0),
+                        ("lcr", 100.0),
+                        ("tau_banking", 100.0),
+                    ],
+                ),
+                reasoning_quality: scaled_number(
+                    evaluations,
+                    &[
+                        ("artificial_analysis_math_index", 1.0),
+                        ("aime_25", 100.0),
+                        ("aime", 100.0),
+                        ("math_500", 100.0),
+                        ("hle", 100.0),
+                        ("gpqa", 100.0),
+                    ],
+                ),
                 input_price_per_million: number(pricing, "price_1m_input_tokens"),
                 output_price_per_million: number(pricing, "price_1m_output_tokens"),
                 latency_seconds: number(item, "median_time_to_first_token_seconds"),
@@ -508,6 +541,15 @@ fn contains_any(text: &str, terms: &[&str]) -> bool {
 
 fn number(value: &Value, key: &str) -> Option<f64> {
     value.get(key).and_then(Value::as_f64)
+}
+
+fn scaled_number(value: &Value, keys: &[(&str, f64)]) -> Option<f64> {
+    for (key, multiplier) in keys {
+        if let Some(n) = value.get(*key).and_then(Value::as_f64) {
+            return Some((n * multiplier * 100.0).round() / 100.0);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -540,7 +582,8 @@ mod tests {
             "evaluations": {
                 "artificial_analysis_intelligence_index": 70.0,
                 "artificial_analysis_coding_index": 80.0,
-                "artificial_analysis_math_index": 60.0
+                "artificial_analysis_math_index": 60.0,
+                "tau2": 0.55
             },
             "pricing": {"price_1m_input_tokens": 1.0, "price_1m_output_tokens": 2.0},
             "median_time_to_first_token_seconds": 0.5
@@ -548,6 +591,28 @@ mod tests {
         .expect("Artificial Analysis fixture");
         assert_eq!(models[0].id, "fixture");
         assert_eq!(models[0].coding_quality, Some(80.0));
+        assert_eq!(models[0].agentic_quality, Some(55.0));
+    }
+
+    #[test]
+    fn aa_fallback_scales_zero_to_one_benchmarks_to_zero_to_one_hundred() {
+        let models = parse_artificial_analysis(&json!({"data": [{
+            "slug": "fallback-model",
+            "model_creator": {"name": "Test Labs"},
+            "evaluations": {
+                "livecodebench": 0.75,
+                "aime_25": 0.623,
+                "tau2": 0.45,
+                "gpqa": 0.78
+            },
+            "pricing": {"price_1m_input_tokens": 1.0, "price_1m_output_tokens": 2.0},
+            "median_time_to_first_token_seconds": 0.3
+        }]}))
+        .expect("fallback fixture");
+        assert_eq!(models[0].coding_quality, Some(75.0));
+        assert_eq!(models[0].agentic_quality, Some(45.0));
+        assert_eq!(models[0].reasoning_quality, Some(62.3));
+        assert_eq!(models[0].general_quality, Some(78.0));
     }
 
     #[test]
