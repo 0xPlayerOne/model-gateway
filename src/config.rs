@@ -99,6 +99,10 @@ pub struct FreeModelsQualityBar {
     pub min_coding_index: f64,
     #[serde(default = "default_free_quality_min_agentic")]
     pub min_agentic_index: f64,
+    #[serde(default = "default_free_quality_min_context")]
+    pub min_context_length: u64,
+    #[serde(default = "default_free_quality_min_model_size")]
+    pub min_model_size_b: u64,
     #[serde(default = "default_free_quality_max_age_months")]
     pub max_age_months: u64,
     #[serde(default = "default_free_quality_max_input_price")]
@@ -113,6 +117,8 @@ impl Default for FreeModelsQualityBar {
             min_general_index: default_free_quality_min_general(),
             min_coding_index: default_free_quality_min_coding(),
             min_agentic_index: default_free_quality_min_agentic(),
+            min_context_length: default_free_quality_min_context(),
+            min_model_size_b: default_free_quality_min_model_size(),
             max_age_months: default_free_quality_max_age_months(),
             max_input_price_per_million: default_free_quality_max_input_price(),
             max_output_price_per_million: default_free_quality_max_output_price(),
@@ -133,6 +139,7 @@ impl FreeModelsQualityBar {
     /// Returns `true` if the model passes the quality bar and should be included
     /// in the free-models response. Models without benchmark data always pass
     /// the quality/age filters (new models are not penalized).
+    #[allow(clippy::too_many_arguments)]
     pub fn passes(
         &self,
         task: crate::benchmarks::TaskKind,
@@ -140,6 +147,8 @@ impl FreeModelsQualityBar {
         refreshed_at: i64,
         effective_input_price: Option<f64>,
         effective_output_price: Option<f64>,
+        context_length: Option<u64>,
+        model_id: &str,
     ) -> bool {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now_seconds = SystemTime::now()
@@ -194,11 +203,53 @@ impl FreeModelsQualityBar {
             }
         }
 
+        // Context length filter: skip models with tiny context windows
+        if self.min_context_length > 0 {
+            if let Some(ctx) = context_length {
+                if ctx < self.min_context_length {
+                    return false;
+                }
+            }
+        }
+
+        // Model size filter: skip tiny models based on parameter count in ID
+        if self.min_model_size_b > 0 {
+            if let Some(size_b) = parse_model_size(model_id) {
+                if size_b < self.min_model_size_b {
+                    return false;
+                }
+            }
+        }
+
         true
     }
 }
 
-/// Parse a "YYYY-MM-DD" date string into seconds since Unix epoch.
+/// Parse model size in billions of parameters from a model ID.
+pub fn parse_model_size(model_id: &str) -> Option<u64> {
+    let lower = model_id.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'b' {
+                let num_str = std::str::from_utf8(&bytes[start..i]).ok()?;
+                let size: u64 = num_str.parse().ok()?;
+                if size > 0 && size <= 1000 {
+                    return Some(size);
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 fn parse_date_seconds(date: &str) -> Option<i64> {
     let parts: Vec<&str> = date.split('-').collect();
     if parts.len() != 3 {
@@ -918,6 +969,14 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
         &mut server.free_models_quality.min_agentic_index,
     )?;
     apply_env_u64(
+        "MODEL_GATEWAY_FREE_QUALITY_MIN_CONTEXT",
+        &mut server.free_models_quality.min_context_length,
+    )?;
+    apply_env_u64(
+        "MODEL_GATEWAY_FREE_QUALITY_MIN_MODEL_SIZE",
+        &mut server.free_models_quality.min_model_size_b,
+    )?;
+    apply_env_u64(
         "MODEL_GATEWAY_FREE_QUALITY_MAX_AGE_MONTHS",
         &mut server.free_models_quality.max_age_months,
     )?;
@@ -1339,6 +1398,14 @@ const fn default_free_quality_min_agentic() -> f64 {
     15.0
 }
 
+const fn default_free_quality_min_context() -> u64 {
+    8_192
+}
+
+const fn default_free_quality_min_model_size() -> u64 {
+    7
+}
+
 const fn default_free_quality_max_age_months() -> u64 {
     18
 }
@@ -1533,6 +1600,8 @@ mod tests {
         let server = ServerConfig {
             free_models_quality: super::FreeModelsQualityBar {
                 min_general_index: 30.0,
+                min_context_length: 0,
+                min_model_size_b: 0,
                 min_coding_index: 35.0,
                 min_agentic_index: 15.0,
                 max_age_months: 12,
@@ -1570,10 +1639,20 @@ mod tests {
         use crate::benchmarks::TaskKind;
         let quality = super::FreeModelsQualityBar {
             min_general_index: 50.0,
+            min_context_length: 0,
+            min_model_size_b: 0,
             ..super::FreeModelsQualityBar::default()
         };
         // Model without benchmark always passes quality check
-        assert!(quality.passes(TaskKind::General, None, 9999999999, None, None));
+        assert!(quality.passes(
+            TaskKind::General,
+            None,
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
     }
 
     #[test]
@@ -1581,6 +1660,8 @@ mod tests {
         use crate::benchmarks::{BenchmarkModel, TaskKind};
         let quality = super::FreeModelsQualityBar {
             min_general_index: 50.0,
+            min_context_length: 0,
+            min_model_size_b: 0,
             min_coding_index: 35.0,
             min_agentic_index: 15.0,
             max_age_months: 0,                // disable age filter
@@ -1593,14 +1674,18 @@ mod tests {
             Some(&model),
             9999999999,
             Some(1.0),
-            Some(1.0)
+            Some(1.0),
+            None,
+            "test"
         ));
         assert!(!quality.passes(
             TaskKind::Coding,
             Some(&model),
             9999999999,
             Some(1.0),
-            Some(1.0)
+            Some(1.0),
+            None,
+            "test"
         ));
     }
 
@@ -1609,6 +1694,8 @@ mod tests {
         use crate::benchmarks::{BenchmarkModel, TaskKind};
         let quality = super::FreeModelsQualityBar {
             min_general_index: 50.0,
+            min_context_length: 0,
+            min_model_size_b: 0,
             min_coding_index: 35.0,
             min_agentic_index: 15.0,
             max_age_months: 0,
@@ -1621,7 +1708,9 @@ mod tests {
             Some(&model),
             9999999999,
             Some(1.0),
-            Some(1.0)
+            Some(1.0),
+            None,
+            "test"
         ));
     }
 
@@ -1630,6 +1719,8 @@ mod tests {
         use crate::benchmarks::{BenchmarkModel, TaskKind};
         let quality = super::FreeModelsQualityBar {
             min_general_index: 0.0,
+            min_context_length: 0,
+            min_model_size_b: 0,
             min_coding_index: 0.0,
             min_agentic_index: 0.0,
             max_age_months: 0,
@@ -1643,7 +1734,9 @@ mod tests {
             Some(&model),
             9999999999,
             Some(0.5),
-            Some(15.0)
+            Some(15.0),
+            None,
+            "test"
         ));
 
         let model = BenchmarkModel::fixture("cheap-model", 70.0, 70.0, 70.0, 3.0, 5.0);
@@ -1653,7 +1746,9 @@ mod tests {
             Some(&model),
             9999999999,
             Some(3.0),
-            Some(5.0)
+            Some(5.0),
+            None,
+            "test"
         ));
 
         let model = BenchmarkModel::fixture("affordable-model", 70.0, 70.0, 70.0, 1.0, 5.0);
@@ -1663,7 +1758,9 @@ mod tests {
             Some(&model),
             9999999999,
             Some(1.0),
-            Some(5.0)
+            Some(5.0),
+            None,
+            "test"
         ));
     }
 
@@ -1672,6 +1769,8 @@ mod tests {
         use crate::benchmarks::{BenchmarkModel, TaskKind};
         let quality = super::FreeModelsQualityBar {
             min_general_index: 0.0,
+            min_context_length: 0,
+            min_model_size_b: 0,
             min_coding_index: 35.0,
             min_agentic_index: 15.0,
             max_age_months: 12, // 1 year
@@ -1688,7 +1787,9 @@ mod tests {
             Some(&recent),
             9999999999,
             Some(1.0),
-            Some(1.0)
+            Some(1.0),
+            None,
+            "test"
         ));
 
         // Model with old release_date fails
@@ -1701,7 +1802,9 @@ mod tests {
             Some(&old),
             9999999999,
             Some(1.0),
-            Some(1.0)
+            Some(1.0),
+            None,
+            "test"
         ));
     }
 
@@ -1716,6 +1819,8 @@ mod tests {
 
         let quality = super::FreeModelsQualityBar {
             min_general_index: 0.0,
+            min_context_length: 0,
+            min_model_size_b: 0,
             min_coding_index: 35.0,
             min_agentic_index: 15.0,
             max_age_months: 6, // 6 months
@@ -1725,14 +1830,24 @@ mod tests {
         let model = BenchmarkModel::fixture("any", 70.0, 70.0, 70.0, 1.0, 1.0);
 
         // Fresh refreshed_at passes
-        assert!(quality.passes(TaskKind::General, Some(&model), now, Some(1.0), Some(1.0)));
+        assert!(quality.passes(
+            TaskKind::General,
+            Some(&model),
+            now,
+            Some(1.0),
+            Some(1.0),
+            None,
+            "test"
+        ));
         // Very old refreshed_at fails
         assert!(!quality.passes(
             TaskKind::General,
             Some(&model),
             now - 365 * 86400 * 3,
             Some(1.0),
-            Some(1.0)
+            Some(1.0),
+            None,
+            "test"
         ));
     }
 
@@ -1743,6 +1858,8 @@ mod tests {
             min_general_index: 25.0,
             min_coding_index: 35.0,
             min_agentic_index: 15.0,
+            min_context_length: 0,
+            min_model_size_b: 0,
             max_age_months: 0,
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
@@ -1750,21 +1867,93 @@ mod tests {
 
         // high general, low coding, low agentic
         let model = BenchmarkModel::fixture("model", 28.0, 20.0, 12.0, 1.0, 1.0);
-        assert!(bar.passes(TaskKind::General, Some(&model), 9999999999, None, None));
-        assert!(!bar.passes(TaskKind::Coding, Some(&model), 9999999999, None, None));
-        assert!(!bar.passes(TaskKind::Agentic, Some(&model), 9999999999, None, None));
+        assert!(bar.passes(
+            TaskKind::General,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
+        assert!(!bar.passes(
+            TaskKind::Coding,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
+        assert!(!bar.passes(
+            TaskKind::Agentic,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
 
         // high general, high coding, low agentic
         let model = BenchmarkModel::fixture("model", 28.0, 38.0, 12.0, 1.0, 1.0);
-        assert!(bar.passes(TaskKind::General, Some(&model), 9999999999, None, None));
-        assert!(bar.passes(TaskKind::Coding, Some(&model), 9999999999, None, None));
-        assert!(!bar.passes(TaskKind::Agentic, Some(&model), 9999999999, None, None));
+        assert!(bar.passes(
+            TaskKind::General,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
+        assert!(bar.passes(
+            TaskKind::Coding,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
+        assert!(!bar.passes(
+            TaskKind::Agentic,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
 
         // low general, high coding, high agentic
         let model = BenchmarkModel::fixture("model", 20.0, 38.0, 18.0, 1.0, 1.0);
-        assert!(!bar.passes(TaskKind::General, Some(&model), 9999999999, None, None));
-        assert!(bar.passes(TaskKind::Coding, Some(&model), 9999999999, None, None));
-        assert!(bar.passes(TaskKind::Agentic, Some(&model), 9999999999, None, None));
+        assert!(!bar.passes(
+            TaskKind::General,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
+        assert!(bar.passes(
+            TaskKind::Coding,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
+        assert!(bar.passes(
+            TaskKind::Agentic,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
     }
 
     #[test]
@@ -1830,6 +2019,8 @@ mod tests {
     fn toml_round_trip_preserves_free_models_quality() {
         let original = super::FreeModelsQualityBar {
             min_general_index: 30.0,
+            min_context_length: 0,
+            min_model_size_b: 0,
             min_coding_index: 40.0,
             min_agentic_index: 20.0,
             max_age_months: 24,
@@ -1851,6 +2042,8 @@ mod tests {
         use crate::benchmarks::{BenchmarkModel, TaskKind};
         let bar = super::FreeModelsQualityBar {
             min_general_index: 50.0,
+            min_context_length: 0,
+            min_model_size_b: 0,
             min_coding_index: 50.0,
             min_agentic_index: 50.0,
             max_age_months: 0,
@@ -1864,9 +2057,33 @@ mod tests {
             agentic_quality: None,
             ..BenchmarkModel::fixture("null-scores", 0.0, 0.0, 0.0, 1.0, 1.0)
         };
-        assert!(bar.passes(TaskKind::General, Some(&model), 9999999999, None, None));
-        assert!(bar.passes(TaskKind::Coding, Some(&model), 9999999999, None, None));
-        assert!(bar.passes(TaskKind::Agentic, Some(&model), 9999999999, None, None));
+        assert!(bar.passes(
+            TaskKind::General,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
+        assert!(bar.passes(
+            TaskKind::Coding,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
+        assert!(bar.passes(
+            TaskKind::Agentic,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
     }
 
     #[test]
@@ -1880,6 +2097,8 @@ mod tests {
 
         let bar = super::FreeModelsQualityBar {
             min_general_index: 0.0,
+            min_context_length: 0,
+            min_model_size_b: 0,
             min_coding_index: 35.0,
             min_agentic_index: 15.0,
             max_age_months: 12, // 1 year
@@ -1892,7 +2111,15 @@ mod tests {
             release_date: Some("2026-01-01".to_owned()),
             ..BenchmarkModel::fixture("recent-release", 70.0, 70.0, 70.0, 1.0, 1.0)
         };
-        assert!(bar.passes(TaskKind::General, Some(&model), old_refreshed, None, None));
+        assert!(bar.passes(
+            TaskKind::General,
+            Some(&model),
+            old_refreshed,
+            None,
+            None,
+            None,
+            "test"
+        ));
 
         // Without release_date, ancient refreshed_at fails
         let no_release = BenchmarkModel::fixture("old-refreshed", 70.0, 70.0, 70.0, 1.0, 1.0);
@@ -1901,7 +2128,9 @@ mod tests {
             Some(&no_release),
             old_refreshed,
             None,
-            None
+            None,
+            None,
+            "test"
         ));
     }
 
@@ -2183,5 +2412,52 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[test]
+    fn context_filter_rejects_tiny_context_when_available() {
+        use crate::benchmarks::BenchmarkModel;
+        let filter = super::FreeModelsQualityBar {
+            min_general_index: 0.0,
+            min_coding_index: 0.0,
+            min_agentic_index: 0.0,
+            min_context_length: 8_000,
+            min_model_size_b: 0,
+            max_age_months: 0,
+            max_input_price_per_million: 0.0,
+            max_output_price_per_million: 0.0,
+        };
+        let model = BenchmarkModel::fixture("m", 50.0, 50.0, 50.0, 1.0, 1.0);
+        assert!(!filter.passes(
+            super::super::benchmarks::TaskKind::General,
+            Some(&model),
+            9999999999,
+            None,
+            None,
+            Some(4096),
+            "test",
+        ));
+        // null context passes (unknown)
+        assert!(filter.passes(
+            super::super::benchmarks::TaskKind::General,
+            None,
+            9999999999,
+            None,
+            None,
+            None,
+            "test"
+        ));
+    }
+
+    #[test]
+    fn parse_model_size_detects_parameter_counts() {
+        use super::parse_model_size;
+        assert_eq!(parse_model_size("llama-3.1-8b-instant"), Some(8));
+        assert_eq!(parse_model_size("allam-2-7b"), Some(7));
+        assert_eq!(parse_model_size("qwen/qwen3-70b-a3b"), Some(70));
+        assert_eq!(parse_model_size("deepseek/deepseek-v4-flash"), None);
+        assert_eq!(parse_model_size("ministral-14b-2512"), Some(14));
+        assert_eq!(parse_model_size("small-model"), None);
+        assert_eq!(parse_model_size(""), None);
     }
 }

@@ -882,6 +882,8 @@ async fn list_free_models(
             offering.refreshed_at,
             effective_input,
             effective_output,
+            offering.context_length,
+            canonical,
         ) {
             continue;
         }
