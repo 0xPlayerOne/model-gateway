@@ -525,10 +525,10 @@ impl RoutingStore {
             transaction.execute(
                 "INSERT INTO benchmark_models(
                     snapshot_id, model_id, creator, general_quality, coding_quality,
-                    agentic_quality, reasoning_quality, input_price, output_price,
+                    agentic_quality, input_price, output_price,
                     latency_seconds, output_tokens_per_task, reasoning_effort,
-                    as_of, harness, release_date, instruction_quality
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    as_of, harness, release_date
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     snapshot_id,
                     model.id,
@@ -536,7 +536,6 @@ impl RoutingStore {
                     model.intelligence,
                     model.coding_quality,
                     model.agentic_quality,
-                    model.reasoning_quality,
                     model.input_price_per_million,
                     model.output_price_per_million,
                     model.latency_seconds,
@@ -545,15 +544,12 @@ impl RoutingStore {
                     model.as_of,
                     model.harness,
                     model.release_date,
-                    model.instruction_quality,
                 ],
             )?;
             for (metric, score) in [
                 ("general_quality", model.intelligence),
                 ("coding_quality", model.coding_quality),
                 ("agentic_quality", model.agentic_quality),
-                ("reasoning_quality", model.reasoning_quality),
-                ("instruction_quality", model.instruction_quality),
             ] {
                 if let Some(score) = score {
                     let metric = model
@@ -593,10 +589,10 @@ impl RoutingStore {
         let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let mut statement = connection.prepare(
             "SELECT m.model_id, m.creator, m.general_quality, m.coding_quality,
-                    m.agentic_quality, m.reasoning_quality, m.input_price,
+                    m.agentic_quality, m.input_price,
                     m.output_price, m.latency_seconds, m.output_tokens_per_task,
                      NULLIF(m.reasoning_effort, ''), m.as_of, m.harness,
-                     m.release_date, m.instruction_quality
+                     m.release_date
              FROM benchmark_models m
              JOIN benchmark_snapshots s ON s.id = m.snapshot_id
              WHERE s.active = 1 AND s.fetched_at >= ?1
@@ -613,16 +609,14 @@ impl RoutingStore {
                         intelligence: row.get(2)?,
                         coding_quality: row.get(3)?,
                         agentic_quality: row.get(4)?,
-                        reasoning_quality: row.get(5)?,
-                        input_price_per_million: row.get(6)?,
-                        output_price_per_million: row.get(7)?,
-                        latency_seconds: row.get(8)?,
-                        output_tokens_per_task: row.get(9)?,
-                        reasoning_effort: row.get(10)?,
-                        as_of: row.get(11)?,
-                        harness: row.get(12)?,
-                        release_date: row.get(13)?,
-                        instruction_quality: row.get(14)?,
+                        input_price_per_million: row.get(5)?,
+                        output_price_per_million: row.get(6)?,
+                        latency_seconds: row.get(7)?,
+                        output_tokens_per_task: row.get(8)?,
+                        reasoning_effort: row.get(9)?,
+                        as_of: row.get(10)?,
+                        harness: row.get(11)?,
+                        release_date: row.get(12)?,
                         raw_metrics: BTreeMap::new(),
                     })
                 },
@@ -1409,7 +1403,6 @@ fn ensure_benchmark_columns(connection: &Connection) -> Result<(), rusqlite::Err
         ("as_of", "TEXT"),
         ("harness", "TEXT"),
         ("release_date", "TEXT"),
-        ("instruction_quality", "REAL"),
     ] {
         if !columns.iter().any(|column| column == name) {
             connection.execute(
@@ -1626,11 +1619,11 @@ mod tests {
     #[test]
     fn invalid_benchmark_refresh_preserves_last_known_good_snapshot() {
         let store = RoutingStore::open(None).expect("store");
-        let valid = BenchmarkModel::fixture("valid", 70.0, 70.0, 70.0, 70.0, 1.0, 1.0);
+        let valid = BenchmarkModel::fixture("valid", 70.0, 70.0, 70.0, 1.0, 1.0);
         store
             .replace_benchmarks("fixture", "Fixture", &[valid])
             .expect("valid snapshot");
-        let invalid = BenchmarkModel::fixture("invalid", 101.0, 70.0, 70.0, 70.0, 1.0, 1.0);
+        let invalid = BenchmarkModel::fixture("invalid", 101.0, 70.0, 70.0, 1.0, 1.0);
         assert!(
             store
                 .replace_benchmarks("fixture", "Fixture", &[invalid])

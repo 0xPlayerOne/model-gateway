@@ -856,8 +856,8 @@ async fn auto_efficient_uses_cost_then_quality_floor() {
             "fixture",
             "fixture attribution",
             &[
-                BenchmarkModel::fixture("cheap-model", 55.0, 50.0, 45.0, 50.0, 0.1, 0.2),
-                BenchmarkModel::fixture("strong-model", 92.0, 95.0, 90.0, 93.0, 5.0, 10.0),
+                BenchmarkModel::fixture("cheap-model", 55.0, 50.0, 45.0, 0.1, 0.2),
+                BenchmarkModel::fixture("strong-model", 92.0, 95.0, 90.0, 5.0, 10.0),
             ],
         )
         .expect("benchmarks");
@@ -936,8 +936,8 @@ async fn auto_efficient_honors_explicit_paid_authorization_and_spend_caps() {
             "fixture",
             "Fixture",
             &[
-                BenchmarkModel::fixture("paid-model", 90.0, 90.0, 90.0, 90.0, 1.0, 1.0),
-                BenchmarkModel::fixture("free-model", 50.0, 50.0, 50.0, 50.0, 0.0, 0.0),
+                BenchmarkModel::fixture("paid-model", 90.0, 90.0, 90.0, 1.0, 1.0),
+                BenchmarkModel::fixture("free-model", 50.0, 50.0, 50.0, 0.0, 0.0),
             ],
         )
         .expect("benchmarks");
@@ -1010,9 +1010,9 @@ async fn auto_efficient_uses_canonical_mapping_and_reasoning_effort() {
             }],
         )
         .expect("catalog");
-    let mut low = BenchmarkModel::fixture("canonical-model", 80.0, 80.0, 80.0, 80.0, 1.0, 1.0);
+    let mut low = BenchmarkModel::fixture("canonical-model", 80.0, 80.0, 80.0, 1.0, 1.0);
     low.reasoning_effort = Some("low".to_owned());
-    let mut high = BenchmarkModel::fixture("canonical-model", 95.0, 95.0, 95.0, 95.0, 2.0, 2.0);
+    let mut high = BenchmarkModel::fixture("canonical-model", 95.0, 95.0, 95.0, 2.0, 2.0);
     high.reasoning_effort = Some("high".to_owned());
     store
         .replace_benchmarks("fixture", "Fixture", &[low, high])
@@ -1114,9 +1114,9 @@ async fn auto_frontier_selects_only_openai_or_anthropic_canonical_creators() {
             )
             .expect("catalog");
     }
-    let mut claude = BenchmarkModel::fixture("claude", 90.0, 90.0, 90.0, 90.0, 2.0, 4.0);
+    let mut claude = BenchmarkModel::fixture("claude", 90.0, 90.0, 90.0, 2.0, 4.0);
     claude.creator = Some("Anthropic".to_owned());
-    let mut cheaper = BenchmarkModel::fixture("other-model", 99.0, 99.0, 99.0, 99.0, 0.1, 0.1);
+    let mut cheaper = BenchmarkModel::fixture("other-model", 99.0, 99.0, 99.0, 0.1, 0.1);
     cheaper.creator = Some("Other Labs".to_owned());
     store
         .replace_benchmarks("fixture", "Fixture", &[claude, cheaper])
@@ -1182,7 +1182,7 @@ async fn auto_frontier_returns_explicit_error_without_free_or_local_fallback() {
             )
             .expect("catalog");
     }
-    let mut benchmark = BenchmarkModel::fixture("non-frontier", 99.0, 99.0, 99.0, 99.0, 0.1, 0.1);
+    let mut benchmark = BenchmarkModel::fixture("non-frontier", 99.0, 99.0, 99.0, 0.1, 0.1);
     benchmark.creator = Some("Other Labs".to_owned());
     store
         .replace_benchmarks("fixture", "Fixture", &[benchmark])
@@ -1243,7 +1243,7 @@ async fn auto_frontier_reroutes_same_canonical_model_before_output() {
             )
             .expect("catalog");
     }
-    let mut benchmark = BenchmarkModel::fixture("gpt-canonical", 90.0, 90.0, 90.0, 90.0, 1.0, 1.0);
+    let mut benchmark = BenchmarkModel::fixture("gpt-canonical", 90.0, 90.0, 90.0, 1.0, 1.0);
     benchmark.creator = Some("OpenAI".to_owned());
     store
         .replace_benchmarks("fixture", "Fixture", &[benchmark])
@@ -1307,7 +1307,7 @@ async fn auto_frontier_requires_explicit_billing_and_preview_authorization() {
             }],
         )
         .expect("catalog");
-    let mut benchmark = BenchmarkModel::fixture("gpt-preview", 95.0, 95.0, 95.0, 95.0, 1.0, 1.0);
+    let mut benchmark = BenchmarkModel::fixture("gpt-preview", 95.0, 95.0, 95.0, 1.0, 1.0);
     benchmark.creator = Some("OpenAI".to_owned());
     store
         .replace_benchmarks("fixture", "Fixture", &[benchmark])
@@ -1382,7 +1382,7 @@ async fn auto_frontier_reports_quality_capability_and_spend_exclusions() {
     store
         .replace_catalog("frontier", &[catalog(false)])
         .expect("catalog");
-    let mut benchmark = BenchmarkModel::fixture("gpt-frontier", 60.0, 60.0, 60.0, 60.0, 1.0, 1.0);
+    let mut benchmark = BenchmarkModel::fixture("gpt-frontier", 60.0, 60.0, 60.0, 1.0, 1.0);
     benchmark.creator = Some("OpenAI".to_owned());
     store
         .replace_benchmarks("fixture", "Fixture", &[benchmark])

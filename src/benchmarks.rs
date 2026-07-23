@@ -26,10 +26,6 @@ pub struct BenchmarkModel {
     #[serde(default)]
     pub agentic_quality: Option<f64>,
     #[serde(default)]
-    pub reasoning_quality: Option<f64>,
-    #[serde(default)]
-    pub instruction_quality: Option<f64>,
-    #[serde(default)]
     pub input_price_per_million: Option<f64>,
     #[serde(default)]
     pub output_price_per_million: Option<f64>,
@@ -55,7 +51,6 @@ impl BenchmarkModel {
         intelligence: f64,
         coding: f64,
         agentic: f64,
-        reasoning: f64,
         input_price: f64,
         output_price: f64,
     ) -> Self {
@@ -65,8 +60,6 @@ impl BenchmarkModel {
             intelligence: Some(intelligence),
             coding_quality: Some(coding),
             agentic_quality: Some(agentic),
-            reasoning_quality: Some(reasoning),
-            instruction_quality: None,
             input_price_per_million: Some(input_price),
             output_price_per_million: Some(output_price),
             latency_seconds: Some(1.0),
@@ -83,15 +76,9 @@ impl BenchmarkModel {
         if self.id.trim().is_empty() || self.id.len() > 512 {
             return Err("benchmark model ID must be 1-512 characters".to_owned());
         }
-        for score in [
-            self.intelligence,
-            self.coding_quality,
-            self.agentic_quality,
-            self.reasoning_quality,
-            self.instruction_quality,
-        ]
-        .into_iter()
-        .flatten()
+        for score in [self.intelligence, self.coding_quality, self.agentic_quality]
+            .into_iter()
+            .flatten()
         {
             if !score.is_finite() || !(0.0..=100.0).contains(&score) {
                 return Err(format!(
@@ -184,9 +171,6 @@ impl BenchmarkImport {
                     "agentic" | "agentic_quality" | "tool_use" => {
                         model.agentic_quality.get_or_insert(normalized);
                     }
-                    "reasoning" | "reasoning_quality" | "math" => {
-                        model.reasoning_quality.get_or_insert(normalized);
-                    }
                     _ => {
                         return Err(format!(
                             "raw benchmark metric '{metric}' for '{}' has no curated mapping",
@@ -234,8 +218,6 @@ pub enum TaskKind {
     General,
     Coding,
     Agentic,
-    Reasoning,
-    Instruction,
 }
 
 impl TaskKind {
@@ -244,8 +226,6 @@ impl TaskKind {
             Self::General => "general",
             Self::Coding => "coding",
             Self::Agentic => "agentic",
-            Self::Reasoning => "reasoning",
-            Self::Instruction => "instruction",
         }
     }
 }
@@ -353,17 +333,6 @@ pub fn classify(request: &Value) -> Classification {
             "compile",
         ],
     );
-    let reasoning = contains_any(
-        &text,
-        &[
-            "prove",
-            "equation",
-            "mathemat",
-            "derive",
-            "logic",
-            "reason step",
-        ],
-    );
     let agentic = has_tools
         || contains_any(
             &text,
@@ -379,8 +348,6 @@ pub fn classify(request: &Value) -> Classification {
         TaskKind::Agentic
     } else if coding {
         TaskKind::Coding
-    } else if reasoning {
-        TaskKind::Reasoning
     } else {
         TaskKind::General
     };
@@ -416,9 +383,7 @@ pub fn quality_for(model: &BenchmarkModel, task: TaskKind) -> Option<f64> {
     match task {
         TaskKind::General => model.intelligence,
         TaskKind::Coding => model.coding_quality.or(model.intelligence),
-        TaskKind::Agentic => model.agentic_quality.or(model.coding_quality),
-        TaskKind::Reasoning => model.reasoning_quality.or(model.intelligence),
-        TaskKind::Instruction => model.instruction_quality.or(model.intelligence),
+        TaskKind::Agentic => model.agentic_quality.or(model.intelligence),
     }
 }
 
@@ -509,24 +474,12 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                         ("tau_banking", 100.0),
                     ],
                 ),
-                reasoning_quality: scaled_number(
-                    evaluations,
-                    &[
-                        ("artificial_analysis_math_index", 1.0),
-                        ("aime_25", 100.0),
-                        ("aime", 100.0),
-                        ("math_500", 100.0),
-                        ("hle", 100.0),
-                        ("gpqa", 100.0),
-                    ],
-                ),
-                instruction_quality: scaled_number(evaluations, &[("ifbench", 100.0)]),
                 input_price_per_million: number(pricing, "price_1m_input_tokens"),
                 output_price_per_million: number(pricing, "price_1m_output_tokens"),
                 latency_seconds: number(performance, "median_time_to_first_token_seconds")
                     .or_else(|| number(item, "median_time_to_first_token_seconds")),
                 output_tokens_per_task: None,
-                reasoning_effort: aa_reasoning_effort(item),
+                reasoning_effort: None,
                 as_of: Some(epoch_date_string()),
                 harness: None,
                 release_date: item
@@ -581,27 +534,6 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     (year, month, day)
-}
-
-fn aa_reasoning_effort(item: &Value) -> Option<String> {
-    let name = item.get("name").and_then(Value::as_str)?;
-    let lower = name.to_ascii_lowercase();
-    if lower.contains("non-reasoning") || lower.contains("(non") {
-        return None;
-    }
-    if lower.contains("(xhigh") || lower.ends_with("-xhigh") {
-        return Some("xhigh".to_owned());
-    }
-    if lower.contains("(high") || lower.ends_with("-high") || lower.contains("(max") {
-        return Some("high".to_owned());
-    }
-    if lower.contains("(medium") || lower.ends_with("-medium") {
-        return Some("medium".to_owned());
-    }
-    if lower.contains("(low") || lower.ends_with("-low") {
-        return Some("low".to_owned());
-    }
-    None
 }
 
 #[cfg(test)]
@@ -663,31 +595,7 @@ mod tests {
         .expect("fallback fixture");
         assert_eq!(models[0].coding_quality, Some(75.0));
         assert_eq!(models[0].agentic_quality, Some(45.0));
-        assert_eq!(models[0].reasoning_quality, Some(62.3));
         assert_eq!(models[0].intelligence, Some(78.0));
-    }
-
-    #[test]
-    fn aa_extracts_reasoning_effort_from_model_name() {
-        use serde_json::json;
-
-        let low = json!({"name": "GPT-5.6 Sol (low)"});
-        assert_eq!(super::aa_reasoning_effort(&low), Some("low".to_owned()));
-
-        let high = json!({"name": "GPT-5.6 Sol (high)"});
-        assert_eq!(super::aa_reasoning_effort(&high), Some("high".to_owned()));
-
-        let xhigh = json!({"name": "GPT-5.6 Sol (xhigh)"});
-        assert_eq!(super::aa_reasoning_effort(&xhigh), Some("xhigh".to_owned()));
-
-        let max = json!({"name": "GPT-5.6 Terra (max)"});
-        assert_eq!(super::aa_reasoning_effort(&max), Some("high".to_owned()));
-
-        let non_reason = json!({"name": "GPT-5.6 Terra (Non-reasoning)"});
-        assert_eq!(super::aa_reasoning_effort(&non_reason), None);
-
-        let no_effort = json!({"name": "GPT-5.6 Terra"});
-        assert_eq!(super::aa_reasoning_effort(&no_effort), None);
     }
 
     #[test]
@@ -698,7 +606,7 @@ mod tests {
             models: Vec::new(),
         };
         assert!(empty.validate().is_err());
-        let model = BenchmarkModel::fixture("same", 50.0, 50.0, 50.0, 50.0, 1.0, 1.0);
+        let model = BenchmarkModel::fixture("same", 50.0, 50.0, 50.0, 1.0, 1.0);
         let duplicate = BenchmarkImport {
             source: "fixture".to_owned(),
             attribution: "Fixture data".to_owned(),
@@ -709,7 +617,7 @@ mod tests {
 
     #[test]
     fn normalizes_raw_metrics_only_with_explicit_comparable_ranges() {
-        let mut model = BenchmarkModel::fixture("raw", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let mut model = BenchmarkModel::fixture("raw", 0.0, 0.0, 0.0, 0.0, 0.0);
         model.intelligence = None;
         model.raw_metrics.insert(
             "general".to_owned(),
@@ -727,7 +635,7 @@ mod tests {
         let normalized = import.normalize().expect("normalize");
         assert_eq!(normalized.models[0].intelligence, Some(50.0));
 
-        let mut incomparable = BenchmarkModel::fixture("bad", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let mut incomparable = BenchmarkModel::fixture("bad", 0.0, 0.0, 0.0, 0.0, 0.0);
         incomparable.raw_metrics.insert(
             "general".to_owned(),
             super::RawBenchmarkMetric {
@@ -785,7 +693,7 @@ mod tests {
         assert_eq!(
             classify(&json!({"messages": [{"role": "user", "content": "derive this equation"}]}))
                 .task,
-            TaskKind::Reasoning
+            TaskKind::General
         );
         assert_eq!(
             classify(&json!({"messages": [
