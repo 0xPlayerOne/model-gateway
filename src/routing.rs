@@ -1145,25 +1145,29 @@ pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaRe
             "ip",
         ),
         Some(ProviderProfileId::Groq) => (
-            vec![requests(30, 60), requests(1_000, 86_400), tokens(6_000, 60)],
+            vec![
+                requests(30, 60),
+                requests(14_400, 86_400),
+                tokens(6_000, 60),
+            ],
             "https://console.groq.com/docs/rate-limits",
             "published_static",
-            "organization_model",
+            "organization",
         ),
         Some(ProviderProfileId::GoogleGemini) => {
             let lower = model.to_ascii_lowercase();
             let (rpm, rpd) = if lower.contains("pro") {
                 (5, 100)
             } else if lower.contains("flash-lite") {
-                (15, 1_000)
+                (30, 1_500)
             } else {
-                (10, 250)
+                (10, 1_500)
             };
             (
                 vec![
                     requests(rpm, 60),
                     requests(rpd, 86_400),
-                    tokens(250_000, 60),
+                    tokens(1_000_000, 60),
                 ],
                 "https://ai.google.dev/gemini-api/docs/rate-limits",
                 "published_static",
@@ -1185,6 +1189,54 @@ pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaRe
             "https://docs.z.ai/guides/overview/pricing",
             "best_effort",
             "account_model",
+        ),
+        Some(ProviderProfileId::Mistral) => (
+            vec![requests(1, 60), tokens(500_000, 60)],
+            "https://docs.mistral.ai/admin/billing-usage/usage-limits",
+            "published_partial",
+            "organization_model",
+        ),
+        Some(ProviderProfileId::Novita) => (
+            vec![requests(60, 60)],
+            "https://novita.ai/docs/guides/llm-rate-limits",
+            "published_partial",
+            "account_model",
+        ),
+        Some(ProviderProfileId::NvidiaNim) => (
+            vec![requests(10, 60)],
+            "https://build.nvidia.com",
+            "dashboard_only",
+            "account",
+        ),
+        Some(ProviderProfileId::OllamaCloud) => (
+            vec![requests(30, 60)],
+            "https://docs.ollama.com/cloud",
+            "best_effort",
+            "account",
+        ),
+        Some(ProviderProfileId::NousPortal) => (
+            vec![requests(10, 60)],
+            "https://inference-api.nousresearch.com/v1",
+            "published_partial",
+            "account",
+        ),
+        Some(ProviderProfileId::SiliconFlow) => (
+            vec![requests(1_000, 60), tokens(40_000, 60)],
+            "https://docs.siliconflow.com/en/userguide/rate-limits/rate-limit-and-upgradation",
+            "published_static",
+            "account_model",
+        ),
+        Some(ProviderProfileId::OrcaRouter) => (
+            vec![requests(10, 60)],
+            "https://docs.orcarouter.ai/operations/billing-and-usage",
+            "account_api",
+            "account",
+        ),
+        Some(ProviderProfileId::OpenCode) => (
+            vec![requests(50, 60), tokens(10_000, 60)],
+            "https://opencode.ai/docs/zen/",
+            "best_effort",
+            "account",
         ),
         _ => return None,
     };
