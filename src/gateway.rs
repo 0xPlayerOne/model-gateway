@@ -1233,19 +1233,16 @@ async fn chat_completions(
                 Ok(ReservationOutcome::Reserved(token)) => reservation = Some(token),
                 Ok(ReservationOutcome::Cooldown) => {
                     frontier_exhaustion_code.get_or_insert("frontier_all_candidates_unhealthy");
-                    invalidate_session_pin(&state.routing, session_hash.as_deref(), &model).await;
                     continue;
                 }
                 Ok(ReservationOutcome::QuotaExceeded(QuotaKind::CostMicrousd)) => {
                     frontier_exhaustion_code = Some("frontier_spend_cap_reached");
-                    invalidate_session_pin(&state.routing, session_hash.as_deref(), &model).await;
                     continue;
                 }
                 Ok(ReservationOutcome::QuotaExceeded(_)) => {
                     if frontier_exhaustion_code != Some("frontier_spend_cap_reached") {
                         frontier_exhaustion_code = Some("frontier_quota_exhausted");
                     }
-                    invalidate_session_pin(&state.routing, session_hash.as_deref(), &model).await;
                     continue;
                 }
                 Err(error) => {
@@ -1493,7 +1490,9 @@ async fn chat_completions(
                 routing.apply_cooldown(&provider, &upstream_model, retry_after)
             })
             .await;
-            invalidate_session_pin(&state.routing, session_hash.as_deref(), &model).await;
+            if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                invalidate_session_pin(&state.routing, session_hash.as_deref(), &model).await;
+            }
         }
         if target.managed
             && response_headers
@@ -1508,7 +1507,6 @@ async fn chat_completions(
                     routing.apply_cooldown(&provider, &upstream_model, Some(delay))
                 })
                 .await;
-                invalidate_session_pin(&state.routing, session_hash.as_deref(), &model).await;
             }
         }
         if target.runtime_provider == LOCAL_RUNTIME_PROVIDER
