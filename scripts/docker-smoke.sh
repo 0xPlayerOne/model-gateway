@@ -72,6 +72,7 @@ services:
       MODEL_GATEWAY_CONFIG: /app/state/config.toml
       MODEL_GATEWAY_CONTAINER_MODE: "1"
       MODEL_GATEWAY_SECRET_DIR: /run/model-gateway/secrets
+      MODEL_GATEWAY_SECRET_STORE: environment
       MODEL_GATEWAY_STATE_PATH: /var/lib/model-gateway/routing.sqlite3
     ports:
        - "127.0.0.1:${GATEWAY_PORT}:8008"
@@ -92,6 +93,7 @@ services:
       MODEL_GATEWAY_CONFIG: /app/state/config.toml
       MODEL_GATEWAY_CONTAINER_MODE: "1"
       MODEL_GATEWAY_SECRET_DIR: /run/model-gateway/secrets
+      MODEL_GATEWAY_SECRET_STORE: environment
     volumes:
       - "$STATE/state:/app/state"
       - secrets:/run/model-gateway/secrets

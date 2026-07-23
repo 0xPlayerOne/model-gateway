@@ -236,7 +236,7 @@ fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
             }
             let catalog_tokens = catalog.split('-').collect::<BTreeSet<_>>();
             let benchmark_tokens = benchmark.split('-').collect::<BTreeSet<_>>();
-            if benchmark_tokens.len() >= 2
+            if (catalog_tokens.len() >= 2 || benchmark_tokens.len() >= 2)
                 && (catalog.starts_with(&format!("{benchmark}-"))
                     || benchmark.starts_with(&format!("{catalog}-")))
             {
