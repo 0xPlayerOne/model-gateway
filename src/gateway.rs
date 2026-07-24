@@ -642,6 +642,9 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
     if state.config.server.auto_frontier_enabled {
         ids.push("auto-frontier".to_owned());
     }
+    // Build set of (provider, model) pairs from configured aliases for deduplication
+    let mut alias_targets: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
     ids.extend(
         state
             .config
@@ -653,22 +656,26 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
                     "local" | "auto-free" | "auto-efficient" | "auto-balanced" | "auto-frontier"
                 )
             })
+            .filter(|id| !is_provider_auto_route(id))
             .cloned(),
     );
+    // Collect alias targets for deduplication against catalog entries
+    for model_config in state.config.models.values() {
+        for target in &model_config.targets {
+            alias_targets.insert((target.provider.clone(), target.model.clone()));
+            // Also register provider-prefixed form for matching catalog entries
+            alias_targets.insert((
+                target.provider.clone(),
+                format!("{}/{}", target.provider, target.model),
+            ));
+        }
+    }
     if let Ok(offerings) = routing_operation(state.routing.clone(), {
         let max_age = state.config.server.catalog_max_age_seconds;
         move |routing| routing.all_candidates(max_age)
     })
     .await
     {
-        // Build set of (provider, model) pairs already covered by configured aliases
-        let alias_targets: std::collections::HashSet<(String, String)> = state
-            .config
-            .models
-            .values()
-            .flat_map(|m| m.targets.iter())
-            .map(|t| (t.provider.clone(), t.model.clone()))
-            .collect();
         let model_denylist = &state.config.server.model_denylist;
         for offering in &offerings {
             if offering.is_free {
