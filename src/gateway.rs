@@ -2036,6 +2036,7 @@ async fn resolve_auto_free_targets(
         Complexity::Simple => state.config.server.free_quality_floor_simple,
         Complexity::Medium => state.config.server.free_quality_floor_medium,
         Complexity::Complex => state.config.server.free_quality_floor_complex,
+        Complexity::VeryComplex => state.config.server.free_quality_floor_very_complex,
     };
     let requirements = RequestRequirements::from_request(request);
     let candidates = offerings
@@ -2292,6 +2293,9 @@ async fn resolve_benchmark_targets(
         (BenchmarkPolicy::Efficient, Complexity::Complex) => {
             state.config.server.quality_floor_complex
         }
+        (BenchmarkPolicy::Efficient, Complexity::VeryComplex) => {
+            state.config.server.quality_floor_very_complex
+        }
         (BenchmarkPolicy::Frontier, Complexity::Simple) => {
             state.config.server.frontier_quality_floor_simple
         }
@@ -2300,6 +2304,9 @@ async fn resolve_benchmark_targets(
         }
         (BenchmarkPolicy::Frontier, Complexity::Complex) => {
             state.config.server.frontier_quality_floor_complex
+        }
+        (BenchmarkPolicy::Frontier, Complexity::VeryComplex) => {
+            state.config.server.frontier_quality_floor_very_complex
         }
     };
     let requirements = RequestRequirements::from_request(request);

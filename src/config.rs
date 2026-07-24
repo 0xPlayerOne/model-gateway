@@ -74,12 +74,16 @@ pub struct ServerConfig {
     pub quality_floor_medium: f64,
     #[serde(default = "default_quality_floor_complex")]
     pub quality_floor_complex: f64,
+    #[serde(default = "default_quality_floor_very_complex")]
+    pub quality_floor_very_complex: f64,
     #[serde(default = "default_frontier_quality_floor_simple")]
     pub frontier_quality_floor_simple: f64,
     #[serde(default = "default_frontier_quality_floor_medium")]
     pub frontier_quality_floor_medium: f64,
     #[serde(default = "default_frontier_quality_floor_complex")]
     pub frontier_quality_floor_complex: f64,
+    #[serde(default = "default_frontier_quality_floor_very_complex")]
+    pub frontier_quality_floor_very_complex: f64,
     #[serde(default = "default_true")]
     pub auto_frontier_enabled: bool,
     #[serde(default = "default_true")]
@@ -94,6 +98,8 @@ pub struct ServerConfig {
     pub free_quality_floor_medium: f64,
     #[serde(default = "default_free_quality_floor_complex")]
     pub free_quality_floor_complex: f64,
+    #[serde(default = "default_free_quality_floor_very_complex")]
+    pub free_quality_floor_very_complex: f64,
     #[serde(default)]
     pub model_denylist: Vec<String>,
 }
@@ -461,9 +467,11 @@ impl Default for ServerConfig {
             quality_floor_simple: default_quality_floor_simple(),
             quality_floor_medium: default_quality_floor_medium(),
             quality_floor_complex: default_quality_floor_complex(),
+            quality_floor_very_complex: default_quality_floor_very_complex(),
             frontier_quality_floor_simple: default_frontier_quality_floor_simple(),
             frontier_quality_floor_medium: default_frontier_quality_floor_medium(),
             frontier_quality_floor_complex: default_frontier_quality_floor_complex(),
+            frontier_quality_floor_very_complex: default_frontier_quality_floor_very_complex(),
             auto_frontier_enabled: true,
             auto_free_enabled: true,
             auto_efficient_enabled: true,
@@ -471,6 +479,7 @@ impl Default for ServerConfig {
             free_quality_floor_simple: default_free_quality_floor_simple(),
             free_quality_floor_medium: default_free_quality_floor_medium(),
             free_quality_floor_complex: default_free_quality_floor_complex(),
+            free_quality_floor_very_complex: default_free_quality_floor_very_complex(),
             model_denylist: Vec::new(),
         }
     }
@@ -569,17 +578,23 @@ impl Config {
             || !valid_quality_floor(self.server.quality_floor_complex)
             || self.server.quality_floor_simple > self.server.quality_floor_medium
             || self.server.quality_floor_medium > self.server.quality_floor_complex
+            || self.server.quality_floor_complex > self.server.quality_floor_very_complex
             || !valid_quality_floor(self.server.frontier_quality_floor_simple)
             || !valid_quality_floor(self.server.frontier_quality_floor_medium)
             || !valid_quality_floor(self.server.frontier_quality_floor_complex)
+            || !valid_quality_floor(self.server.frontier_quality_floor_very_complex)
             || self.server.frontier_quality_floor_simple > self.server.frontier_quality_floor_medium
             || self.server.frontier_quality_floor_medium
                 > self.server.frontier_quality_floor_complex
+            || self.server.frontier_quality_floor_complex
+                > self.server.frontier_quality_floor_very_complex
             || !valid_quality_floor(self.server.free_quality_floor_simple)
             || !valid_quality_floor(self.server.free_quality_floor_medium)
             || !valid_quality_floor(self.server.free_quality_floor_complex)
+            || !valid_quality_floor(self.server.free_quality_floor_very_complex)
             || self.server.free_quality_floor_simple > self.server.free_quality_floor_medium
             || self.server.free_quality_floor_medium > self.server.free_quality_floor_complex
+            || self.server.free_quality_floor_complex > self.server.free_quality_floor_very_complex
         {
             return Err(ConfigError::Invalid(
                 "benchmark age and ordered quality floors must be valid (0-100)".to_owned(),
@@ -955,6 +970,10 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
         &mut server.quality_floor_complex,
     )?;
     apply_env_f64(
+        "MODEL_GATEWAY_QUALITY_FLOOR_VERY_COMPLEX",
+        &mut server.quality_floor_very_complex,
+    )?;
+    apply_env_f64(
         "MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR_SIMPLE",
         &mut server.frontier_quality_floor_simple,
     )?;
@@ -967,6 +986,10 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
         &mut server.frontier_quality_floor_complex,
     )?;
     apply_env_f64(
+        "MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR_VERY_COMPLEX",
+        &mut server.frontier_quality_floor_very_complex,
+    )?;
+    apply_env_f64(
         "MODEL_GATEWAY_FREE_QUALITY_FLOOR_SIMPLE",
         &mut server.free_quality_floor_simple,
     )?;
@@ -977,6 +1000,10 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
     apply_env_f64(
         "MODEL_GATEWAY_FREE_QUALITY_FLOOR_COMPLEX",
         &mut server.free_quality_floor_complex,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_FREE_QUALITY_FLOOR_VERY_COMPLEX",
+        &mut server.free_quality_floor_very_complex,
     )?;
     apply_env_bool(
         "MODEL_GATEWAY_AUTO_FRONTIER_ENABLED",
@@ -1415,6 +1442,10 @@ const fn default_quality_floor_complex() -> f64 {
     75.0
 }
 
+const fn default_quality_floor_very_complex() -> f64 {
+    85.0
+}
+
 const fn default_frontier_quality_floor_simple() -> f64 {
     50.0
 }
@@ -1427,6 +1458,10 @@ const fn default_frontier_quality_floor_complex() -> f64 {
     85.0
 }
 
+const fn default_frontier_quality_floor_very_complex() -> f64 {
+    92.0
+}
+
 const fn default_free_quality_floor_simple() -> f64 {
     30.0
 }
@@ -1437,6 +1472,10 @@ const fn default_free_quality_floor_medium() -> f64 {
 
 const fn default_free_quality_floor_complex() -> f64 {
     60.0
+}
+
+const fn default_free_quality_floor_very_complex() -> f64 {
+    70.0
 }
 
 const fn default_free_quality_min_general() -> f64 {

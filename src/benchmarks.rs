@@ -221,6 +221,7 @@ pub enum Complexity {
     Simple,
     Medium,
     Complex,
+    VeryComplex,
 }
 
 impl Complexity {
@@ -229,6 +230,7 @@ impl Complexity {
             Self::Simple => "simple",
             Self::Medium => "medium",
             Self::Complex => "complex",
+            Self::VeryComplex => "very_complex",
         }
     }
 }
@@ -356,7 +358,8 @@ pub fn classify(request: &Value) -> Classification {
     let complexity = match complexity {
         0 | 1 => Complexity::Simple,
         2 | 3 => Complexity::Medium,
-        _ => Complexity::Complex,
+        4 | 5 => Complexity::Complex,
+        _ => Complexity::VeryComplex,
     };
     Classification {
         task,
