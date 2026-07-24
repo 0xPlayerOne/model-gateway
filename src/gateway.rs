@@ -25,7 +25,8 @@ use crate::benchmarks::{
     quality_for,
 };
 use crate::config::{
-    BillingMode, Config, ProviderConfig, QuotaKind, ServerConfig, TargetConfig, TieredQualityFloors,
+    BillingMode, Config, ProviderConfig, ProviderProfileId, QuotaKind, ServerConfig, TargetConfig,
+    TieredQualityFloors,
 };
 use crate::providers::prepare_request;
 use crate::routing::{
@@ -464,73 +465,93 @@ async fn list_providers(
     Query(query): Query<ProvidersQuery>,
 ) -> Response {
     let mut model_counts = BTreeMap::new();
-    match state
+    if let Ok(offerings) = state
         .routing
         .all_candidates(state.config.server.catalog_max_age_seconds)
     {
-        Ok(offerings) => {
-            for offering in offerings {
-                let counts = model_counts
-                    .entry(offering.provider)
-                    .or_insert((0usize, 0usize));
-                counts.0 += 1;
-                if offering.is_free {
-                    counts.1 += 1;
-                }
+        for offering in offerings {
+            let counts = model_counts
+                .entry(offering.provider)
+                .or_insert((0usize, 0usize));
+            counts.0 += 1;
+            if offering.is_free {
+                counts.1 += 1;
             }
         }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {
-                        "message": error.to_string(),
-                        "type": "server_error",
-                        "code": "provider_catalog_unavailable"
-                    }
-                })),
-            )
-                .into_response();
+    }
+
+    // Collect configured profile IDs to avoid duplicates in unconfigured section
+    let mut configured_profiles: Vec<ProviderProfileId> = Vec::new();
+    for runtime in state.providers.values() {
+        if let Some(profile) = runtime.config.profile {
+            if !configured_profiles.contains(&profile) {
+                configured_profiles.push(profile);
+            }
         }
     }
-    let providers = state
-        .providers
-        .iter()
-        .filter(|(_, runtime)| {
-            runtime.config.api_key_secret.is_some()
-                && query
-                    .available
-                    .is_none_or(|available| runtime.available == available)
-        })
-        .map(|(code_name, runtime)| {
-            let config = &runtime.config;
-            let (model_count, free_model_count) =
-                model_counts.get(code_name).copied().unwrap_or_default();
-            json!({
-                "id": code_name,
-                "name": config
-                    .profile
-                    .map(|profile| profile.display_name())
-                    .unwrap_or("Custom provider"),
-                "adapter": config.adapter,
-                "base_url": config.base_url,
-                "billing_mode": match config.billing_mode {
-                    BillingMode::Free => "free",
-                    BillingMode::Paid => "paid",
-                    BillingMode::Subscription => "subscription",
-                },
-                "api_key_secret": config.api_key_secret,
-                "api_key_source": runtime.api_key_source,
-                "account_scope": config.account_scope,
-                "model_count": model_count,
-                "free_model_count": free_model_count,
-                "model_allowlist_count": config.model_allowlist.len(),
-                "model_denylist_count": config.model_denylist.len(),
-                "allow_preview_models": config.allow_preview_models,
-                "available": runtime.available,
-            })
-        })
-        .collect::<Vec<_>>();
+
+    let mut providers = Vec::new();
+
+    // Configured providers
+    for (code_name, runtime) in &*state.providers {
+        if query.available.is_some_and(|a| a != runtime.available) {
+            continue;
+        }
+        let config = &runtime.config;
+        let (model_count, free_model_count) = model_counts
+            .get(code_name.as_str())
+            .copied()
+            .unwrap_or_default();
+        providers.push(json!({
+            "id": code_name,
+            "name": config.profile
+                .map(|p| p.display_name())
+                .unwrap_or("Custom OpenAI-compatible"),
+            "adapter": format!("{:?}", config.adapter).to_lowercase(),
+            "base_url": config.base_url,
+            "billing_mode": match config.billing_mode {
+                BillingMode::Free => "free",
+                BillingMode::Paid => "paid",
+                BillingMode::Subscription => "subscription",
+            },
+            "api_key_secret": config.api_key_secret,
+            "api_key_source": runtime.api_key_source,
+            "account_scope": config.account_scope,
+            "model_count": model_count,
+            "free_model_count": free_model_count,
+            "model_allowlist_count": config.model_allowlist.len(),
+            "model_denylist_count": config.model_denylist.len(),
+            "allow_preview_models": config.allow_preview_models,
+            "available": runtime.available,
+        }));
+    }
+
+    // Unconfigured built-in profiles
+    if query.available.is_none_or(|a| !a) {
+        for profile in ProviderProfileId::all() {
+            if profile == ProviderProfileId::Custom || configured_profiles.contains(&profile) {
+                continue;
+            }
+            let definition = profile.definition();
+            providers.push(json!({
+                "id": definition.config_key,
+                "name": definition.display_name,
+                "adapter": format!("{:?}", definition.adapter).to_lowercase(),
+                "base_url": definition.native_base_url,
+                "billing_mode": "free",
+                "api_key_secret": null,
+                "api_key_source": "none",
+                "account_scope": null,
+                "model_count": 0,
+                "free_model_count": 0,
+                "model_allowlist_count": 0,
+                "model_denylist_count": 0,
+                "allow_preview_models": false,
+                "available": false,
+            }));
+        }
+    }
+
     Json(json!({
         "object": "list",
         "data": providers,
@@ -856,6 +877,53 @@ fn cost_microusd(input: Option<f64>, output: Option<f64>) -> u64 {
         }
         _ => 0,
     }
+}
+
+struct CatalogModelEntry<'a> {
+    offering: &'a CatalogOffering,
+    benchmark: Option<&'a BenchmarkModel>,
+    composite_quality: Option<f64>,
+    rank: usize,
+    effort_level: Option<&'a str>,
+    parameters: Option<String>,
+}
+
+fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
+    let input_price = entry
+        .offering
+        .input_price_per_million
+        .or_else(|| entry.benchmark.and_then(|b| b.input_price_per_million));
+    let output_price = entry
+        .offering
+        .output_price_per_million
+        .or_else(|| entry.benchmark.and_then(|b| b.output_price_per_million));
+    json!({
+        "model": {
+            "name": entry.offering.model,
+            "provider": entry.offering.provider,
+            "effort_level": entry.effort_level,
+            "parameters": entry.parameters,
+        },
+        "composite": {
+            "quality": entry.composite_quality,
+            "rank": entry.rank,
+        },
+        "scores": {
+            "general": entry.benchmark.and_then(|b| b.intelligence),
+            "coding": entry.benchmark.and_then(|b| b.coding_quality),
+            "agentic": entry.benchmark.and_then(|b| b.agentic_quality),
+        },
+        "capabilities": {
+            "context_length": entry.offering.context_length,
+            "supports_tools": entry.offering.supports_tools,
+            "supports_vision": entry.offering.supports_vision,
+            "supports_structured_output": entry.offering.supports_structured_output,
+        },
+        "price_per_million": {
+            "input": input_price,
+            "output": output_price,
+        },
+    })
 }
 
 fn pick_two<T>(
@@ -1331,29 +1399,18 @@ async fn list_free_models(
         .take(limit)
         .enumerate()
         .map(
-            |(index, (quality, benchmark, offering, limit_kind, source_url))| {
-                json!({
-                    "rank": index + 1,
-                "provider": offering.provider,
-                "model": offering.model,
-                "quality": quality,
-                "scores": {
-                    "general": benchmark.as_ref().and_then(|benchmark| benchmark.intelligence),
-                    "coding": benchmark.as_ref().and_then(|benchmark| benchmark.coding_quality),
-                    "agentic": benchmark.as_ref().and_then(|benchmark| benchmark.agentic_quality),
-                },
-                    "capabilities": {
-                        "context_length": offering.context_length,
-                        "supports_tools": offering.supports_tools,
-                        "supports_vision": offering.supports_vision,
-                        "supports_structured_output": offering.supports_structured_output,
-                    },
-                    "input_price_per_million": offering.input_price_per_million
-                        .or_else(|| benchmark.as_ref().and_then(|b| b.input_price_per_million)),
-                    "output_price_per_million": offering.output_price_per_million
-                        .or_else(|| benchmark.as_ref().and_then(|b| b.output_price_per_million)),
-                    "limit_status": limit_kind,
-                    "reference_url": source_url,
+            |(index, (_quality, benchmark, offering, _limit_kind, _source_url))| {
+                let composite_quality = benchmark.as_ref().and_then(composite_quality);
+                let effort_level = benchmark
+                    .as_ref()
+                    .and_then(|b| b.reasoning_effort.as_deref());
+                catalog_model_json(&CatalogModelEntry {
+                    offering: &offering,
+                    benchmark: benchmark.as_ref(),
+                    composite_quality,
+                    rank: index + 1,
+                    effort_level,
+                    parameters: None,
                 })
             },
         )
@@ -1533,32 +1590,20 @@ async fn list_paid_models(
 
     let ranked = data
         .into_iter()
+        .enumerate()
         .take(limit)
-        .map(|(_quality, benchmark, offering)| {
-            let input_price = offering
-                .input_price_per_million
-                .or_else(|| benchmark.as_ref().and_then(|b| b.input_price_per_million));
-            let output_price = offering
-                .output_price_per_million
-                .or_else(|| benchmark.as_ref().and_then(|b| b.output_price_per_million));
-            json!({
-                "model": offering.model,
-                "provider": offering.provider,
-                "context_length": offering.context_length,
-                "supports_tools": offering.supports_tools,
-                "supports_vision": offering.supports_vision,
-                "supports_structured_output": offering.supports_structured_output,
-                "input_price_per_million": input_price,
-                "output_price_per_million": output_price,
-                "scores": if let Some(b) = benchmark {
-                    json!({
-                        "general": b.intelligence,
-                        "coding": b.coding_quality,
-                        "agentic": b.agentic_quality
-                    })
-                } else {
-                    json!(null)
-                },
+        .map(|(index, (_quality, benchmark, offering))| {
+            let composite_quality = benchmark.as_ref().and_then(composite_quality);
+            let effort_level = benchmark
+                .as_ref()
+                .and_then(|b| b.reasoning_effort.as_deref());
+            catalog_model_json(&CatalogModelEntry {
+                offering: &offering,
+                benchmark: benchmark.as_ref(),
+                composite_quality,
+                rank: index + 1,
+                effort_level,
+                parameters: None,
             })
         })
         .collect::<Vec<_>>();

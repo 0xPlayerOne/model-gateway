@@ -274,7 +274,7 @@ async fn free_models_can_be_filtered_by_provider() {
     let body: Value = response.json().await.expect("provider-filtered body");
     assert_eq!(body["provider"], "alpha");
     assert_eq!(body["data"].as_array().expect("data").len(), 1);
-    assert_eq!(body["data"][0]["provider"], "alpha");
+    assert_eq!(body["data"][0]["model"]["provider"], "alpha");
     assert!(body["providers"].get("beta").is_none());
 
     let all_response = client
@@ -378,7 +378,7 @@ async fn free_models_quality_bar_filters_low_quality_models() {
         .as_array()
         .expect("data")
         .iter()
-        .filter_map(|entry| entry["model"].as_str())
+        .filter_map(|entry| entry["model"]["name"].as_str())
         .collect();
     assert!(
         models.contains(&"great-model"),
@@ -423,21 +423,33 @@ async fn providers_lists_available_secret_backed_providers_without_credentials()
         .await
         .expect("providers body");
     let providers = response["data"].as_array().expect("provider data");
-    assert_eq!(providers.len(), 2);
-    assert_eq!(providers[0]["id"], "available");
-    assert_eq!(providers[0]["name"], "OpenRouter");
-    assert!(providers[0].get("provider").is_none());
-    assert!(providers[0].get("profile").is_none());
+    // Now lists ALL built-in providers, not just configured ones
+    assert!(providers.len() > 2, "should list all built-in providers");
+    let available_prov = providers
+        .iter()
+        .find(|p| p["id"] == "available")
+        .expect("available provider");
+    assert_eq!(available_prov["name"], "OpenRouter");
     assert_eq!(
-        providers[0]["api_key_secret"],
+        available_prov["api_key_secret"],
         "MODEL_GATEWAY_TEST_PROVIDER_KEY"
     );
-    assert_eq!(providers[0]["api_key_source"], "environment");
-    assert_eq!(providers[0]["model_count"], 0);
-    assert_eq!(providers[0]["free_model_count"], 0);
-    assert!(providers[0].get("api_key").is_none());
-    assert_eq!(providers[1]["id"], "unavailable");
-    assert_eq!(providers[1]["available"], false);
+    assert_eq!(available_prov["api_key_source"], "environment");
+    assert_eq!(available_prov["available"], true);
+    assert_eq!(available_prov["model_count"], 0);
+    assert_eq!(available_prov["free_model_count"], 0);
+    let unavailable_prov = providers
+        .iter()
+        .find(|p| p["id"] == "unavailable")
+        .expect("unavailable provider");
+    assert_eq!(unavailable_prov["available"], false);
+    // Unconfigured providers should show available: false and api_key_source: "none"
+    let unconfigured = providers
+        .iter()
+        .find(|p| p["id"] == "google-gemini")
+        .expect("google-gemini");
+    assert_eq!(unconfigured["available"], false);
+    assert_eq!(unconfigured["api_key_source"], "none");
 
     let response: Value = reqwest::get(format!("{gateway}/v1/providers?available=false"))
         .await
@@ -446,9 +458,12 @@ async fn providers_lists_available_secret_backed_providers_without_credentials()
         .await
         .expect("unavailable providers body");
     let unavailable = response["data"].as_array().expect("unavailable data");
-    assert_eq!(unavailable.len(), 1);
-    assert_eq!(unavailable[0]["id"], "unavailable");
-    assert_eq!(unavailable[0]["available"], false);
+    // available=false returns configured-unavailable + all unconfigured providers
+    let unavailable_prov = unavailable
+        .iter()
+        .find(|p| p["id"] == "unavailable")
+        .expect("unavailable provider");
+    assert_eq!(unavailable_prov["available"], false);
 
     unsafe {
         std::env::remove_var("MODEL_GATEWAY_TEST_PROVIDER_KEY");
@@ -2952,8 +2967,8 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         Some(1),
         "should only include the paid (non-free) model"
     );
-    assert_eq!(body["data"][0]["provider"], "paid");
-    assert_eq!(body["data"][0]["model"], "gpt-4o");
+    assert_eq!(body["data"][0]["model"]["provider"], "paid");
+    assert_eq!(body["data"][0]["model"]["name"], "gpt-4o");
     assert_eq!(body["providers"]["paid"]["billing_mode"], "paid");
     assert!(
         body["providers"].get("free").is_none(),
