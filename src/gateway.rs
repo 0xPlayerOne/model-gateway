@@ -663,6 +663,10 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
                 ) && !is_provider_auto_route(&offering.model)
                 {
                     catalog_paid_models.insert((offering.provider.clone(), offering.model.clone()));
+                    catalog_paid_models.insert((
+                        offering.provider.clone(),
+                        format!("{}/{}", offering.provider, offering.model),
+                    ));
                 }
             }
         }
