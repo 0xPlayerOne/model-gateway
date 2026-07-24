@@ -442,4 +442,105 @@ mod tests {
             0o600
         );
     }
+
+    #[test]
+    fn resolver_get_returns_none_for_missing_secret() {
+        let resolver = SecretResolver::with_stores(None, None);
+        assert_eq!(resolver.get("MG_TEST_NONEXISTENT_KEY").expect("get"), None);
+    }
+
+    #[test]
+    fn resolver_source_returns_none_for_missing_value() {
+        let resolver = SecretResolver::with_stores(None, None);
+        assert_eq!(
+            resolver.source("MG_TEST_NONEXISTENT_KEY").expect("source"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolver_set_preferred_fails_in_environment_only_mode() {
+        let resolver = SecretResolver::with_stores(None, None);
+        let err = resolver
+            .set_preferred("MG_TEST_SET_FAIL", "value")
+            .expect_err("should fail");
+        assert!(matches!(err, SecretError::Keychain(_)));
+    }
+
+    #[test]
+    fn resolver_remove_clears_both_stores() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let files = FileSecretStore::new(directory.path());
+        files
+            .set("MG_TEST_REMOVE_BOTH", "file-value")
+            .expect("file set");
+        let keychain = FakeSecretStore::default();
+        keychain
+            .set("MG_TEST_REMOVE_BOTH", "keychain-value")
+            .expect("keychain set");
+        let resolver = SecretResolver::with_stores(Some(Box::new(files)), Some(Box::new(keychain)));
+        resolver.remove("MG_TEST_REMOVE_BOTH").expect("remove");
+        assert_eq!(resolver.get("MG_TEST_REMOVE_BOTH").expect("get"), None);
+    }
+
+    #[test]
+    fn resolver_operations_fail_with_invalid_store_error() {
+        let resolver = SecretResolver {
+            environment: super::EnvironmentSecretStore,
+            files: None,
+            keychain: None,
+            initialization_error: Some("unknown-mode".to_owned()),
+        };
+        let err = resolver.get("MG_TEST_FAIL").expect_err("should fail");
+        assert!(matches!(err, SecretError::InvalidStore(_)));
+        let err = resolver.source("MG_TEST_FAIL").expect_err("should fail");
+        assert!(matches!(err, SecretError::InvalidStore(_)));
+        let err = resolver
+            .set_preferred("MG_TEST_FAIL", "value")
+            .expect_err("should fail");
+        assert!(matches!(err, SecretError::InvalidStore(_)));
+        let err = resolver.remove("MG_TEST_FAIL").expect_err("should fail");
+        assert!(matches!(err, SecretError::InvalidStore(_)));
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_empty_and_special_chars() {
+        assert!(validate_secret_name("").is_err());
+        assert!(validate_secret_name("foo.bar").is_err());
+        assert!(validate_secret_name("foo/bar").is_err());
+        assert!(validate_secret_name("foo bar").is_err());
+        assert!(validate_secret_name("foo\nbar").is_err());
+    }
+
+    #[test]
+    fn validate_secret_name_accepts_valid_identifiers() {
+        assert!(validate_secret_name("OPENROUTER_API_KEY").is_ok());
+        assert!(validate_secret_name("my-secret-1").is_ok());
+        assert!(validate_secret_name("a").is_ok());
+        assert!(validate_secret_name("A_Z_99").is_ok());
+    }
+
+    #[test]
+    fn file_store_get_returns_none_for_absent_key() {
+        let store = FileSecretStore::new(tempfile::tempdir().expect("tempdir").path());
+        assert_eq!(store.get("MG_TEST_ABSENT").expect("get"), None);
+    }
+
+    #[test]
+    fn file_store_remove_is_idempotent() {
+        let store = FileSecretStore::new(tempfile::tempdir().expect("tempdir").path());
+        store.remove("MG_TEST_IDEMPOTENT").expect("first remove");
+        store.remove("MG_TEST_IDEMPOTENT").expect("second remove");
+    }
+
+    #[test]
+    fn environment_secret_store_set_and_remove_return_errors() {
+        let store = super::EnvironmentSecretStore;
+        let err = store
+            .set("MG_TEST_ENV_SET", "value")
+            .expect_err("should fail");
+        assert!(matches!(err, SecretError::Keychain(_)));
+        let err = store.remove("MG_TEST_ENV_REMOVE").expect_err("should fail");
+        assert!(matches!(err, SecretError::Keychain(_)));
+    }
 }
