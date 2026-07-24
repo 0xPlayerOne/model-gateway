@@ -78,6 +78,20 @@ The `classify()` function maps each request to one of three task types, and `qua
 | `Coding` — code/implement/debug/refactor/test keywords | `coding_quality` (falls back to `intelligence`) |
 | `Agentic` — multi-step/tool/agent/workflow keywords or `tools` array | `agentic_quality` (falls back to `intelligence`) |
 
+Task-specific quality is used for response headers and listing endpoints (`/v1/free-models`, `/v1/paid-models`).
+
+### Composite Quality (Used for Routing)
+
+Routing uses a single **composite quality** score instead of task-specific scores:
+
+```
+composite_quality = 0.5 * intelligence + 0.3 * coding_quality + 0.2 * agentic_quality
+```
+
+If `coding_quality` or `agentic_quality` is None, the weight redistributes to `intelligence`. This gives a well-rounded score that doesn't favor any single task type — important since each mode recommends a single model that should handle all tasks well.
+
+The Pareto frontier operates on ALL benchmark entries (including different reasoning_effort levels). It naturally picks the most efficient variant — e.g., GPT 5.6 Sol (medium effort) over Sol Max (high effort) because Sol has better quality/cost ratio.
+
 ### Complexity Classification
 
 The same `classify()` function also determines task complexity:
@@ -141,23 +155,23 @@ Rankings are sorted by quality score (descending), then by combined price (ascen
 
 ## Route Usage
 
-| Route | Benchmark Dependency |
-|---|---|
-| `auto-free` | Uses quality scores for ranking (Pareto on quality × latency). Falls back to unbenchmarked models if none exist. |
-| `auto-efficient` | **Requires** benchmarks. Models without matching benchmark entries are excluded. |
-| `auto-frontier` | **Requires** benchmarks. Also filters by canonical creator (OpenAI/Anthropic only). |
+| Route | Benchmark Dependency | Quality Scoring |
+|---|---|---|
+| `auto-free` | Uses composite quality for Pareto ranking (quality × latency). Falls back to unbenchmarked models if none exist. | Composite |
+| `auto-efficient` | **Requires** benchmarks. Models without matching benchmark entries are excluded. | Composite |
+| `auto-balanced` | **Requires** benchmarks. Same as auto-efficient with higher quality floor. | Composite |
+| `auto-frontier` | **Requires** benchmarks. Also filters by canonical creator (OpenAI/Anthropic only). | Composite |
+
+All paid routes use composite quality (`0.5*intelligence + 0.3*coding + 0.2*agentic`). The Pareto frontier operates on ALL benchmark entries including different reasoning_effort levels, naturally picking the most efficient variant.
 
 ## Configuration
 
 | Env Variable | Default | Description |
 |---|---|---|
 | `MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS` | `86400` (24h) | Maximum age before data is considered stale |
-| `MODEL_GATEWAY_QUALITY_FLOOR_SIMPLE` | `40.0` | Minimum quality for simple tasks (auto-efficient) |
-| `MODEL_GATEWAY_QUALITY_FLOOR_MEDIUM` | `60.0` | Minimum quality for medium tasks (auto-efficient) |
-| `MODEL_GATEWAY_QUALITY_FLOOR_COMPLEX` | `75.0` | Minimum quality for complex tasks (auto-efficient) |
-| `MODEL_GATEWAY_FREE_QUALITY_FLOOR_SIMPLE` | `30.0` | Minimum quality for simple tasks (auto-free) |
-| `MODEL_GATEWAY_FREE_QUALITY_FLOOR_MEDIUM` | `45.0` | Minimum quality for medium tasks (auto-free) |
-| `MODEL_GATEWAY_FREE_QUALITY_FLOOR_COMPLEX` | `60.0` | Minimum quality for complex tasks (auto-free) |
+| `MODEL_GATEWAY_EFFICIENT_QUALITY_FLOOR` | `40.0` | Composite quality floor for auto-efficient |
+| `MODEL_GATEWAY_BALANCED_QUALITY_FLOOR` | `60.0` | Composite quality floor for auto-balanced |
+| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR` | `80.0` | Composite quality floor for auto-frontier |
 
 See [configuration.md](configuration.md) for the full list of server settings.
 

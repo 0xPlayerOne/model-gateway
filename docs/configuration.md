@@ -26,22 +26,26 @@ Environment overrides are applied on every load and take precedence over TOML.
 | `MODEL_GATEWAY_AUTO_FRONTIER_ENABLED` | `true` | Enable/disable auto-frontier route |
 | `MODEL_GATEWAY_AUTO_FREE_ENABLED` | `true` | Enable/disable auto-free route |
 | `MODEL_GATEWAY_AUTO_EFFICIENT_ENABLED` | `true` | Enable/disable auto-efficient route |
+| `MODEL_GATEWAY_AUTO_BALANCED_ENABLED` | `true` | Enable/disable auto-balanced route |
+| `MODEL_GATEWAY_MODEL_DENYLIST` | — | Comma-separated model IDs to exclude globally |
 
 ## Quality Floors
 
+Routing uses a single composite quality floor per mode (not per-task or per-complexity):
+
+```
+composite_quality = 0.5 * intelligence + 0.3 * coding_quality + 0.2 * agentic_quality
+```
+
 | Env Variable | Default | Route |
 |---|---|---|
-| `MODEL_GATEWAY_QUALITY_FLOOR_SIMPLE` | `40.0` | auto-efficient |
-| `MODEL_GATEWAY_QUALITY_FLOOR_MEDIUM` | `60.0` | auto-efficient |
-| `MODEL_GATEWAY_QUALITY_FLOOR_COMPLEX` | `75.0` | auto-efficient |
-| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR_SIMPLE` | `50.0` | auto-frontier |
-| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR_MEDIUM` | `70.0` | auto-frontier |
-| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR_COMPLEX` | `85.0` | auto-frontier |
-| `MODEL_GATEWAY_FREE_QUALITY_FLOOR_SIMPLE` | `30.0` | auto-free |
-| `MODEL_GATEWAY_FREE_QUALITY_FLOOR_MEDIUM` | `45.0` | auto-free |
-| `MODEL_GATEWAY_FREE_QUALITY_FLOOR_COMPLEX` | `60.0` | auto-free |
+| `MODEL_GATEWAY_EFFICIENT_QUALITY_FLOOR` | `40.0` | auto-efficient |
+| `MODEL_GATEWAY_BALANCED_QUALITY_FLOOR` | `60.0` | auto-balanced |
+| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR` | `80.0` | auto-frontier |
 
-Quality floors are ordered: simple ≤ medium ≤ complex. Each must be 0–100.
+Each floor must be 0–100. Higher floors select higher-quality models. The Pareto frontier picks the most efficient model above the floor (best quality/cost/latency tradeoff).
+
+The legacy `TieredQualityFloors` config (per-task×complexity) is still valid for the `/v1/auto-models` display but no longer drives routing decisions.
 
 ## Billing Mode
 

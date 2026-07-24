@@ -11,6 +11,10 @@ benchmark_max_age_seconds = 604800
 auto_frontier_enabled = true
 auto_free_enabled = true
 auto_efficient_enabled = true
+auto_balanced_enabled = true
+efficient_quality_floor = 40.0
+balanced_quality_floor = 60.0
+frontier_quality_floor_single = 80.0
 
 [server.quality_floor.simple]
 general = 40.0

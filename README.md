@@ -46,14 +46,19 @@ curl http://127.0.0.1:8008/v1/providers
 
 ## Built-in Routes
 
-| Route | Description | Benchmarks Required |
-|---|---|---|
-| `local` | Relays the only model from an OpenAI-compatible endpoint (default `127.0.0.1:8000`). | No |
-| `auto-free` | Selects the best free model using benchmark quality, complexity floors, and Pareto efficiency. Falls back to `local`. | Recommended (graceful fallback without) |
-| `auto-efficient` | Pareto-ranks all benchmarked models by quality vs cost vs latency. Falls back to `auto-free`, then `local`. | **Yes** |
-| `auto-frontier` | Same as auto-efficient, limited to OpenAI/Anthropic creators. Never falls back. | **Yes** |
+Each mode picks ONE model from the Pareto frontier. Session pinning keeps you on that model for the entire session — no cache misses from model switching. The Pareto frontier handles reasoning effort automatically (e.g., picks GPT 5.6 Sol over Sol Max for efficiency).
 
-See [docs/routing.md](docs/routing.md) for detailed routing logic.
+| Route | Quality Floor | Description | Benchmarks |
+|---|---|---|---|
+| `local` | — | Relays the only model from an OpenAI-compatible endpoint (default `127.0.0.1:8000`). | No |
+| `auto-free` | Free quality bar | Best free model. Falls back to `local`. | Recommended |
+| `auto-efficient` | 40 | Best bang-for-buck. Pareto ranks by composite quality, cost, latency. Falls back to `auto-free`, then `local`. | **Yes** |
+| `auto-balanced` | 60 | Mid-range quality. Great models, affordable pricing. Falls back to `auto-free`, then `local`. | **Yes** |
+| `auto-frontier` | 80 | Top tier. OpenAI/Anthropic canonical models only. Never falls back. | **Yes** |
+
+Composite quality score: `0.5*intelligence + 0.3*coding + 0.2*agentic` — well-rounded, not task-specific.
+
+See [docs/routing.md](docs/routing.md) for detailed routing logic and cache-aware design.
 
 ## Configuration
 
