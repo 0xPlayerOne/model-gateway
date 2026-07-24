@@ -389,7 +389,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
         ];
         match Select::new()
             .with_prompt("Existing configuration action")
-            .items(&actions)
+            .items(actions)
             .default(0)
             .interact()?
         {
@@ -492,7 +492,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
         let billing_modes = ["Free only", "Paid usage", "Subscription"];
         provider.billing_mode = match Select::new()
             .with_prompt("Authorized billing mode")
-            .items(&billing_modes)
+            .items(billing_modes)
             .default(0)
             .interact()?
         {

@@ -642,41 +642,59 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
     if state.config.server.auto_frontier_enabled {
         ids.push("auto-frontier".to_owned());
     }
-    // Build set of (provider, model) pairs from configured aliases for deduplication
-    let mut alias_targets: std::collections::HashSet<(String, String)> =
-        std::collections::HashSet::new();
-    ids.extend(
-        state
-            .config
-            .models
-            .keys()
-            .filter(|id| {
-                !matches!(
-                    id.as_str(),
-                    "local" | "auto-free" | "auto-efficient" | "auto-balanced" | "auto-frontier"
-                )
-            })
-            .filter(|id| !is_provider_auto_route(id))
-            .cloned(),
-    );
-    // Collect alias targets for deduplication against catalog entries
-    for model_config in state.config.models.values() {
-        for target in &model_config.targets {
-            alias_targets.insert((target.provider.clone(), target.model.clone()));
-            // Also register provider-prefixed form for matching catalog entries
-            alias_targets.insert((
-                target.provider.clone(),
-                format!("{}/{}", target.provider, target.model),
-            ));
-        }
-    }
-    if let Ok(offerings) = routing_operation(state.routing.clone(), {
+
+    let catalog_offerings = routing_operation(state.routing.clone(), {
         let max_age = state.config.server.catalog_max_age_seconds;
         move |routing| routing.all_candidates(max_age)
     })
-    .await
-    {
+    .await;
+
+    let mut catalog_paid_models: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    if let Ok(ref offerings) = catalog_offerings {
+        for offering in offerings {
+            if offering.is_free {
+                continue;
+            }
+            if let Some(config) = state.config.providers.get(&offering.provider) {
+                if matches!(
+                    config.billing_mode,
+                    BillingMode::Paid | BillingMode::Subscription
+                ) && !is_provider_auto_route(&offering.model)
+                {
+                    catalog_paid_models.insert((offering.provider.clone(), offering.model.clone()));
+                }
+            }
+        }
+    }
+
+    for (alias_name, model_config) in &state.config.models {
+        if matches!(
+            alias_name.as_str(),
+            "local" | "auto-free" | "auto-efficient" | "auto-balanced" | "auto-frontier"
+        ) || is_provider_auto_route(alias_name)
+        {
+            continue;
+        }
+        let Some(target) = model_config.targets.first() else {
+            continue;
+        };
+        let Some(provider_config) = state.config.providers.get(&target.provider) else {
+            continue;
+        };
+        if provider_config.billing_mode == BillingMode::Free && provider_config.profile.is_some() {
+            continue;
+        }
+        if catalog_paid_models.contains(&(target.provider.clone(), target.model.clone())) {
+            continue;
+        }
+        ids.push(alias_name.clone());
+    }
+
+    if let Ok(offerings) = catalog_offerings {
         let model_denylist = &state.config.server.model_denylist;
+        let alias_names: std::collections::HashSet<String> =
+            state.config.models.keys().cloned().collect();
         for offering in &offerings {
             if offering.is_free {
                 continue;
@@ -690,15 +708,13 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
             ) {
                 continue;
             }
-            // Skip provider-level auto-route entries (e.g. kilo-auto-free, openrouter-free)
             if is_provider_auto_route(&offering.model) {
                 continue;
             }
-            // Skip if already covered by a configured alias
-            if alias_targets.contains(&(offering.provider.clone(), offering.model.clone())) {
+            let model_id = format!("{}/{}", offering.provider, offering.model);
+            if alias_names.contains(&model_id) {
                 continue;
             }
-            let model_id = format!("{}/{}", offering.provider, offering.model);
             if model_denylist
                 .iter()
                 .any(|d| d == &model_id || d == &offering.model)
