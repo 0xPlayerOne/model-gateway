@@ -661,6 +661,14 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
     })
     .await
     {
+        // Build set of (provider, model) pairs already covered by configured aliases
+        let alias_targets: std::collections::HashSet<(String, String)> = state
+            .config
+            .models
+            .values()
+            .flat_map(|m| m.targets.iter())
+            .map(|t| (t.provider.clone(), t.model.clone()))
+            .collect();
         let model_denylist = &state.config.server.model_denylist;
         for offering in &offerings {
             if offering.is_free {
@@ -673,6 +681,14 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
                 config.billing_mode,
                 BillingMode::Paid | BillingMode::Subscription
             ) {
+                continue;
+            }
+            // Skip provider-level auto-route entries (e.g. kilo-auto-free, openrouter-free)
+            if is_provider_auto_route(&offering.model) {
+                continue;
+            }
+            // Skip if already covered by a configured alias
+            if alias_targets.contains(&(offering.provider.clone(), offering.model.clone())) {
                 continue;
             }
             let model_id = format!("{}/{}", offering.provider, offering.model);
@@ -698,6 +714,14 @@ fn is_model_denied(model: &str, provider: &str, server: &ServerConfig) -> bool {
         .model_denylist
         .iter()
         .any(|d| d == model || d == &full_id)
+}
+
+fn is_provider_auto_route(model: &str) -> bool {
+    // Provider-level auto-route entries like kilo-auto-free, openrouter-free,
+    // orcarouter-free. These are internal routing mechanisms, not user-selectable models.
+    model.ends_with("-free")
+        || model.ends_with("/free")
+        || (model.contains("auto-") && model.ends_with("-free"))
 }
 
 #[derive(Debug, Deserialize)]
