@@ -4239,14 +4239,18 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        RequestRequirements, StreamChoice, benchmark_ids_match, decorate_json_response,
+        ModelMetadata, RequestRequirements, SelectionMetadata, StreamChoice, add_model_headers,
+        benchmark_ids_match, copy_safe_headers, cost_microusd, decorate_json_response,
         estimate_request_tokens, expected_cost_microusd, find_benchmark, find_benchmark_raw,
-        is_fallback_status, log_request, malformed_sse_event, rank_benchmark_models,
-        rate_limit_reset_delay, request_id, session_material, strip_model_noise, take_sse_event,
-        transform_sse_event,
+        footer_sse_event, header_value, is_fallback_status, is_model_denied,
+        is_provider_auto_route, is_reasoning_effort, log_request, malformed_sse_event, model_entry,
+        parse_json_usage, parse_sse_usage, parse_usage_value, rank_benchmark_models,
+        rate_limit_reset_delay, request_id, request_id_from_response, session_material, sse_model,
+        strip_model_noise, take_sse_event, transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
-    use axum::http::{HeaderMap, StatusCode};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use serde_json::json;
     use tracing_subscriber::fmt::MakeWriter;
 
     #[derive(Clone, Default)]
@@ -4740,5 +4744,278 @@ mod tests {
         let result = find_benchmark_raw(&benchmarks, "models/gemini-2.5-flash", TaskKind::General)
             .expect("raw match");
         assert_eq!(result.intelligence, Some(80.0));
+    }
+
+    #[test]
+    fn is_provider_auto_route_detects_free_and_auto_routes() {
+        assert!(is_provider_auto_route("kilo-auto-free"));
+        assert!(is_provider_auto_route("openrouter-free"));
+        assert!(is_provider_auto_route("orcarouter-free"));
+        assert!(!is_provider_auto_route("gpt-4o"));
+        assert!(!is_provider_auto_route("claude-sonnet-4"));
+        assert!(!is_provider_auto_route(""));
+    }
+
+    #[test]
+    fn is_model_denied_matches_model_or_full_id() {
+        let server = crate::config::ServerConfig {
+            model_denylist: vec!["gpt-4o".to_owned(), "openai/gpt-4-turbo".to_owned()],
+            ..crate::config::ServerConfig::default()
+        };
+        // Denied by model name
+        assert!(is_model_denied("gpt-4o", "any-provider", &server));
+        // Denied by full provider/model ID
+        assert!(is_model_denied("gpt-4-turbo", "openai", &server));
+        // Not denied when name doesn't match
+        assert!(!is_model_denied("gpt-4o-mini", "openai", &server));
+        // Empty denylist allows everything
+        let empty = crate::config::ServerConfig {
+            model_denylist: vec![],
+            ..crate::config::ServerConfig::default()
+        };
+        assert!(!is_model_denied("anything", "provider", &empty));
+    }
+
+    #[test]
+    fn cost_microusd_computes_expected_costs() {
+        assert_eq!(cost_microusd(Some(3.0), Some(15.0)), 10_500);
+        assert_eq!(cost_microusd(Some(0.0), Some(0.0)), 1);
+        assert_eq!(cost_microusd(None, Some(5.0)), 0);
+        assert_eq!(cost_microusd(Some(5.0), None), 0);
+        assert_eq!(cost_microusd(None, None), 0);
+    }
+
+    #[test]
+    fn model_entry_creates_json_with_expected_fields() {
+        let entry = model_entry(
+            85.5,
+            100_000,
+            0.5,
+            "gpt-4o",
+            &Some("OpenAI".to_owned()),
+            Some(10.0),
+            Some(30.0),
+        );
+        assert_eq!(entry["model"], "gpt-4o");
+        assert_eq!(entry["creator"], "OpenAI");
+        assert!((entry["quality"].as_f64().unwrap() - 85.5).abs() < 0.001);
+        assert_eq!(entry["expected_cost_microusd"], 100_000);
+        assert!((entry["latency_seconds"].as_f64().unwrap() - 0.5).abs() < 0.001);
+
+        let no_creator = model_entry(50.0, 0, 1.0, "local-model", &None, None, None);
+        assert_eq!(no_creator["creator"], serde_json::Value::Null);
+        assert_eq!(
+            no_creator["input_price_per_million"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn footer_sse_event_creates_formatted_event_with_optional_source() {
+        let event = footer_sse_event(0, "- GPT: 5.6 Sol Medium, Kilo Code", "\n", None);
+        let text = String::from_utf8_lossy(&event);
+        assert!(text.starts_with("data: "));
+        assert!(text.contains("- GPT: 5.6 Sol Medium, Kilo Code"));
+        assert!(text.ends_with("\n\n"));
+
+        // With source metadata
+        let source = json!({
+            "id": "chatcmpl-abc123",
+            "model": "gpt-4o",
+            "created": 1700000000,
+            "system_fingerprint": "fp_abc"
+        });
+        let event = footer_sse_event(1, "- Local: Model Default, Local", "\n", Some(&source));
+        let text = String::from_utf8_lossy(&event);
+        assert!(text.contains("chatcmpl-abc123"));
+        assert!(text.contains("gpt-4o"));
+    }
+
+    #[test]
+    fn parse_usage_value_extracts_tokens_from_json() {
+        let value = json!({
+            "usage": {
+                "prompt_tokens": 150,
+                "completion_tokens": 50
+            }
+        });
+        let (input, output) = parse_usage_value(&value).expect("usage");
+        assert_eq!(input, 150);
+        assert_eq!(output, 50);
+        assert!(parse_usage_value(&json!({})).is_none());
+        assert!(parse_usage_value(&json!({"usage": {"prompt_tokens": 10}})).is_none());
+    }
+
+    #[test]
+    fn parse_json_usage_handles_well_formed_and_malformed_input() {
+        let body = br#"{"usage": {"prompt_tokens": 200, "completion_tokens": 100}}"#;
+        let (input, output) = parse_json_usage(body).expect("usage");
+        assert_eq!(input, 200);
+        assert_eq!(output, 100);
+
+        assert!(parse_json_usage(b"not-json").is_none());
+        assert!(parse_json_usage(b"{}").is_none());
+    }
+
+    #[test]
+    fn parse_sse_usage_extracts_from_data_lines() {
+        let event = b"data: {\"usage\": {\"prompt_tokens\": 75, \"completion_tokens\": 25}}\n\n";
+        let (input, output) = parse_sse_usage(event).expect("usage");
+        assert_eq!(input, 75);
+        assert_eq!(output, 25);
+
+        // Non-data lines
+        let event =
+            b":comment\ndata: {\"usage\": {\"prompt_tokens\": 10, \"completion_tokens\": 5}}\n\n";
+        let (input, output) = parse_sse_usage(event).expect("usage");
+        assert_eq!(input, 10);
+        assert_eq!(output, 5);
+
+        assert!(parse_sse_usage(b"not-data\n\n").is_none());
+        assert!(parse_sse_usage(b"data: {}").is_none());
+    }
+
+    #[test]
+    fn sse_model_extracts_model_from_event() {
+        let event = b"data: {\"model\": \"gpt-4o\", \"choices\": []}\n\n";
+        assert_eq!(sse_model(event).as_deref(), Some("gpt-4o"));
+
+        assert!(sse_model(b"data: {}").is_none());
+        assert!(sse_model(b"not-data").is_none());
+        assert!(sse_model(b"").is_none());
+    }
+
+    #[test]
+    fn header_value_handles_valid_and_invalid_values() {
+        assert_eq!(header_value("test"), HeaderValue::from_static("test"));
+        assert_eq!(header_value(""), HeaderValue::from_static(""));
+        // Values with invalid characters produce a safe fallback
+        let bad = HeaderValue::try_from("invalid\x00value")
+            .unwrap_or_else(|_| HeaderValue::from_static("invalid"));
+        assert_eq!(header_value("invalid\x00value"), bad);
+    }
+
+    #[test]
+    fn request_id_from_response_extracts_header_or_falls_back() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", "req-123".parse().unwrap());
+        let response = axum::response::Response::builder()
+            .header("x-request-id", "req-123")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(request_id_from_response(&response), "req-123");
+    }
+
+    #[test]
+    fn is_reasoning_effort_recognizes_standard_levels() {
+        assert!(is_reasoning_effort("low"));
+        assert!(is_reasoning_effort("medium"));
+        assert!(is_reasoning_effort("high"));
+        assert!(is_reasoning_effort("xhigh"));
+        assert!(is_reasoning_effort("LOW"));
+        assert!(is_reasoning_effort("Medium"));
+        assert!(!is_reasoning_effort("extreme"));
+        assert!(!is_reasoning_effort(""));
+    }
+
+    #[test]
+    fn copy_safe_headers_copies_whitelisted_headers() {
+        let mut source = HeaderMap::new();
+        source.insert("content-type", "application/json".parse().unwrap());
+        source.insert("x-ratelimit-remaining", "99".parse().unwrap());
+        source.insert("x-custom-not-safe", "secret".parse().unwrap());
+
+        let mut target = HeaderMap::new();
+        copy_safe_headers(&source, &mut target);
+
+        assert_eq!(
+            target.get("content-type").unwrap().to_str().unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            target
+                .get("x-ratelimit-remaining")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "99"
+        );
+        assert!(target.get("x-custom-not-safe").is_none());
+    }
+
+    #[test]
+    fn add_model_headers_sets_all_metadata_headers() {
+        let metadata = ModelMetadata {
+            upstream_model: "gpt-4o".to_owned(),
+            canonical_model: "gpt-4o-2024-08".to_owned(),
+            family: "GPT".to_owned(),
+            display: "4o".to_owned(),
+            reasoning_effort: "Medium".to_owned(),
+            provider_display: "OpenAI".to_owned(),
+            selection: Some(SelectionMetadata {
+                canonical_model: "gpt-4o".to_owned(),
+                task: "general",
+                complexity: "simple",
+                classifier_version: "v1",
+                quality_floor: 50.0,
+                quality: 90.0,
+                expected_cost_microusd: 1_000,
+                benchmark_snapshot_id: 42,
+                benchmark_as_of: 1700000000,
+            }),
+        };
+        let mut headers = HeaderMap::new();
+        add_model_headers(&mut headers, &metadata);
+
+        assert_eq!(
+            headers
+                .get("x-model-gateway-model")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "gpt-4o"
+        );
+        assert_eq!(
+            headers
+                .get("x-model-gateway-canonical-model")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "gpt-4o-2024-08"
+        );
+        assert_eq!(
+            headers
+                .get("x-model-gateway-reasoning-effort")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Medium"
+        );
+        assert_eq!(
+            headers
+                .get("x-model-gateway-task")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "general"
+        );
+        assert_eq!(
+            headers
+                .get("x-model-gateway-quality")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "90"
+        );
+
+        // Without selection, only basic headers are set
+        let minimal = ModelMetadata {
+            selection: None,
+            ..metadata
+        };
+        let mut headers = HeaderMap::new();
+        add_model_headers(&mut headers, &minimal);
+        assert!(headers.get("x-model-gateway-task").is_none());
+        assert!(headers.get("x-model-gateway-quality").is_none());
     }
 }
