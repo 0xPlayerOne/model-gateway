@@ -193,7 +193,6 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
         .route("/v1/models", get(list_models))
         .route("/v1/providers", get(list_providers))
         .route("/v1/rankings", get(list_rankings))
-        .route("/v1/efficiency-frontier", get(list_efficiency_frontier))
         .route("/v1/free-models", get(list_free_models))
         .route("/v1/paid-models", get(list_paid_models))
         .route("/v1/chat/completions", post(chat_completions))
@@ -680,28 +679,6 @@ struct RankingQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct EfficiencyFrontierQuery {
-    task: Option<String>,
-    limit: Option<usize>,
-    policy: Option<String>,
-}
-
-fn compute_expected_cost_microusd(
-    input_price_per_million: Option<f64>,
-    output_price_per_million: Option<f64>,
-) -> u64 {
-    const INPUT_TOKENS: f64 = 1_000.0;
-    const OUTPUT_TOKENS: f64 = 500.0;
-    match (input_price_per_million, output_price_per_million) {
-        (Some(input), Some(output)) => {
-            let cost = (INPUT_TOKENS * input + OUTPUT_TOKENS * output) / 1_000_000.0 * 1_000_000.0;
-            (cost.max(0.0) as u64).max(1)
-        }
-        _ => 0,
-    }
-}
-
-#[derive(Debug, Deserialize)]
 struct FreeModelsQuery {
     task: Option<String>,
     limit: Option<usize>,
@@ -825,166 +802,6 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
             })
         })
         .collect()
-}
-
-fn tier_for_quality(quality: f64, simple: f64, medium: f64, complex: f64) -> &'static str {
-    if quality >= complex {
-        "complex"
-    } else if quality >= medium {
-        "medium"
-    } else if quality >= simple {
-        "simple"
-    } else {
-        "below_floor"
-    }
-}
-
-async fn list_efficiency_frontier(
-    State(state): State<AppState>,
-    Query(query): Query<EfficiencyFrontierQuery>,
-) -> Response {
-    let task = match query.task.as_deref().unwrap_or("general") {
-        "general" => TaskKind::General,
-        "coding" => TaskKind::Coding,
-        "agentic" => TaskKind::Agentic,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": "task must be one of general, coding, agentic",
-                        "type": "invalid_request_error",
-                        "code": "invalid_task"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-    let is_frontier_policy = query.policy.as_deref() == Some("frontier");
-    let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
-    let max_age = state.config.server.benchmark_max_age_seconds;
-
-    let models = match state.routing.benchmark_models(max_age) {
-        Ok(models) => models,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {
-                        "message": "benchmark state is unavailable",
-                        "type": "server_error",
-                        "code": "benchmark_state_unavailable"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let cfg = &state.config.server;
-    let (simple_floor, medium_floor, complex_floor) = if is_frontier_policy {
-        (
-            cfg.frontier_quality_floor_simple,
-            cfg.frontier_quality_floor_medium,
-            cfg.frontier_quality_floor_complex,
-        )
-    } else {
-        (
-            cfg.quality_floor_simple,
-            cfg.quality_floor_medium,
-            cfg.quality_floor_complex,
-        )
-    };
-
-    let mut scored = Vec::new();
-    for model in &models {
-        let Some(quality) = quality_for(model, task) else {
-            continue;
-        };
-        if is_frontier_policy && !is_frontier_model(model.creator.as_deref(), &model.id) {
-            continue;
-        }
-        let cost = compute_expected_cost_microusd(
-            model.input_price_per_million,
-            model.output_price_per_million,
-        );
-        let latency = model.latency_seconds.unwrap_or(f64::MAX);
-        let tier = tier_for_quality(quality, simple_floor, medium_floor, complex_floor);
-        scored.push(ScoredCandidate {
-            quality,
-            expected_cost_microusd: cost,
-            latency_seconds: latency,
-            value: (model, tier),
-        });
-    }
-
-    let frontier_set: std::collections::HashSet<*const BenchmarkModel> =
-        pareto_rank::<(&BenchmarkModel, &str)>(scored.clone())
-            .into_iter()
-            .map(|c| c.value.0 as *const BenchmarkModel)
-            .collect();
-
-    let mut frontier = Vec::new();
-    let mut dominated = Vec::new();
-    for c in scored {
-        let (model, tier) = c.value;
-        let id = &model.id;
-        let entry = json!({
-            "id": id,
-            "creator": model.creator,
-            "quality": c.quality,
-            "expected_cost_microusd": c.expected_cost_microusd,
-            "latency_seconds": model.latency_seconds,
-            "input_price_per_million": model.input_price_per_million,
-            "output_price_per_million": model.output_price_per_million,
-            "tier": tier,
-            "reasoning_effort": model.reasoning_effort,
-        });
-        if frontier_set.contains(&(model as *const BenchmarkModel)) {
-            frontier.push(entry);
-        } else {
-            dominated.push(entry);
-        }
-    }
-
-    frontier.sort_by(|a, b| {
-        let a_cost = a["expected_cost_microusd"].as_u64().unwrap_or(u64::MAX);
-        let b_cost = b["expected_cost_microusd"].as_u64().unwrap_or(u64::MAX);
-        a_cost
-            .cmp(&b_cost)
-            .then_with(|| {
-                a["latency_seconds"]
-                    .as_f64()
-                    .unwrap_or(f64::MAX)
-                    .total_cmp(&b["latency_seconds"].as_f64().unwrap_or(f64::MAX))
-            })
-            .then_with(|| {
-                b["quality"]
-                    .as_f64()
-                    .unwrap_or(0.0)
-                    .total_cmp(&a["quality"].as_f64().unwrap_or(0.0))
-            })
-    });
-
-    let take = limit.min(frontier.len());
-    frontier.truncate(take);
-
-    Json(json!({
-        "object": "efficiency_frontier",
-        "task": task.as_str(),
-        "policy": if is_frontier_policy { "frontier" } else { "efficient" },
-        "tiers": {
-            "simple": { "quality_floor": simple_floor },
-            "medium": { "quality_floor": medium_floor },
-            "complex": { "quality_floor": complex_floor }
-        },
-        "frontier_count": frontier.len(),
-        "dominated_count": dominated.len(),
-        "frontier": frontier,
-        "dominated": dominated.into_iter().take(limit).collect::<Vec<_>>()
-    }))
-    .into_response()
 }
 
 async fn list_free_models(
