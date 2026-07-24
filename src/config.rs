@@ -88,6 +88,12 @@ pub struct ServerConfig {
     pub auto_efficient_enabled: bool,
     #[serde(default)]
     pub free_models_quality: FreeModelsQualityBar,
+    #[serde(default = "default_free_quality_floor_simple")]
+    pub free_quality_floor_simple: f64,
+    #[serde(default = "default_free_quality_floor_medium")]
+    pub free_quality_floor_medium: f64,
+    #[serde(default = "default_free_quality_floor_complex")]
+    pub free_quality_floor_complex: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,6 +466,9 @@ impl Default for ServerConfig {
             auto_free_enabled: true,
             auto_efficient_enabled: true,
             free_models_quality: FreeModelsQualityBar::default(),
+            free_quality_floor_simple: default_free_quality_floor_simple(),
+            free_quality_floor_medium: default_free_quality_floor_medium(),
+            free_quality_floor_complex: default_free_quality_floor_complex(),
         }
     }
 }
@@ -563,6 +572,11 @@ impl Config {
             || self.server.frontier_quality_floor_simple > self.server.frontier_quality_floor_medium
             || self.server.frontier_quality_floor_medium
                 > self.server.frontier_quality_floor_complex
+            || !valid_quality_floor(self.server.free_quality_floor_simple)
+            || !valid_quality_floor(self.server.free_quality_floor_medium)
+            || !valid_quality_floor(self.server.free_quality_floor_complex)
+            || self.server.free_quality_floor_simple > self.server.free_quality_floor_medium
+            || self.server.free_quality_floor_medium > self.server.free_quality_floor_complex
         {
             return Err(ConfigError::Invalid(
                 "benchmark age and ordered quality floors must be valid (0-100)".to_owned(),
@@ -943,6 +957,18 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
     apply_env_f64(
         "MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR_COMPLEX",
         &mut server.frontier_quality_floor_complex,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_FREE_QUALITY_FLOOR_SIMPLE",
+        &mut server.free_quality_floor_simple,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_FREE_QUALITY_FLOOR_MEDIUM",
+        &mut server.free_quality_floor_medium,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_FREE_QUALITY_FLOOR_COMPLEX",
+        &mut server.free_quality_floor_complex,
     )?;
     apply_env_bool(
         "MODEL_GATEWAY_AUTO_FRONTIER_ENABLED",
@@ -1384,6 +1410,18 @@ const fn default_frontier_quality_floor_medium() -> f64 {
 
 const fn default_frontier_quality_floor_complex() -> f64 {
     85.0
+}
+
+const fn default_free_quality_floor_simple() -> f64 {
+    30.0
+}
+
+const fn default_free_quality_floor_medium() -> f64 {
+    45.0
+}
+
+const fn default_free_quality_floor_complex() -> f64 {
+    60.0
 }
 
 const fn default_free_quality_min_general() -> f64 {

@@ -1556,6 +1556,242 @@ async fn auto_free_abandons_pin_on_auth_failure() {
 }
 
 #[tokio::test]
+async fn auto_free_prefers_fast_model_for_simple_task() {
+    let fast = spawn_provider(ProviderResponse::Success).await;
+    let slow = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (prov, model) in [("fast", "fast-model"), ("slow", "slow-model")] {
+        store
+            .replace_catalog(
+                prov,
+                &[CatalogRecord {
+                    model: model.to_owned(),
+                    is_free: true,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(0.0),
+                    output_price_per_million: Some(0.0),
+                }],
+            )
+            .expect("catalog");
+    }
+    let mut fast_bench = BenchmarkModel::fixture("fast-model", 60.0, 55.0, 50.0, 0.0, 0.0);
+    fast_bench.latency_seconds = Some(0.5);
+    let mut slow_bench = BenchmarkModel::fixture("slow-model", 80.0, 75.0, 70.0, 0.0, 0.0);
+    slow_bench.latency_seconds = Some(5.0);
+    store
+        .replace_benchmarks("fixture", "Fixture", &[fast_bench, slow_bench])
+        .expect("benchmarks");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([
+            ("fast".to_owned(), provider(format!("http://{fast}/v1"))),
+            ("slow".to_owned(), provider(format!("http://{slow}/v1"))),
+        ]),
+        vec![TargetConfig {
+            provider: "fast".to_owned(),
+            model: "fast-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-free", "messages": [{"role": "user", "content": "What is 2+2?"}]}))
+        .send()
+        .await
+        .expect("auto-free response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "fast");
+}
+
+#[tokio::test]
+async fn auto_free_prefers_quality_model_for_complex_task() {
+    let fast = spawn_provider(ProviderResponse::Success).await;
+    let slow = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (prov, model) in [("fast", "fast-model"), ("slow", "slow-model")] {
+        store
+            .replace_catalog(
+                prov,
+                &[CatalogRecord {
+                    model: model.to_owned(),
+                    is_free: true,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(0.0),
+                    output_price_per_million: Some(0.0),
+                }],
+            )
+            .expect("catalog");
+    }
+    let mut fast_bench = BenchmarkModel::fixture("fast-model", 50.0, 50.0, 50.0, 0.0, 0.0);
+    fast_bench.latency_seconds = Some(0.5);
+    let mut slow_bench = BenchmarkModel::fixture("slow-model", 80.0, 80.0, 80.0, 0.0, 0.0);
+    slow_bench.latency_seconds = Some(5.0);
+    store
+        .replace_benchmarks("fixture", "Fixture", &[fast_bench, slow_bench])
+        .expect("benchmarks");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([
+            ("fast".to_owned(), provider(format!("http://{fast}/v1"))),
+            ("slow".to_owned(), provider(format!("http://{slow}/v1"))),
+        ]),
+        vec![TargetConfig {
+            provider: "fast".to_owned(),
+            model: "fast-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.free_quality_floor_complex = 65.0;
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-free",
+            "messages": [{"role": "user", "content": "Implement a complex multi-step refactoring with concurrency."}],
+            "tools": [{"type": "function", "function": {"name": "edit_file", "parameters": {}}}]
+        }))
+        .send()
+        .await
+        .expect("auto-free response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "slow");
+}
+
+#[tokio::test]
+async fn auto_free_complexity_floor_filters_underqualified() {
+    let weak = spawn_provider(ProviderResponse::Success).await;
+    let strong = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (prov, model) in [("weak", "weak-model"), ("strong", "strong-model")] {
+        store
+            .replace_catalog(
+                prov,
+                &[CatalogRecord {
+                    model: model.to_owned(),
+                    is_free: true,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(0.0),
+                    output_price_per_million: Some(0.0),
+                }],
+            )
+            .expect("catalog");
+    }
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[
+                BenchmarkModel::fixture("weak-model", 25.0, 25.0, 25.0, 0.0, 0.0),
+                BenchmarkModel::fixture("strong-model", 70.0, 70.0, 70.0, 0.0, 0.0),
+            ],
+        )
+        .expect("benchmarks");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([
+            ("weak".to_owned(), provider(format!("http://{weak}/v1"))),
+            ("strong".to_owned(), provider(format!("http://{strong}/v1"))),
+        ]),
+        vec![TargetConfig {
+            provider: "weak".to_owned(),
+            model: "weak-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.free_quality_floor_complex = 60.0;
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-free", "messages": [{"role": "user", "content": "Implement a complex multi-step refactoring with tools."}]}))
+        .send()
+        .await
+        .expect("auto-free response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "strong");
+}
+
+#[tokio::test]
+async fn auto_free_pareto_dominance_prunes_slow_models() {
+    let provider_a = spawn_provider(ProviderResponse::Success).await;
+    let provider_b = spawn_provider(ProviderResponse::Success).await;
+    let provider_c = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (prov, model) in [("a", "model-a"), ("b", "model-b"), ("c", "model-c")] {
+        store
+            .replace_catalog(
+                prov,
+                &[CatalogRecord {
+                    model: model.to_owned(),
+                    is_free: true,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(0.0),
+                    output_price_per_million: Some(0.0),
+                }],
+            )
+            .expect("catalog");
+    }
+    let mut bench_a = BenchmarkModel::fixture("model-a", 70.0, 70.0, 70.0, 0.0, 0.0);
+    bench_a.latency_seconds = Some(5.0);
+    let mut bench_b = BenchmarkModel::fixture("model-b", 70.0, 70.0, 70.0, 0.0, 0.0);
+    bench_b.latency_seconds = Some(1.0);
+    let mut bench_c = BenchmarkModel::fixture("model-c", 65.0, 65.0, 65.0, 0.0, 0.0);
+    bench_c.latency_seconds = Some(0.5);
+    store
+        .replace_benchmarks("fixture", "Fixture", &[bench_a, bench_b, bench_c])
+        .expect("benchmarks");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([
+            ("a".to_owned(), provider(format!("http://{provider_a}/v1"))),
+            ("b".to_owned(), provider(format!("http://{provider_b}/v1"))),
+            ("c".to_owned(), provider(format!("http://{provider_c}/v1"))),
+        ]),
+        vec![TargetConfig {
+            provider: "a".to_owned(),
+            model: "model-a".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-free", "messages": [{"role": "user", "content": "Hello."}]}))
+        .send()
+        .await
+        .expect("auto-free response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let provider = response.headers()["x-model-gateway-provider"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        provider == "b" || provider == "c",
+        "model-a (quality=70, latency=5s) should be dominated by model-b (quality=70, latency=1s); got {provider}"
+    );
+}
+
+#[tokio::test]
 async fn direct_alias_reports_missing_provider_key_in_openai_shape() {
     let keyed = spawn_provider(ProviderResponse::Success).await;
     let mut keyed_provider = provider(format!("http://{keyed}/v1"));
