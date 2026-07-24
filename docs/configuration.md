@@ -9,20 +9,19 @@ Environment overrides are applied on every load and take precedence over TOML.
 | Env Variable | Default | Description |
 |---|---|---|
 | `MODEL_GATEWAY_BIND` | `127.0.0.1:8008` | Listen address |
-| `MODEL_GATEWAY_EXPOSURE` | `loopback` | `loopback`, `private`, or `docker-local` |
+| `MODEL_GATEWAY_EXPOSURE` | `loopback` | `loopback`, `private`, or `local_container` |
 | `MODEL_GATEWAY_LOCAL_BASE_URL` | `http://localhost:8000/v1` | Local model endpoint |
 | `MODEL_GATEWAY_LOCAL_MODEL` | — | Explicit local model (required when endpoint reports multiple) |
-| `MODEL_GATEWAY_LOCAL_MODEL_CACHE_SECONDS` | `300` | Local model discovery cache TTL |
-| `MODEL_GATEWAY_MAX_BODY_BYTES` | `16777216` | Maximum request body size |
-| `MODEL_GATEWAY_MAX_IN_FLIGHT` | `1024` | Concurrent request limit |
-| `MODEL_GATEWAY_ADMISSION_TIMEOUT_MS` | `10000` | Admission wait timeout |
-| `MODEL_GATEWAY_SHUTDOWN_GRACE_SECONDS` | `10` | Graceful shutdown timeout |
-| `MODEL_GATEWAY_MAX_BODY_BYTES` | `16777216` | Max request body size |
+| `MODEL_GATEWAY_LOCAL_MODEL_CACHE_SECONDS` | `60` | Local model discovery cache TTL |
+| `MODEL_GATEWAY_MAX_BODY_BYTES` | `33554432` | Maximum request body size (32MB) |
+| `MODEL_GATEWAY_MAX_IN_FLIGHT` | `64` | Concurrent request limit |
+| `MODEL_GATEWAY_ADMISSION_TIMEOUT_MS` | `250` | Admission wait timeout |
+| `MODEL_GATEWAY_SHUTDOWN_GRACE_SECONDS` | `30` | Graceful shutdown timeout |
 | `MODEL_GATEWAY_SECRET_STORE` | `environment` | `environment`, `file`, or `keychain` |
 | `MODEL_GATEWAY_STATE_PATH` | `~/.config/model-gateway/routing.sqlite3` | SQLite database path |
 | `MODEL_GATEWAY_LOG_FORMAT` | `text` | `text` or `json` |
 | `MODEL_GATEWAY_CATALOG_MAX_AGE_SECONDS` | `86400` | Catalog freshness window |
-| `MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS` | `86400` | Benchmark freshness window |
+| `MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS` | `604800` | Benchmark freshness window (7 days) |
 | `MODEL_GATEWAY_AUTO_FRONTIER_ENABLED` | `true` | Enable/disable auto-frontier route |
 | `MODEL_GATEWAY_AUTO_FREE_ENABLED` | `true` | Enable/disable auto-free route |
 | `MODEL_GATEWAY_AUTO_EFFICIENT_ENABLED` | `true` | Enable/disable auto-efficient route |
@@ -87,7 +86,7 @@ Provider names used in overrides: `openrouter`, `google-gemini`, `groq`, `mistra
 kind:limit:window_seconds[:boundary]
 ```
 
-- `kind` — `cost_microusd`, `requests`, `tokens_input`, `tokens_output`, `tokens_total`
+- `kind` — `requests`, `tokens`, `cost_microusd`, `concurrency`
 - `limit` — maximum per window
 - `window_seconds` — rolling window duration
 - `boundary` — optional calendar alignment (`utc-day`, `utc-hour`)

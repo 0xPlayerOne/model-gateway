@@ -741,7 +741,7 @@ impl Config {
             validate_identifier(alias, "model alias")?;
             if matches!(
                 alias.as_str(),
-                "local" | "auto-free" | "auto-efficient" | "auto-frontier"
+                "local" | "auto-free" | "auto-efficient" | "auto-balanced" | "auto-frontier"
             ) {
                 return Err(ConfigError::Invalid(format!(
                     "model alias '{alias}' is reserved for a built-in route"
@@ -1251,10 +1251,6 @@ fn valid_quality_floor(value: f64) -> bool {
     value.is_finite() && (0.0..=100.0).contains(&value)
 }
 
-fn valid_free_quality_threshold(value: f64) -> bool {
-    value.is_finite() && (0.0..=100.0).contains(&value)
-}
-
 fn validate_server(server: &ServerConfig) -> Result<(), ConfigError> {
     let bind: std::net::SocketAddr = server
         .bind
@@ -1278,17 +1274,17 @@ fn validate_server(server: &ServerConfig) -> Result<(), ConfigError> {
             "server limits and timeouts must be greater than zero".to_owned(),
         ));
     }
-    if !valid_free_quality_threshold(server.free_models_quality.min_general_index) {
+    if !valid_quality_floor(server.free_models_quality.min_general_index) {
         return Err(ConfigError::Invalid(
             "free_models_quality.min_general_index must be between 0 and 100".to_owned(),
         ));
     }
-    if !valid_free_quality_threshold(server.free_models_quality.min_coding_index) {
+    if !valid_quality_floor(server.free_models_quality.min_coding_index) {
         return Err(ConfigError::Invalid(
             "free_models_quality.min_coding_index must be between 0 and 100".to_owned(),
         ));
     }
-    if !valid_free_quality_threshold(server.free_models_quality.min_agentic_index) {
+    if !valid_quality_floor(server.free_models_quality.min_agentic_index) {
         return Err(ConfigError::Invalid(
             "free_models_quality.min_agentic_index must be between 0 and 100".to_owned(),
         ));

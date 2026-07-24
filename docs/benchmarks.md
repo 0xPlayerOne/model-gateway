@@ -98,11 +98,12 @@ The same `classify()` function also determines task complexity:
 
 | Complexity | Criteria (score ≥ threshold) |
 |---|---|
-| `Simple` | Score 0 (basic questions, no tools, ≤4 messages, short text) |
-| `Medium` | Score 1–2 |
-| `Complex` | Score ≥3 (tools, +600 chars, ≥5 messages, coding+agentic keywords) |
+| `Simple` | Score 0–1 (basic questions, no tools, ≤4 messages, short text) |
+| `Medium` | Score 2–3 |
+| `Complex` | Score 4–5 (tools, keywords, longer context) |
+| `VeryComplex` | Score 6+ (tools + keywords + long conversation + structured output) |
 
-Complexity controls which quality floor applies for routing.
+Complexity is used for response headers and the `/v1/auto-models` display. Routing uses composite quality with a single floor per mode.
 
 ## Ranking Endpoint
 
@@ -168,7 +169,7 @@ All paid routes use composite quality (`0.5*intelligence + 0.3*coding + 0.2*agen
 
 | Env Variable | Default | Description |
 |---|---|---|
-| `MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS` | `86400` (24h) | Maximum age before data is considered stale |
+| `MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS` | `604800` (7d) | Maximum age before data is considered stale |
 | `MODEL_GATEWAY_EFFICIENT_QUALITY_FLOOR` | `40.0` | Composite quality floor for auto-efficient |
 | `MODEL_GATEWAY_BALANCED_QUALITY_FLOOR` | `60.0` | Composite quality floor for auto-balanced |
 | `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR` | `80.0` | Composite quality floor for auto-frontier |

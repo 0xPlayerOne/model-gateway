@@ -3111,3 +3111,157 @@ async fn auto_balanced_appears_in_model_listing() {
     assert!(ids.contains(&"auto-frontier"));
     assert!(ids.contains(&"auto-free"));
 }
+
+#[tokio::test]
+async fn auto_balanced_falls_back_to_auto_free() {
+    let free = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "free-prov",
+            &[CatalogRecord {
+                model: "free-model".to_owned(),
+                is_free: true,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: Some(0.0),
+                output_price_per_million: Some(0.0),
+            }],
+        )
+        .expect("catalog");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([(
+            "free-prov".to_owned(),
+            provider(format!("http://{free}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "free-prov".to_owned(),
+            model: "free-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(
+            &json!({"model": "auto-balanced", "messages": [{"role": "user", "content": "Hello."}]}),
+        )
+        .send()
+        .await
+        .expect("auto-balanced response");
+    assert_eq!(response.status(), StatusCode::OK);
+    // No paid benchmarks available, so balanced falls back to auto-free
+    assert_eq!(response.headers()["x-model-gateway-provider"], "free-prov");
+}
+
+#[tokio::test]
+async fn auto_balanced_with_no_benchmarks_returns_error() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let _store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    let mut config = config_for(
+        BTreeMap::from([(
+            "local".to_owned(),
+            provider("http://127.0.0.1:1/v1".to_owned()),
+        )]),
+        vec![TargetConfig {
+            provider: "local".to_owned(),
+            model: "test".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.auto_free_enabled = false;
+    config.server.local_base_url = "http://127.0.0.1:1/v1".to_owned();
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-balanced", "messages": []}))
+        .send()
+        .await
+        .expect("auto-balanced response");
+    // No benchmarks, no free models, no local → error
+    assert!(response.status().is_client_error() || response.status().is_server_error());
+}
+
+#[tokio::test]
+async fn auto_efficient_falls_back_to_auto_free() {
+    let free = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "free-prov",
+            &[CatalogRecord {
+                model: "free-model".to_owned(),
+                is_free: true,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: Some(0.0),
+                output_price_per_million: Some(0.0),
+            }],
+        )
+        .expect("catalog");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([(
+            "free-prov".to_owned(),
+            provider(format!("http://{free}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "free-prov".to_owned(),
+            model: "free-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-efficient", "messages": [{"role": "user", "content": "Hello."}]}))
+        .send()
+        .await
+        .expect("auto-efficient response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "free-prov");
+}
+
+#[tokio::test]
+async fn reserved_alias_auto_balanced_is_rejected() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let _store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    let mut config = config_for(
+        BTreeMap::from([(
+            "local".to_owned(),
+            provider("http://127.0.0.1:1/v1".to_owned()),
+        )]),
+        vec![TargetConfig {
+            provider: "local".to_owned(),
+            model: "test".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.models.insert(
+        "auto-balanced".to_owned(),
+        ModelConfig {
+            targets: vec![TargetConfig {
+                provider: "local".to_owned(),
+                model: "test".to_owned(),
+            }],
+        },
+    );
+    let result = config.validate_structure();
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("reserved"),
+        "expected reserved error, got: {err}"
+    );
+}

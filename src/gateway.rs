@@ -629,7 +629,7 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
             .filter(|id| {
                 !matches!(
                     id.as_str(),
-                    "local" | "auto-free" | "auto-efficient" | "auto-frontier"
+                    "local" | "auto-free" | "auto-efficient" | "auto-balanced" | "auto-frontier"
                 )
             })
             .cloned(),
