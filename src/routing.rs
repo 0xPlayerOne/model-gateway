@@ -1016,7 +1016,10 @@ impl RoutingStore {
                     std::process::id(),
                     &connection
                 );
-                let salt = format!("{:x}", Sha256::digest(seed.as_bytes()));
+                let salt = Sha256::digest(seed.as_bytes())
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>();
                 connection.execute(
                     "INSERT OR IGNORE INTO routing_meta(key, value) VALUES ('session_salt', ?1)",
                     [&salt],
@@ -1031,7 +1034,11 @@ impl RoutingStore {
         let mut digest = Sha256::new();
         digest.update(salt.as_bytes());
         digest.update(material.as_bytes());
-        Ok(format!("{:x}", digest.finalize()))
+        Ok(digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>())
     }
 
     pub fn session_pin(
