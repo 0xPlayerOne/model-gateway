@@ -157,7 +157,7 @@ jobs:
           done
       - name: Publish AMD64 runtime image
         if: github.event_name == 'push'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: image-context/amd64
           file: image-context/amd64/Dockerfile.release-runtime
@@ -168,7 +168,7 @@ jobs:
           provenance: mode=max
       - name: Publish ARM64 runtime image
         if: github.event_name == 'push'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: image-context/arm64
           file: image-context/arm64/Dockerfile.release-runtime
