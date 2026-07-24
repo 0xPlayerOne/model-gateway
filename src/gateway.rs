@@ -194,6 +194,7 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
         .route("/v1/providers", get(list_providers))
         .route("/v1/rankings", get(list_rankings))
         .route("/v1/free-models", get(list_free_models))
+        .route("/v1/paid-models", get(list_paid_models))
         .route("/v1/chat/completions", post(chat_completions))
         .layer(DefaultBodyLimit::max(state.config.server.max_body_bytes))
         .with_state(state))
@@ -646,6 +647,13 @@ struct FreeModelsQuery {
     provider: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PaidModelsQuery {
+    task: Option<String>,
+    limit: Option<usize>,
+    provider: Option<String>,
+}
+
 async fn list_rankings(
     State(state): State<AppState>,
     Query(query): Query<RankingQuery>,
@@ -1022,6 +1030,207 @@ async fn list_free_models(
 
     Json(json!({
         "object": "free-models",
+        "task": task.as_str(),
+        "provider": provider_filter,
+        "catalog_max_age_seconds": max_age,
+        "benchmark_max_age_seconds": benchmark_max_age,
+        "providers": providers,
+        "data": ranked
+    }))
+    .into_response()
+}
+
+async fn list_paid_models(
+    State(state): State<AppState>,
+    Query(query): Query<PaidModelsQuery>,
+) -> Response {
+    let provider_filter = match query.provider.as_deref() {
+        None | Some("all") => None,
+        Some(provider) => Some(provider),
+    };
+    if let Some(provider) = provider_filter {
+        if !state.config.providers.contains_key(provider) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": format!("unknown provider '{provider}'"),
+                        "type": "invalid_request_error",
+                        "code": "invalid_provider"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    }
+    let task = match query.task.as_deref().unwrap_or("general") {
+        "general" => TaskKind::General,
+        "coding" => TaskKind::Coding,
+        "agentic" => TaskKind::Agentic,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": "task must be one of general, coding, agentic",
+                        "type": "invalid_request_error",
+                        "code": "invalid_task"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
+    let max_age = state.config.server.catalog_max_age_seconds;
+    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
+
+    let (offerings, benchmarks) = match tokio::try_join!(
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.all_candidates(max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.benchmark_models(benchmark_max_age)
+        })
+    ) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "message": "routing state is unavailable",
+                        "type": "server_error",
+                        "code": "routing_state_unavailable"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut benchmark_map = BTreeMap::new();
+    for b in &benchmarks {
+        benchmark_map
+            .entry(b.id.clone())
+            .or_insert_with(Vec::new)
+            .push(b.clone());
+    }
+
+    let mut providers = BTreeMap::new();
+    let mut data = Vec::new();
+
+    for offering in &offerings {
+        if provider_filter.is_some_and(|provider| provider != offering.provider) {
+            continue;
+        }
+        let Some(config) = state.config.providers.get(&offering.provider) else {
+            continue;
+        };
+        let Some(runtime) = state.providers.get(&offering.provider) else {
+            continue;
+        };
+        if !runtime.available
+            || !matches!(
+                config.billing_mode,
+                BillingMode::Paid | BillingMode::Subscription
+            )
+            || (!config.model_allowlist.is_empty()
+                && !config
+                    .model_allowlist
+                    .iter()
+                    .any(|model| model == &offering.model))
+            || config
+                .model_denylist
+                .iter()
+                .any(|model| model == &offering.model)
+        {
+            continue;
+        }
+        if offering.is_free {
+            continue;
+        }
+
+        let canonical = config
+            .model_mappings
+            .get(&offering.model)
+            .map(String::as_str)
+            .unwrap_or(&offering.model);
+        let benchmark = find_benchmark(&benchmark_map, canonical, task);
+        let quality = benchmark.and_then(|benchmark| quality_for(benchmark, task));
+
+        providers
+            .entry(offering.provider.clone())
+            .or_insert_with(|| {
+                let billing_label = match config.billing_mode {
+                    BillingMode::Paid => "paid",
+                    BillingMode::Subscription => "subscription",
+                    BillingMode::Free => "free",
+                };
+                json!({
+                    "name": config.profile
+                        .map(|profile| profile.definition().display_name.to_owned())
+                        .unwrap_or_else(|| offering.provider.clone()),
+                    "billing_mode": billing_label,
+                })
+            });
+
+        data.push((quality, benchmark.cloned(), offering.clone()));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    data.retain(|(_, _, offering)| {
+        let normalized = normalize_identifier(&offering.model);
+        seen.insert(normalized)
+    });
+
+    data.sort_by(|left, right| {
+        let (left_quality, _, left_offering) = left;
+        let (right_quality, _, right_offering) = right;
+        match (left_quality, right_quality) {
+            (Some(lq), Some(rq)) => rq
+                .total_cmp(lq)
+                .then_with(|| left_offering.model.cmp(&right_offering.model)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left_offering.model.cmp(&right_offering.model),
+        }
+    });
+
+    let ranked = data
+        .into_iter()
+        .take(limit)
+        .map(|(_quality, benchmark, offering)| {
+            let input_price = offering
+                .input_price_per_million
+                .or_else(|| benchmark.as_ref().and_then(|b| b.input_price_per_million));
+            let output_price = offering
+                .output_price_per_million
+                .or_else(|| benchmark.as_ref().and_then(|b| b.output_price_per_million));
+            json!({
+                "model": offering.model,
+                "provider": offering.provider,
+                "context_length": offering.context_length,
+                "supports_tools": offering.supports_tools,
+                "supports_vision": offering.supports_vision,
+                "supports_structured_output": offering.supports_structured_output,
+                "input_price_per_million": input_price,
+                "output_price_per_million": output_price,
+                "scores": if let Some(b) = benchmark {
+                    json!({
+                        "general": b.intelligence,
+                        "coding": b.coding_quality,
+                        "agentic": b.agentic_quality
+                    })
+                } else {
+                    json!(null)
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Json(json!({
+        "object": "paid-models",
         "task": task.as_str(),
         "provider": provider_filter,
         "catalog_max_age_seconds": max_age,

@@ -94,6 +94,22 @@ curl /v1/free-models?provider=kilocode&limit=100&task=coding
 
 Supported tasks: `general`, `coding`, `agentic`. Provider values match configured keys (e.g., `kilocode`, `opencode-zen`, `google-gemini`, `openrouter`). Unknown providers return `invalid_provider`. See [docs/providers.md](docs/providers.md) for free-tier eligibility rules.
 
+## Paid Models
+
+Query models from explicitly authorized paid providers:
+
+```bash
+curl /v1/paid-models?task=coding&limit=50
+```
+
+Only appears when at least one provider has `billing_mode = "paid"` or `"subscription"`. All providers default to free — enable paid with:
+
+```bash
+export MODEL_GATEWAY_PAID_BILLING_MODE=openai-api,deepseek
+```
+
+Or per-provider: `MODEL_GATEWAY_OPENAI_API_BILLING_MODE=paid`. See [docs/configuration.md](docs/configuration.md) for details.
+
 ## CLI Commands
 
 | Command | Description |

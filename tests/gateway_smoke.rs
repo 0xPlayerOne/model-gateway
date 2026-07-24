@@ -2886,3 +2886,82 @@ async fn rejects_unknown_aliases_in_openai_shape() {
     assert_eq!(body["error"]["type"], "invalid_request_error");
     assert_eq!(body["error"]["code"], "model_not_found");
 }
+
+#[tokio::test]
+async fn paid_models_lists_only_paid_provider_offerings() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let mut paid_provider = provider("https://paid.example/v1".to_owned());
+    paid_provider.billing_mode = BillingMode::Paid;
+    paid_provider.profile = Some(ProviderProfileId::OpenRouter);
+    let mut free_provider = provider("https://free.example/v1".to_owned());
+    free_provider.profile = Some(ProviderProfileId::Groq);
+    let mut config = config_for(
+        BTreeMap::from([
+            ("paid".to_owned(), paid_provider),
+            ("free".to_owned(), free_provider),
+        ]),
+        vec![TargetConfig {
+            provider: "paid".to_owned(),
+            model: "paid-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path.clone());
+
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "paid",
+            &[CatalogRecord {
+                model: "gpt-4o".to_owned(),
+                is_free: false,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(true),
+                supports_structured_output: Some(true),
+                input_price_per_million: Some(2.5),
+                output_price_per_million: Some(10.0),
+            }],
+        )
+        .expect("paid catalog");
+    store
+        .replace_catalog(
+            "free",
+            &[CatalogRecord {
+                model: "gemini-free".to_owned(),
+                is_free: true,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(true),
+                supports_structured_output: Some(true),
+                input_price_per_million: Some(0.0),
+                output_price_per_million: Some(0.0),
+            }],
+        )
+        .expect("free catalog");
+
+    let gateway = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!("{gateway}/v1/paid-models"))
+        .send()
+        .await
+        .expect("paid-models response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["object"], "paid-models");
+    // Only the paid provider's models should appear (free provider excluded)
+    assert_eq!(
+        body["data"].as_array().map(|a| a.len()),
+        Some(1),
+        "should only include the paid (non-free) model"
+    );
+    assert_eq!(body["data"][0]["provider"], "paid");
+    assert_eq!(body["data"][0]["model"], "gpt-4o");
+    assert_eq!(body["providers"]["paid"]["billing_mode"], "paid");
+    assert!(
+        body["providers"].get("free").is_none(),
+        "free provider should not appear in paid-models listing"
+    );
+}

@@ -661,6 +661,19 @@ impl Config {
 }
 
 fn apply_provider_environment_overrides(config: &mut Config) -> Result<(), ConfigError> {
+    if let Ok(value) = env::var("MODEL_GATEWAY_PAID_BILLING_MODE") {
+        for name in value.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if let Some(provider) = config.providers.get_mut(name) {
+                if provider.billing_mode == BillingMode::Free {
+                    provider.billing_mode = BillingMode::Paid;
+                }
+            } else {
+                return Err(ConfigError::Invalid(format!(
+                    "MODEL_GATEWAY_PAID_BILLING_MODE: unknown provider '{name}'"
+                )));
+            }
+        }
+    }
     for (name, provider) in &mut config.providers {
         let suffix = provider_environment_suffix(name);
         let variable = |field| format!("MODEL_GATEWAY_{suffix}_{field}");
@@ -890,16 +903,8 @@ fn discover_environment_providers(
     Ok(())
 }
 
-fn default_billing_mode(profile: ProviderProfileId) -> BillingMode {
-    match profile {
-        ProviderProfileId::Deepseek
-        | ProviderProfileId::Fireworks
-        | ProviderProfileId::OpenaiApi
-        | ProviderProfileId::OrcaRouter
-        | ProviderProfileId::Zai => BillingMode::Paid,
-        ProviderProfileId::OpenCodeGo => BillingMode::Subscription,
-        _ => BillingMode::Free,
-    }
+fn default_billing_mode(_profile: ProviderProfileId) -> BillingMode {
+    BillingMode::Free
 }
 
 fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), ConfigError> {
@@ -1574,13 +1579,14 @@ mod tests {
             super::ProviderProfileId::OpenaiApi,
             super::ProviderProfileId::OrcaRouter,
             super::ProviderProfileId::Zai,
+            super::ProviderProfileId::OpenCodeGo,
         ] {
-            assert_eq!(super::default_billing_mode(profile), BillingMode::Paid);
+            assert_eq!(
+                super::default_billing_mode(profile),
+                BillingMode::Free,
+                "all providers default to Free; set MODEL_GATEWAY_PAID_BILLING_MODE or per-provider BILLING_MODE to enable paid"
+            );
         }
-        assert_eq!(
-            super::default_billing_mode(super::ProviderProfileId::OpenCodeGo),
-            BillingMode::Subscription
-        );
     }
 
     #[test]

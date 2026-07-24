@@ -43,6 +43,15 @@ Environment overrides are applied on every load and take precedence over TOML.
 
 Quality floors are ordered: simple ≤ medium ≤ complex. Each must be 0–100.
 
+## Billing Mode
+
+All providers default to **free billing**. To enable paid/subscription models, use:
+
+- **Global**: `MODEL_GATEWAY_PAID_BILLING_MODE=openai-api,deepseek,opencode-go` (comma-separated provider names)
+- **Per-provider**: `MODEL_GATEWAY_OPENAI_API_BILLING_MODE=paid` (takes precedence)
+
+Provider names in the global var must match config keys (lowercase with hyphens). Unknown names produce a config error.
+
 ## Provider Overrides
 
 Use the normalized provider name as prefix, e.g., `MODEL_GATEWAY_OPENROUTER_BILLING_MODE=paid`.
