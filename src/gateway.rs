@@ -26,8 +26,8 @@ use crate::benchmarks::{
 use crate::config::{BillingMode, Config, ProviderConfig, QuotaKind, ServerConfig, TargetConfig};
 use crate::providers::prepare_request;
 use crate::routing::{
-    ReservationOutcome, ReservationRelease, ReservationToken, RoutingError, RoutingStore,
-    is_verified_free, quota_reference,
+    CatalogOffering, ReservationOutcome, ReservationRelease, ReservationToken, RoutingError,
+    RoutingStore, is_verified_free, quota_reference,
 };
 use crate::secrets::{SecretError, SecretResolver};
 
@@ -193,6 +193,7 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
         .route("/v1/models", get(list_models))
         .route("/v1/providers", get(list_providers))
         .route("/v1/rankings", get(list_rankings))
+        .route("/v1/auto-models", get(list_auto_models))
         .route("/v1/free-models", get(list_free_models))
         .route("/v1/paid-models", get(list_paid_models))
         .route("/v1/chat/completions", post(chat_completions))
@@ -802,6 +803,229 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
             })
         })
         .collect()
+}
+
+fn select_efficient_model(
+    models: &[BenchmarkModel],
+    task: TaskKind,
+    quality_floor: f64,
+) -> Option<Value> {
+    let scored: Vec<ScoredCandidate<&BenchmarkModel>> = models
+        .iter()
+        .filter_map(|model| {
+            let quality = quality_for(model, task)?;
+            if quality < quality_floor {
+                return None;
+            }
+            let cost = match (
+                model.input_price_per_million,
+                model.output_price_per_million,
+            ) {
+                (Some(input), Some(output)) => {
+                    ((1000.0 * input + 500.0 * output) / 1_000_000.0 * 1_000_000.0).max(0.0) as u64
+                }
+                _ => 0,
+            };
+            let latency = model.latency_seconds.unwrap_or(f64::MAX);
+            Some(ScoredCandidate {
+                quality,
+                expected_cost_microusd: cost.max(1),
+                latency_seconds: latency,
+                value: model,
+            })
+        })
+        .collect();
+    let mut ranked = pareto_rank(scored);
+    ranked.sort_by(|a, b| {
+        a.expected_cost_microusd
+            .cmp(&b.expected_cost_microusd)
+            .then_with(|| a.latency_seconds.total_cmp(&b.latency_seconds))
+            .then_with(|| b.quality.total_cmp(&a.quality))
+    });
+    ranked.into_iter().next().map(|c| {
+        json!({
+            "model": c.value.id,
+            "creator": c.value.creator,
+            "quality": c.quality,
+            "expected_cost_microusd": c.expected_cost_microusd,
+            "latency_seconds": c.value.latency_seconds,
+            "input_price_per_million": c.value.input_price_per_million,
+            "output_price_per_million": c.value.output_price_per_million,
+        })
+    })
+}
+
+fn select_free_model(
+    offerings: &[CatalogOffering],
+    benchmark_map: &BTreeMap<String, Vec<BenchmarkModel>>,
+    providers: &BTreeMap<String, ProviderConfig>,
+    runtimes: &BTreeMap<String, ProviderRuntime>,
+    server: &ServerConfig,
+    task: TaskKind,
+    quality_floor: f64,
+) -> Option<Value> {
+    let mut scored = Vec::new();
+    for offering in offerings {
+        let Some(provider) = providers.get(&offering.provider) else {
+            continue;
+        };
+        let Some(runtime) = runtimes.get(&offering.provider) else {
+            continue;
+        };
+        if !runtime.available {
+            continue;
+        }
+        let canonical = provider
+            .model_mappings
+            .get(&offering.model)
+            .map(String::as_str)
+            .unwrap_or(&offering.model);
+        let benchmark = find_benchmark(benchmark_map, canonical, task);
+        let quality = benchmark.and_then(|b| quality_for(b, task))?;
+        if quality < quality_floor {
+            continue;
+        }
+        if !server.free_models_quality.passes(
+            task,
+            benchmark,
+            offering.refreshed_at,
+            offering.input_price_per_million,
+            offering.output_price_per_million,
+            offering.context_length,
+            canonical,
+        ) {
+            continue;
+        }
+        let latency = benchmark
+            .and_then(|b| b.latency_seconds)
+            .unwrap_or(f64::MAX);
+        scored.push(ScoredCandidate {
+            quality,
+            expected_cost_microusd: 0,
+            latency_seconds: latency,
+            value: (offering.model.clone(), offering.provider.clone()),
+        });
+    }
+    let mut ranked = pareto_rank(scored);
+    ranked.sort_by(|a, b| {
+        a.expected_cost_microusd
+            .cmp(&b.expected_cost_microusd)
+            .then_with(|| a.latency_seconds.total_cmp(&b.latency_seconds))
+            .then_with(|| b.quality.total_cmp(&a.quality))
+    });
+    ranked.into_iter().next().map(|c| {
+        json!({
+            "model": c.value.0,
+            "provider": c.value.1,
+            "quality": c.quality,
+            "latency_seconds": c.latency_seconds,
+        })
+    })
+}
+
+async fn list_auto_models(State(state): State<AppState>) -> Response {
+    let max_age = state.config.server.benchmark_max_age_seconds;
+    let catalog_age = state.config.server.catalog_max_age_seconds;
+
+    let (benchmarks, free_offerings) = match tokio::try_join!(
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.benchmark_models(max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.free_candidates(catalog_age)
+        }),
+    ) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "routing state unavailable", "type": "server_error", "code": "routing_unavailable"}})),
+            )
+                .into_response();
+        }
+    };
+
+    let mut benchmark_map = BTreeMap::new();
+    for b in &benchmarks {
+        benchmark_map
+            .entry(b.id.clone())
+            .or_insert_with(Vec::new)
+            .push(b.clone());
+    }
+
+    let tasks = [TaskKind::General, TaskKind::Coding, TaskKind::Agentic];
+    let complexities = [Complexity::Simple, Complexity::Medium, Complexity::Complex];
+
+    let mut efficient_routes = Vec::new();
+    for &task in &tasks {
+        for &complexity in &complexities {
+            let floor = match complexity {
+                Complexity::Simple => state.config.server.quality_floor_simple,
+                Complexity::Medium => state.config.server.quality_floor_medium,
+                Complexity::Complex => state.config.server.quality_floor_complex,
+            };
+            if let Some(entry) = select_efficient_model(&benchmarks, task, floor) {
+                efficient_routes.push(json!({
+                    "task": task.as_str(),
+                    "complexity": complexity.as_str(),
+                    "quality_floor": floor,
+                    "selection": entry,
+                }));
+            }
+        }
+    }
+
+    let mut free_routes = Vec::new();
+    for &task in &tasks {
+        for &complexity in &complexities {
+            let floor = match complexity {
+                Complexity::Simple => state.config.server.free_quality_floor_simple,
+                Complexity::Medium => state.config.server.free_quality_floor_medium,
+                Complexity::Complex => state.config.server.free_quality_floor_complex,
+            };
+            if let Some(entry) = select_free_model(
+                &free_offerings,
+                &benchmark_map,
+                &state.config.providers,
+                &state.providers,
+                &state.config.server,
+                task,
+                floor,
+            ) {
+                free_routes.push(json!({
+                    "task": task.as_str(),
+                    "complexity": complexity.as_str(),
+                    "quality_floor": floor,
+                    "selection": entry,
+                }));
+            }
+        }
+    }
+
+    Json(json!({
+        "object": "auto_models",
+        "routes": {
+            "efficient": {
+                "label": "Auto-Efficient",
+                "tiers": {
+                    "simple": {"quality_floor": state.config.server.quality_floor_simple},
+                    "medium": {"quality_floor": state.config.server.quality_floor_medium},
+                    "complex": {"quality_floor": state.config.server.quality_floor_complex}
+                },
+                "routing": efficient_routes
+            },
+            "free": {
+                "label": "Auto-Free",
+                "tiers": {
+                    "simple": {"quality_floor": state.config.server.free_quality_floor_simple},
+                    "medium": {"quality_floor": state.config.server.free_quality_floor_medium},
+                    "complex": {"quality_floor": state.config.server.free_quality_floor_complex}
+                },
+                "routing": free_routes
+            }
+        }
+    }))
+    .into_response()
 }
 
 async fn list_free_models(
