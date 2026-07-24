@@ -1739,7 +1739,7 @@ fn selected_target(state: &AppState, target: &TargetConfig) -> SelectedTarget {
 struct FreeCandidate {
     target: SelectedTarget,
     quality: Option<f64>,
-    unknown_capabilities: u8,
+    latency_seconds: f64,
 }
 
 async fn resolve_auto_free_targets(
@@ -1776,8 +1776,13 @@ async fn resolve_auto_free_targets(
             .push(b.clone());
     }
     let classification = classify(request);
+    let quality_floor = match classification.complexity {
+        Complexity::Simple => state.config.server.free_quality_floor_simple,
+        Complexity::Medium => state.config.server.free_quality_floor_medium,
+        Complexity::Complex => state.config.server.free_quality_floor_complex,
+    };
     let requirements = RequestRequirements::from_request(request);
-    let mut candidates = offerings
+    let candidates = offerings
         .into_iter()
         .filter_map(|offering| {
             let provider = state.config.providers.get(&offering.provider)?;
@@ -1804,12 +1809,6 @@ async fn resolve_auto_free_targets(
             {
                 return None;
             }
-            let unknown_capabilities =
-                u8::from(requirements.tools && offering.supports_tools.is_none())
-                    + u8::from(requirements.vision && offering.supports_vision.is_none())
-                    + u8::from(
-                        requirements.structured && offering.supports_structured_output.is_none(),
-                    );
             let reference = quota_reference(provider, &offering.model);
             let canonical = provider
                 .model_mappings
@@ -1835,9 +1834,15 @@ async fn resolve_auto_free_targets(
             ) {
                 return None;
             }
+            if quality.is_some_and(|q| q < quality_floor) {
+                return None;
+            }
+            let latency = benchmark
+                .and_then(|b| b.latency_seconds)
+                .unwrap_or(f64::MAX);
             Some(FreeCandidate {
-                unknown_capabilities,
                 quality,
+                latency_seconds: latency,
                 target: SelectedTarget {
                     runtime_provider: offering.provider.clone(),
                     provider: offering.provider.clone(),
@@ -1863,7 +1868,7 @@ async fn resolve_auto_free_targets(
                         task: classification.task.as_str(),
                         complexity: classification.complexity.as_str(),
                         classifier_version: classification.version,
-                        quality_floor: 0.0,
+                        quality_floor,
                         quality: quality.unwrap_or(0.0),
                         expected_cost_microusd: 0,
                         benchmark_snapshot_id,
@@ -1885,35 +1890,38 @@ async fn resolve_auto_free_targets(
         }
         None => None,
     };
-    candidates.sort_by(|left, right| {
-        let left_pinned = pinned
-            .as_ref()
-            .is_some_and(|pin| pin.0 == left.target.provider && pin.1 == left.target.model);
-        let right_pinned = pinned
-            .as_ref()
-            .is_some_and(|pin| pin.0 == right.target.provider && pin.1 == right.target.model);
+    let mut scored = Vec::new();
+    let mut unbenchmarked = Vec::new();
+    for c in candidates {
+        match c.quality {
+            Some(quality) => scored.push(ScoredCandidate {
+                quality,
+                expected_cost_microusd: 0,
+                latency_seconds: c.latency_seconds,
+                value: c,
+            }),
+            None => unbenchmarked.push(c),
+        }
+    }
+    let mut ranked = pareto_rank(scored);
+    ranked.sort_by(|left, right| {
+        let left_pinned = pinned.as_ref().is_some_and(|pin| {
+            pin.0 == left.value.target.provider && pin.1 == left.value.target.model
+        });
+        let right_pinned = pinned.as_ref().is_some_and(|pin| {
+            pin.0 == right.value.target.provider && pin.1 == right.value.target.model
+        });
         right_pinned
             .cmp(&left_pinned)
             .then_with(|| {
-                let left_q = left.quality;
-                let right_q = right.quality;
-                match (left_q, right_q) {
-                    (Some(lq), Some(rq)) => rq.total_cmp(&lq),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                }
+                left.expected_cost_microusd
+                    .cmp(&right.expected_cost_microusd)
             })
-            .then_with(|| left.unknown_capabilities.cmp(&right.unknown_capabilities))
-            .then_with(|| {
-                (&left.target.provider, &left.target.model)
-                    .cmp(&(&right.target.provider, &right.target.model))
-            })
+            .then_with(|| left.latency_seconds.total_cmp(&right.latency_seconds))
+            .then_with(|| right.quality.total_cmp(&left.quality))
     });
-    let mut targets = candidates
-        .into_iter()
-        .map(|candidate| candidate.target)
-        .collect::<Vec<_>>();
+    let mut targets: Vec<SelectedTarget> = ranked.into_iter().map(|c| c.value.target).collect();
+    targets.extend(unbenchmarked.into_iter().map(|c| c.target));
     match resolve_local_model(state).await {
         Ok(model) => targets.push(SelectedTarget {
             runtime_provider: LOCAL_RUNTIME_PROVIDER.to_owned(),
