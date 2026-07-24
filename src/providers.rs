@@ -81,6 +81,17 @@ pub const PROFILE_DEFINITIONS: &[ProfileDefinition] = &[
         connection_check: ConnectionCheck::OpenAiModels,
     },
     ProfileDefinition {
+        id: ProviderProfileId::Anthropic,
+        config_key: "anthropic",
+        display_name: "Anthropic",
+        adapter: AdapterKind::OpenaiChat,
+        default_secret_name: Some("ANTHROPIC_API_KEY"),
+        native_base_url: "https://api.anthropic.com/v1",
+        docker_base_url: None,
+        suggested_model: "claude-sonnet-4-5",
+        connection_check: ConnectionCheck::ConfigurationOnly,
+    },
+    ProfileDefinition {
         id: ProviderProfileId::Deepseek,
         config_key: "deepseek",
         display_name: "DeepSeek",

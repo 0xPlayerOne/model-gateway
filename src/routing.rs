@@ -101,6 +101,11 @@ pub const PROVIDER_LIMIT_REFERENCES: &[ProviderLimitReference] = &[
         "account_specific",
     ),
     limit(
+        ProviderProfileId::Anthropic,
+        "https://docs.anthropic.com/en/api/rate-limits",
+        "account_specific",
+    ),
+    limit(
         ProviderProfileId::Deepseek,
         "https://api-docs.deepseek.com/quick_start/rate_limit",
         "dynamic_concurrency",

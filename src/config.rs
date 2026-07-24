@@ -472,6 +472,7 @@ pub enum ProviderProfileId {
     Ollama,
     LmStudio,
     OpenaiApi,
+    Anthropic,
     Deepseek,
     Fireworks,
     Zai,

@@ -6,7 +6,7 @@ Provider profiles are organized into three tiers matching `.env.example`:
 
 | Tier | Providers |
 |---|---|
-| **Core** (recommended) | Google Gemini, Kilo Code, Ollama Cloud, OpenCode Zen, OpenRouter |
+| **Core** (recommended) | Anthropic, Google Gemini, Kilo Code, Ollama Cloud, OpenCode Zen, OpenRouter |
 | **Secondary** (useful) | Groq, Mistral, Nous Portal, Novita, NVIDIA NIM, SiliconFlow |
 | **Optional Paid** (subscriptions/credits) | DeepSeek, Fireworks, OpenAI API, OpenCode Go, OrcaRouter, Z.AI |
 

@@ -28,7 +28,7 @@ not gateway providers.
 | Kimi, MiniMax, Alibaba | `kimi-coding`, `minimax`, `alibaba` and regional variants | OpenAI-compatible or native variant / API key | Planned profiles/adapters |
 | Arcee, GMI, StepFun, Upstage | `arcee`, `gmi`, `stepfun`, `upstage` | OpenAI-compatible / API key | Planned profiles |
 | Hugging Face, Ollama Cloud | `huggingface`, `ollama-cloud` | OpenAI-compatible or native / API key | Planned profiles/adapters |
-| Anthropic | `anthropic` | Anthropic Messages / API or OAuth | Optional paid credential documented; native adapter planned |
+| Anthropic | `anthropic` | OpenAI-compatible chat / ANTHROPIC_API_KEY | Built-in (OpenAI-compatible endpoint) |
 | Google Gemini native API | `gemini-native` | Gemini API / API key | Planned native adapter; the OpenAI compatibility endpoint is supported |
 | Vertex AI | `vertex` | Vertex OpenAI-compatible / OAuth | Planned credential adapter |
 | Azure Foundry | `azure-foundry` | OpenAI-compatible / API key or Entra | Planned credential adapter |
