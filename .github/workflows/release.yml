@@ -134,6 +134,10 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/model-gateway
           tags: type=ref,event=tag
+      - name: Set lowercase image name
+        if: github.event_name == 'push'
+        shell: bash
+        run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/model-gateway" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         if: github.event_name == 'push'
         with:
@@ -154,8 +158,6 @@ jobs:
       - name: Publish AMD64 runtime image
         if: github.event_name == 'push'
         uses: docker/build-push-action@v6
-        env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/model-gateway
         with:
           context: image-context/amd64
           file: image-context/amd64/Dockerfile.release-runtime
@@ -167,8 +169,6 @@ jobs:
       - name: Publish ARM64 runtime image
         if: github.event_name == 'push'
         uses: docker/build-push-action@v6
-        env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/model-gateway
         with:
           context: image-context/arm64
           file: image-context/arm64/Dockerfile.release-runtime
@@ -179,8 +179,6 @@ jobs:
           provenance: mode=max
       - name: Publish multi-architecture manifest
         if: github.event_name == 'push'
-        env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/model-gateway
         run: docker buildx imagetools create --tag "$IMAGE:${GITHUB_REF_NAME}" "$IMAGE:${GITHUB_REF_NAME}-amd64" "$IMAGE:${GITHUB_REF_NAME}-arm64"
 
   publish:

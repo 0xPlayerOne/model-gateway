@@ -126,7 +126,7 @@ for _ in $(seq 1 30); do
 done
 test "$(docker inspect "$(docker compose -f "$STATE/compose.yml" ps -q gateway)" --format '{{.State.Health.Status}}')" = healthy
 curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/models" \
-    | python3 -c 'import json,sys; assert [item["id"] for item in json.load(sys.stdin)["data"]][:5] == ["local", "auto-free", "auto-efficient", "auto-frontier", "smoke"]'
+    | python3 -c 'import json,sys; assert [item["id"] for item in json.load(sys.stdin)["data"]][:6] == ["local", "auto-free", "auto-efficient", "auto-balanced", "auto-frontier", "smoke"]'
 
 curl --silent --show-error --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \

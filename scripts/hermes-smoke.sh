@@ -80,7 +80,7 @@ curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/health/ready" >/dev/null
 
 MODELS=$(curl --silent --show-error --fail --retry 3 \
     "http://127.0.0.1:${GATEWAY_PORT}/v1/models")
-python3 -c 'import json,sys; assert [item["id"] for item in json.loads(sys.argv[1])["data"]][:5] == ["local", "auto-free", "auto-efficient", "auto-frontier", "smoke"]' "$MODELS"
+python3 -c 'import json,sys; assert [item["id"] for item in json.loads(sys.argv[1])["data"]][:6] == ["local", "auto-free", "auto-efficient", "auto-balanced", "auto-frontier", "smoke"]' "$MODELS"
 
 NON_STREAMING=$(curl --silent --show-error --fail --retry 3 \
     "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
