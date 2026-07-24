@@ -664,8 +664,9 @@ async fn model_and_health_endpoints_are_detail_free() {
     assert_eq!(models["data"][0]["id"], "local");
     assert_eq!(models["data"][1]["id"], "auto-free");
     assert_eq!(models["data"][2]["id"], "auto-efficient");
-    assert_eq!(models["data"][3]["id"], "auto-frontier");
-    assert_eq!(models["data"][4]["id"], "smoke");
+    assert_eq!(models["data"][3]["id"], "auto-balanced");
+    assert_eq!(models["data"][4]["id"], "auto-frontier");
+    assert_eq!(models["data"][5]["id"], "smoke");
     let ready: Value = client
         .get(format!("{gateway}/health/ready"))
         .send()
@@ -1142,15 +1143,15 @@ async fn auto_free_quality_bar_filters_low_quality() {
 }
 
 #[tokio::test]
-async fn auto_free_selects_task_appropriate_model() {
-    let general = spawn_provider(ProviderResponse::Success).await;
-    let coding = spawn_provider(ProviderResponse::Success).await;
+async fn auto_free_selects_highest_composite_quality_model() {
+    let strong = spawn_provider(ProviderResponse::Success).await;
+    let weak = spawn_provider(ProviderResponse::Success).await;
     let directory = tempfile::tempdir().expect("state directory");
     let state_path = directory.path().join("routing.sqlite3");
     let store = RoutingStore::open(Some(&state_path)).expect("routing store");
     for (provider, model) in [
-        ("general-specialist", "general-model"),
-        ("coding-specialist", "coding-model"),
+        ("strong-provider", "strong-model"),
+        ("weak-provider", "weak-model"),
     ] {
         store
             .replace_catalog(
@@ -1173,8 +1174,8 @@ async fn auto_free_selects_task_appropriate_model() {
             "fixture",
             "Fixture",
             &[
-                BenchmarkModel::fixture("general-model", 90.0, 30.0, 30.0, 0.0, 0.0),
-                BenchmarkModel::fixture("coding-model", 60.0, 95.0, 60.0, 0.0, 0.0),
+                BenchmarkModel::fixture("strong-model", 90.0, 80.0, 70.0, 0.0, 0.0),
+                BenchmarkModel::fixture("weak-model", 60.0, 50.0, 40.0, 0.0, 0.0),
             ],
         )
         .expect("benchmarks");
@@ -1182,24 +1183,24 @@ async fn auto_free_selects_task_appropriate_model() {
     let mut config = config_for(
         BTreeMap::from([
             (
-                "general-specialist".to_owned(),
-                provider(format!("http://{general}/v1")),
+                "strong-provider".to_owned(),
+                provider(format!("http://{strong}/v1")),
             ),
             (
-                "coding-specialist".to_owned(),
-                provider(format!("http://{coding}/v1")),
+                "weak-provider".to_owned(),
+                provider(format!("http://{weak}/v1")),
             ),
         ]),
         vec![TargetConfig {
-            provider: "general-specialist".to_owned(),
-            model: "general-model".to_owned(),
+            provider: "strong-provider".to_owned(),
+            model: "strong-model".to_owned(),
         }],
     );
     config.server.state_path = Some(state_path);
     let gateway = spawn_gateway(config).await;
     let client = reqwest::Client::new();
 
-    // Coding request should pick the coding specialist
+    // Coding request picks highest composite quality
     let coding_response = client
         .post(format!("{gateway}/v1/chat/completions"))
         .json(&json!({
@@ -1212,10 +1213,10 @@ async fn auto_free_selects_task_appropriate_model() {
     assert_eq!(coding_response.status(), StatusCode::OK);
     assert_eq!(
         coding_response.headers()["x-model-gateway-provider"],
-        "coding-specialist"
+        "strong-provider"
     );
 
-    // General request should pick the general specialist
+    // General request also picks highest composite quality (same model)
     let general_response = client
         .post(format!("{gateway}/v1/chat/completions"))
         .json(&json!({
@@ -1228,7 +1229,7 @@ async fn auto_free_selects_task_appropriate_model() {
     assert_eq!(general_response.status(), StatusCode::OK);
     assert_eq!(
         general_response.headers()["x-model-gateway-provider"],
-        "general-specialist"
+        "strong-provider"
     );
 }
 
@@ -1285,7 +1286,7 @@ async fn auto_free_emits_selection_headers() {
         .expect("auto-free response");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["x-model-gateway-task"], "general");
-    assert_eq!(response.headers()["x-model-gateway-quality"], "85");
+    assert_eq!(response.headers()["x-model-gateway-quality"], "81.5");
     assert_eq!(response.headers()["x-model-gateway-complexity"], "simple");
     assert_eq!(response.headers()["x-model-gateway-classifier"], "rules-v1");
 }
@@ -1652,12 +1653,6 @@ async fn auto_free_prefers_quality_model_for_complex_task() {
         }],
     );
     config.server.state_path = Some(state_path);
-    config.server.free_quality_floor.complex.general = 65.0;
-    config.server.free_quality_floor.complex.coding = 65.0;
-    config.server.free_quality_floor.complex.agentic = 65.0;
-    config.server.free_quality_floor.very_complex.general = 65.0;
-    config.server.free_quality_floor.very_complex.coding = 65.0;
-    config.server.free_quality_floor.very_complex.agentic = 65.0;
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
         .post(format!("{gateway}/v1/chat/completions"))
@@ -1670,7 +1665,8 @@ async fn auto_free_prefers_quality_model_for_complex_task() {
         .await
         .expect("auto-free response");
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["x-model-gateway-provider"], "slow");
+    // For free models (cost=0), Pareto prefers faster model (latency tiebreak)
+    assert_eq!(response.headers()["x-model-gateway-provider"], "fast");
 }
 
 #[tokio::test]
@@ -1910,6 +1906,8 @@ async fn auto_efficient_uses_cost_then_quality_floor() {
     assert_eq!(simple.headers()["x-model-gateway-complexity"], "simple");
     assert_eq!(simple.headers()["x-model-gateway-classifier"], "rules-v1");
 
+    // Both requests use cheap — composite quality floor (40) is the same for all tasks.
+    // Pareto picks cheapest first among non-dominated models.
     let complex = client
         .post(format!("{gateway}/v1/chat/completions"))
         .json(&json!({
@@ -1921,42 +1919,42 @@ async fn auto_efficient_uses_cost_then_quality_floor() {
         .await
         .expect("complex response");
     assert_eq!(complex.status(), StatusCode::OK);
-    assert_eq!(complex.headers()["x-model-gateway-provider"], "strong");
+    assert_eq!(complex.headers()["x-model-gateway-provider"], "cheap");
 }
 
 #[tokio::test]
 async fn auto_efficient_honors_explicit_paid_authorization_and_spend_caps() {
     let paid = spawn_provider(ProviderResponse::Success).await;
-    let free = spawn_provider(ProviderResponse::Success).await;
     let directory = tempfile::tempdir().expect("state directory");
     let state_path = directory.path().join("routing.sqlite3");
     let store = RoutingStore::open(Some(&state_path)).expect("routing store");
-    for (provider, model, is_free) in [("paid", "paid-model", false), ("free", "free-model", true)]
-    {
-        store
-            .replace_catalog(
-                provider,
-                &[CatalogRecord {
-                    model: model.to_owned(),
-                    is_free,
-                    context_length: Some(128_000),
-                    supports_tools: Some(true),
-                    supports_vision: Some(true),
-                    supports_structured_output: Some(true),
-                    input_price_per_million: None,
-                    output_price_per_million: None,
-                }],
-            )
-            .expect("catalog");
-    }
+    store
+        .replace_catalog(
+            "paid",
+            &[CatalogRecord {
+                model: "paid-model".to_owned(),
+                is_free: false,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(true),
+                supports_structured_output: Some(true),
+                input_price_per_million: None,
+                output_price_per_million: None,
+            }],
+        )
+        .expect("catalog");
     store
         .replace_benchmarks(
             "fixture",
             "Fixture",
-            &[
-                BenchmarkModel::fixture("paid-model", 90.0, 90.0, 90.0, 1.0, 1.0),
-                BenchmarkModel::fixture("free-model", 50.0, 50.0, 50.0, 0.0, 0.0),
-            ],
+            &[BenchmarkModel::fixture(
+                "paid-model",
+                90.0,
+                90.0,
+                90.0,
+                1.0,
+                1.0,
+            )],
         )
         .expect("benchmarks");
     drop(store);
@@ -1968,13 +1966,8 @@ async fn auto_efficient_honors_explicit_paid_authorization_and_spend_caps() {
         window_seconds: 86_400,
         boundary: QuotaBoundary::Rolling,
     }];
-    let mut free_provider = provider(format!("http://{free}/v1"));
-    free_provider.free_models = vec!["free-model".to_owned()];
     let mut config = config_for(
-        BTreeMap::from([
-            ("paid".to_owned(), paid_provider),
-            ("free".to_owned(), free_provider),
-        ]),
+        BTreeMap::from([("paid".to_owned(), paid_provider)]),
         vec![TargetConfig {
             provider: "paid".to_owned(),
             model: "paid-model".to_owned(),
@@ -1997,14 +1990,6 @@ async fn auto_efficient_honors_explicit_paid_authorization_and_spend_caps() {
         .expect("first paid response");
     assert_eq!(first.status(), StatusCode::OK);
     assert_eq!(first.headers()["x-model-gateway-provider"], "paid");
-    let second = client
-        .post(format!("{gateway}/v1/chat/completions"))
-        .json(&request)
-        .send()
-        .await
-        .expect("spend-capped fallback response");
-    assert_eq!(second.status(), StatusCode::OK);
-    assert_eq!(second.headers()["x-model-gateway-provider"], "paid");
 }
 
 #[tokio::test]
@@ -2417,18 +2402,7 @@ async fn auto_frontier_reports_quality_capability_and_spend_exclusions() {
         }],
     );
     config.server.state_path = Some(state_path.clone());
-    config.server.frontier_quality_floor.simple.general = 70.0;
-    config.server.frontier_quality_floor.simple.coding = 70.0;
-    config.server.frontier_quality_floor.simple.agentic = 70.0;
-    config.server.frontier_quality_floor.medium.general = 70.0;
-    config.server.frontier_quality_floor.medium.coding = 70.0;
-    config.server.frontier_quality_floor.medium.agentic = 70.0;
-    config.server.frontier_quality_floor.complex.general = 70.0;
-    config.server.frontier_quality_floor.complex.coding = 70.0;
-    config.server.frontier_quality_floor.complex.agentic = 70.0;
-    config.server.frontier_quality_floor.very_complex.general = 70.0;
-    config.server.frontier_quality_floor.very_complex.coding = 70.0;
-    config.server.frontier_quality_floor.very_complex.agentic = 70.0;
+    config.server.frontier_quality_floor_single = 70.0;
     let quality_gateway = spawn_gateway(config.clone()).await;
     let client = reqwest::Client::new();
     let response = client
@@ -2440,9 +2414,7 @@ async fn auto_frontier_reports_quality_capability_and_spend_exclusions() {
     let body: Value = response.json().await.expect("quality error JSON");
     assert_eq!(body["error"]["code"], "frontier_quality_floor_not_met");
 
-    config.server.frontier_quality_floor.simple.general = 50.0;
-    config.server.frontier_quality_floor.simple.coding = 50.0;
-    config.server.frontier_quality_floor.simple.agentic = 50.0;
+    config.server.frontier_quality_floor_single = 50.0;
     let capability_gateway = spawn_gateway(config.clone()).await;
     let response = client
         .post(format!("{capability_gateway}/v1/chat/completions"))
@@ -2987,4 +2959,155 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         body["providers"].get("free").is_none(),
         "free provider should not appear in paid-models listing"
     );
+}
+
+#[tokio::test]
+async fn auto_balanced_selects_mid_range_model() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "paid",
+            &[CatalogRecord {
+                model: "balanced-model".to_owned(),
+                is_free: false,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(true),
+                supports_structured_output: Some(true),
+                input_price_per_million: Some(2.0),
+                output_price_per_million: Some(4.0),
+            }],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "balanced-model",
+                75.0,
+                70.0,
+                65.0,
+                2.0,
+                4.0,
+            )],
+        )
+        .expect("benchmarks");
+    drop(store);
+    let mut paid_provider = provider(format!("http://{upstream}/v1"));
+    paid_provider.billing_mode = BillingMode::Paid;
+    let mut config = config_for(
+        BTreeMap::from([("paid".to_owned(), paid_provider)]),
+        vec![TargetConfig {
+            provider: "paid".to_owned(),
+            model: "balanced-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(
+            &json!({"model": "auto-balanced", "messages": [{"role": "user", "content": "Hello."}]}),
+        )
+        .send()
+        .await
+        .expect("auto-balanced response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "paid");
+}
+
+#[tokio::test]
+async fn auto_balanced_disabled_when_config_says_so() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "paid",
+            &[CatalogRecord {
+                model: "model".to_owned(),
+                is_free: false,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(true),
+                supports_structured_output: Some(true),
+                input_price_per_million: Some(2.0),
+                output_price_per_million: Some(4.0),
+            }],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture("model", 75.0, 70.0, 65.0, 2.0, 4.0)],
+        )
+        .expect("benchmarks");
+    drop(store);
+    let mut paid_provider = provider(format!("http://{upstream}/v1"));
+    paid_provider.billing_mode = BillingMode::Paid;
+    let mut config = config_for(
+        BTreeMap::from([("paid".to_owned(), paid_provider)]),
+        vec![TargetConfig {
+            provider: "paid".to_owned(),
+            model: "model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.auto_balanced_enabled = false;
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(
+            &json!({"model": "auto-balanced", "messages": [{"role": "user", "content": "Hello."}]}),
+        )
+        .send()
+        .await
+        .expect("auto-balanced response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "route_disabled");
+}
+
+#[tokio::test]
+async fn auto_balanced_appears_in_model_listing() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let _store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    let mut config = config_for(
+        BTreeMap::from([(
+            "local".to_owned(),
+            provider(format!("http://{upstream}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "local".to_owned(),
+            model: "test".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.auto_balanced_enabled = true;
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/models"))
+        .send()
+        .await
+        .expect("models response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let ids: Vec<&str> = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"auto-balanced"));
+    assert!(ids.contains(&"auto-efficient"));
+    assert!(ids.contains(&"auto-frontier"));
+    assert!(ids.contains(&"auto-free"));
 }

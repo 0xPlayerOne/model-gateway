@@ -21,7 +21,8 @@ use tokio::time::timeout;
 
 use crate::benchmarks::{
     BenchmarkImport, BenchmarkModel, Complexity, ScoredCandidate, TaskKind, classify,
-    is_frontier_model, is_preview_model, pareto_rank, parse_artificial_analysis, quality_for,
+    composite_quality, is_frontier_model, is_preview_model, pareto_rank, parse_artificial_analysis,
+    quality_for,
 };
 use crate::config::{
     BillingMode, Config, ProviderConfig, QuotaKind, ServerConfig, TargetConfig, TieredQualityFloors,
@@ -613,6 +614,9 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
     }
     if state.config.server.auto_efficient_enabled {
         ids.push("auto-efficient".to_owned());
+    }
+    if state.config.server.auto_balanced_enabled {
+        ids.push("auto-balanced".to_owned());
     }
     if state.config.server.auto_frontier_enabled {
         ids.push("auto-frontier".to_owned());
@@ -2211,6 +2215,16 @@ async fn resolve_targets(
         }
         return resolve_auto_efficient_targets(state, request, session_hash).await;
     }
+    if model == "auto-balanced" {
+        if !state.config.server.auto_balanced_enabled {
+            return Err((
+                StatusCode::NOT_FOUND,
+                "model 'auto-balanced' is disabled".to_owned(),
+                "route_disabled",
+            ));
+        }
+        return resolve_auto_balanced_targets(state, request, session_hash).await;
+    }
     if model == "auto-frontier" {
         if !state.config.server.auto_frontier_enabled {
             return Err((
@@ -2318,11 +2332,6 @@ async fn resolve_auto_free_targets(
             .push(b.clone());
     }
     let classification = classify(request);
-    let quality_floor = state
-        .config
-        .server
-        .free_quality_floor
-        .floor_for(classification.task, classification.complexity);
     let requirements = RequestRequirements::from_request(request);
     let candidates = offerings
         .into_iter()
@@ -2361,7 +2370,7 @@ async fn resolve_auto_free_targets(
                 .cloned()
                 .unwrap_or_else(|| offering.model.clone());
             let benchmark = find_benchmark(&benchmark_map, &canonical, classification.task);
-            let quality = benchmark.and_then(|b| quality_for(b, classification.task));
+            let quality = benchmark.and_then(composite_quality);
             let effective_input = offering
                 .input_price_per_million
                 .or_else(|| benchmark.and_then(|b| b.input_price_per_million));
@@ -2377,9 +2386,6 @@ async fn resolve_auto_free_targets(
                 offering.context_length,
                 &canonical,
             ) {
-                return None;
-            }
-            if quality.is_some_and(|q| q < quality_floor) {
                 return None;
             }
             let latency = benchmark
@@ -2413,7 +2419,7 @@ async fn resolve_auto_free_targets(
                         task: classification.task.as_str(),
                         complexity: classification.complexity.as_str(),
                         classifier_version: classification.version,
-                        quality_floor,
+                        quality_floor: 0.0,
                         quality: quality.unwrap_or(0.0),
                         expected_cost_microusd: 0,
                         benchmark_snapshot_id,
@@ -2516,6 +2522,34 @@ async fn resolve_auto_efficient_targets(
     Ok(targets)
 }
 
+async fn resolve_auto_balanced_targets(
+    state: &AppState,
+    request: &Value,
+    session_hash: Option<&str>,
+) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
+    let mut targets =
+        resolve_benchmark_targets(state, request, session_hash, BenchmarkPolicy::Balanced).await?;
+    let selected = targets
+        .iter()
+        .map(|target| (target.provider.clone(), target.model.clone()))
+        .collect::<BTreeSet<_>>();
+    if !state.config.server.auto_free_enabled {
+        return Ok(targets);
+    }
+    match resolve_auto_free_targets(state, request, session_hash).await {
+        Ok(fallbacks) => {
+            for target in fallbacks {
+                if !selected.contains(&(target.provider.clone(), target.model.clone())) {
+                    targets.push(target);
+                }
+            }
+        }
+        Err(error) if targets.is_empty() => return Err(error),
+        Err(_) => {}
+    }
+    Ok(targets)
+}
+
 async fn resolve_auto_frontier_targets(
     state: &AppState,
     request: &Value,
@@ -2529,6 +2563,7 @@ async fn resolve_auto_frontier_targets(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BenchmarkPolicy {
     Efficient,
+    Balanced,
     Frontier,
 }
 
@@ -2536,6 +2571,7 @@ impl BenchmarkPolicy {
     const fn route(self) -> &'static str {
         match self {
             Self::Efficient => "auto-efficient",
+            Self::Balanced => "auto-balanced",
             Self::Frontier => "auto-frontier",
         }
     }
@@ -2568,11 +2604,11 @@ async fn resolve_benchmark_targets(
         )
     })?;
     let classification = classify(request);
-    let floors = match policy {
-        BenchmarkPolicy::Efficient => &state.config.server.quality_floor,
-        BenchmarkPolicy::Frontier => &state.config.server.frontier_quality_floor,
+    let quality_floor = match policy {
+        BenchmarkPolicy::Efficient => state.config.server.efficient_quality_floor,
+        BenchmarkPolicy::Balanced => state.config.server.balanced_quality_floor,
+        BenchmarkPolicy::Frontier => state.config.server.frontier_quality_floor_single,
     };
-    let quality_floor = floors.floor_for(classification.task, classification.complexity);
     let requirements = RequestRequirements::from_request(request);
     let requested_effort = request
         .get("reasoning_effort")
@@ -2688,7 +2724,7 @@ async fn resolve_benchmark_targets(
             {
                 continue;
             }
-            let Some(raw_quality) = quality_for(benchmark, classification.task) else {
+            let Some(raw_quality) = composite_quality(benchmark) else {
                 continue;
             };
             let quality = raw_quality;
