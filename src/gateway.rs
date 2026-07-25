@@ -1072,7 +1072,6 @@ fn select_free_for_tier(
                 return None;
             }
             if !server.free_models_quality.passes(
-                task,
                 benchmark,
                 offering.refreshed_at,
                 offering.input_price_per_million,
@@ -1335,7 +1334,6 @@ async fn list_free_models(
             .output_price_per_million
             .or_else(|| benchmark.and_then(|b| b.output_price_per_million));
         if !state.config.server.free_models_quality.passes(
-            task,
             benchmark,
             offering.refreshed_at,
             effective_input,
@@ -2474,7 +2472,6 @@ async fn resolve_auto_free_targets(
                 .output_price_per_million
                 .or_else(|| benchmark.and_then(|b| b.output_price_per_million));
             if !state.config.server.free_models_quality.passes(
-                classification.task,
                 benchmark,
                 offering.refreshed_at,
                 effective_input,

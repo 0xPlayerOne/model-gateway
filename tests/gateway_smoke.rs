@@ -355,7 +355,7 @@ async fn free_models_quality_bar_filters_low_quality_models() {
     );
     config.server.state_path = Some(state_path);
     // Raise the quality bar: only models >= 50.0 should pass
-    config.server.free_models_quality.min_general_index = 50.0;
+    config.server.free_models_quality.min_composite_quality = 50.0;
     config.server.free_models_quality.max_age_months = 0; // disable age filter
     config
         .server

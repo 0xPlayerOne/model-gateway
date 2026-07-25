@@ -57,9 +57,7 @@ coding = 90.0
 agentic = 85.0
 
 [server.free_models_quality]
-min_general_index = 25.0
-min_coding_index = 35.0
-min_agentic_index = 15.0
+min_composite_quality = 25.0
 max_age_months = 18
 max_input_price_per_million = 5.0
 max_output_price_per_million = 15.0
