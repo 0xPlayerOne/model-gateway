@@ -9,10 +9,14 @@
 - [ ] Preview deployment passes (if applicable)
 
 ## Compliance Checklist
-
-- [ ] My commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`type(scope): message`)
-- [ ] I have run `bun run format:fix` before committing (or let lint-staged handle it)
-- [ ] New dependencies — used `bun --filter <workspace> add <pkg>`, not `npm`/`yarn`/`pnpm`
+12|
+13|- [ ] My commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`type(scope): message`)
+14|- [ ] I have run `bun run format:fix` before committing (or let lint-staged handle it)
+15|- [ ] New dependencies — used `bun --filter <workspace> add <pkg>`, not `npm`/`yarn`/`pnpm`
+16|- [ ] No `.env*.local`, `node_modules`, or lockfile churn from another package manager
+17|- [ ] No generated artifacts committed (cache output, build output, etc.)
+18|
+19|
 - [ ] No `.env*.local`, `node_modules`, or lockfile churn from another package manager
 - [ ] No generated artifacts committed (cache output, build output, etc.)
 
