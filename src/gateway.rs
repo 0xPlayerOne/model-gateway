@@ -1067,7 +1067,7 @@ fn select_free_for_tier(
                 .map(String::as_str)
                 .unwrap_or(&offering.model);
             let benchmark = find_benchmark(benchmark_map, canonical, task);
-            let quality = benchmark.and_then(|b| quality_for(b, task))?;
+            let quality = benchmark.and_then(composite_quality)?;
             if quality < quality_floor {
                 return None;
             }
