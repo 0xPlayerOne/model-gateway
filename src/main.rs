@@ -8,7 +8,9 @@ use dialoguer::{Confirm, Input, Password, Select};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
-use model_gateway::benchmarks::{BenchmarkImport, parse_artificial_analysis};
+use model_gateway::benchmarks::{
+    BenchmarkImport, BenchmarkModel, PRICING_OVERRIDE_SOURCE, parse_artificial_analysis,
+};
 use model_gateway::config::{
     BillingMode, Config, ConfigError, Exposure, ModelConfig, QuotaBoundary, QuotaKind, QuotaLimit,
     TargetConfig,
@@ -104,6 +106,10 @@ enum BenchmarkCommand {
         #[arg(long, help = "Path to a validated benchmark JSON export")]
         file: PathBuf,
     },
+    ImportPrices {
+        #[arg(long, help = "Path to JSONL model pricing overrides")]
+        file: PathBuf,
+    },
     Status,
     Delete {
         source: String,
@@ -190,6 +196,37 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
                 store.replace_benchmarks(&import.source, &import.attribution, &import.models)?;
             println!(
                 "Imported {}: {} models, snapshot={snapshot}",
+                import.source,
+                import.models.len()
+            );
+            println!("Attribution: {}", import.attribution);
+        }
+        BenchmarkCommand::ImportPrices { file } => {
+            let models = std::fs::read_to_string(&file)?
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| !line.trim().is_empty())
+                .map(|(line_number, line)| {
+                    serde_json::from_str::<BenchmarkModel>(line).map_err(|error| {
+                        format!(
+                            "{}:{}: invalid pricing override: {error}",
+                            file.display(),
+                            line_number + 1
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let import = BenchmarkImport {
+                source: PRICING_OVERRIDE_SOURCE.to_owned(),
+                attribution: "Explicit model pricing overrides from public provider pricing"
+                    .to_owned(),
+                models,
+            }
+            .normalize()?;
+            let snapshot =
+                store.replace_benchmarks(&import.source, &import.attribution, &import.models)?;
+            println!(
+                "Imported {}: {} pricing overrides, snapshot={snapshot}",
                 import.source,
                 import.models.len()
             );

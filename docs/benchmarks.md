@@ -158,7 +158,7 @@ Rankings are sorted by quality score (descending), then by combined price (ascen
 
 | Route | Benchmark Dependency | Quality Scoring |
 |---|---|---|
-| `auto-free` | Uses composite quality for Pareto ranking (quality × latency). Falls back to unbenchmarked models if none exist. | Composite |
+| `auto-free` | Uses composite quality for Pareto ranking (quality × latency). Models without quality data are excluded. | Composite |
 | `auto-efficient` | **Requires** benchmarks. Models without matching benchmark entries are excluded. | Composite |
 | `auto-balanced` | **Requires** benchmarks. Same as auto-efficient with higher quality floor. | Composite |
 | `auto-frontier` | **Requires** benchmarks. Highest quality floor. | Composite |
@@ -170,9 +170,9 @@ All paid routes use composite quality (`0.80*intelligence + 0.10*coding + 0.10*a
 | Env Variable | Default | Description |
 |---|---|---|
 | `MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS` | `604800` (7d) | Maximum age before data is considered stale |
-| `MODEL_GATEWAY_EFFICIENT_QUALITY_FLOOR` | `40.0` | Composite quality floor for auto-efficient |
-| `MODEL_GATEWAY_BALANCED_QUALITY_FLOOR` | `60.0` | Composite quality floor for auto-balanced |
-| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR` | `80.0` | Composite quality floor for auto-frontier |
+| `MODEL_GATEWAY_EFFICIENT_QUALITY_FLOOR` | `35.0` | Composite quality floor for auto-efficient |
+| `MODEL_GATEWAY_BALANCED_QUALITY_FLOOR` | `42.0` | Composite quality floor for auto-balanced |
+| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR` | `50.0` | Composite quality floor for auto-frontier |
 
 See [configuration.md](configuration.md) for the full list of server settings.
 
@@ -208,6 +208,26 @@ The file must follow the `BenchmarkImport` format:
 - All scores are 0–100
 - Validated on import: empty IDs, out-of-range scores, and excessive attribution length are rejected
 
+### Import Pricing Overrides
+
+When a provider and benchmark source both omit prices, import price-only records as JSONL:
+
+```bash
+model-gateway benchmarks import-prices --file ./pricing-overrides.jsonl
+```
+
+Each non-empty line is a `BenchmarkModel` JSON object. Only `id`,
+`input_price_per_million`, and `output_price_per_million` are required:
+
+```jsonl
+{"id":"example-model","input_price_per_million":1.25,"output_price_per_million":5.0}
+```
+
+Pricing override records are merged with matching quality benchmark records by
+model ID and reasoning effort. They do not replace quality scores. Use prices
+from the provider's current public pricing documentation and refresh the
+provider catalog before importing overrides.
+
 Delete a snapshot:
 
 ```bash
@@ -218,7 +238,7 @@ model-gateway benchmarks delete my-source
 
 The Pareto ranking algorithm (`pareto_rank` in `src/benchmarks.rs`) uses three axes:
 
-1. **Quality** — the task-specific score (higher is better)
+1. **Quality** — composite quality for auto routes (higher is better)
 2. **Expected cost** — estimated USD per request from model pricing (lower is better, always 0 for free models)
 3. **Latency** — seconds to first token (lower is better)
 

@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::benchmarks::BenchmarkModel;
+use crate::benchmarks::{BenchmarkModel, PRICING_OVERRIDE_SOURCE};
 use crate::config::{
     BillingMode, ProviderConfig, ProviderProfileId, QuotaBoundary, QuotaKind, QuotaLimit,
 };
@@ -77,6 +77,65 @@ pub type AccountLimitStatus = (
     Option<f64>,
     Option<bool>,
 );
+
+fn merge_benchmark_sources(rows: Vec<(BenchmarkModel, String)>) -> Vec<BenchmarkModel> {
+    let mut merged = BTreeMap::<(String, String), BenchmarkModel>::new();
+
+    for (model, source) in rows {
+        let key = (
+            model.id.clone(),
+            model.reasoning_effort.clone().unwrap_or_default(),
+        );
+        let Some(existing) = merged.get_mut(&key) else {
+            merged.insert(key, model);
+            continue;
+        };
+
+        let override_pricing = source == PRICING_OVERRIDE_SOURCE;
+        if override_pricing {
+            if model.input_price_per_million.is_some() {
+                existing.input_price_per_million = model.input_price_per_million;
+            }
+            if model.output_price_per_million.is_some() {
+                existing.output_price_per_million = model.output_price_per_million;
+            }
+        } else {
+            if existing.input_price_per_million.is_none() {
+                existing.input_price_per_million = model.input_price_per_million;
+            }
+            if existing.output_price_per_million.is_none() {
+                existing.output_price_per_million = model.output_price_per_million;
+            }
+        }
+        if existing.creator.is_none() {
+            existing.creator = model.creator;
+        }
+        if existing.intelligence.is_none() {
+            existing.intelligence = model.intelligence;
+        }
+        if existing.coding_quality.is_none() {
+            existing.coding_quality = model.coding_quality;
+        }
+        if existing.agentic_quality.is_none() {
+            existing.agentic_quality = model.agentic_quality;
+        }
+        if existing.latency_seconds.is_none() {
+            existing.latency_seconds = model.latency_seconds;
+        }
+        if existing.output_tokens_per_task.is_none() {
+            existing.output_tokens_per_task = model.output_tokens_per_task;
+        }
+        if existing.as_of.is_none() {
+            existing.as_of = model.as_of;
+        }
+        if existing.release_date.is_none() {
+            existing.release_date = model.release_date;
+        }
+        existing.raw_metrics.extend(model.raw_metrics);
+    }
+
+    merged.into_values().collect()
+}
 
 pub const PROVIDER_LIMIT_REFERENCES: &[ProviderLimitReference] = &[
     limit(ProviderProfileId::Custom, "", "user_defined"),
@@ -588,35 +647,39 @@ impl RoutingStore {
                     m.agentic_quality, m.input_price,
                     m.output_price, m.latency_seconds, m.output_tokens_per_task,
                      NULLIF(m.reasoning_effort, ''), m.as_of,
-                     m.release_date
+                     m.release_date, s.source
              FROM benchmark_models m
              JOIN benchmark_snapshots s ON s.id = m.snapshot_id
              WHERE s.active = 1 AND s.fetched_at >= ?1
              ORDER BY m.model_id, s.source",
         )?;
-        Ok(statement
+        let rows = statement
             .query_map(
                 [epoch_seconds()
                     .saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX))],
                 |row| {
-                    Ok(BenchmarkModel {
-                        id: row.get(0)?,
-                        creator: row.get(1)?,
-                        intelligence: row.get(2)?,
-                        coding_quality: row.get(3)?,
-                        agentic_quality: row.get(4)?,
-                        input_price_per_million: row.get(5)?,
-                        output_price_per_million: row.get(6)?,
-                        latency_seconds: row.get(7)?,
-                        output_tokens_per_task: row.get(8)?,
-                        reasoning_effort: row.get(9)?,
-                        as_of: row.get(10)?,
-                        release_date: row.get(11)?,
-                        raw_metrics: BTreeMap::new(),
-                    })
+                    Ok((
+                        BenchmarkModel {
+                            id: row.get(0)?,
+                            creator: row.get(1)?,
+                            intelligence: row.get(2)?,
+                            coding_quality: row.get(3)?,
+                            agentic_quality: row.get(4)?,
+                            input_price_per_million: row.get(5)?,
+                            output_price_per_million: row.get(6)?,
+                            latency_seconds: row.get(7)?,
+                            output_tokens_per_task: row.get(8)?,
+                            reasoning_effort: row.get(9)?,
+                            as_of: row.get(10)?,
+                            release_date: row.get(11)?,
+                            raw_metrics: BTreeMap::new(),
+                        },
+                        row.get(12)?,
+                    ))
                 },
             )?
-            .collect::<Result<Vec<_>, _>>()?)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(merge_benchmark_sources(rows))
     }
 
     pub fn benchmark_status(&self) -> Result<Vec<(String, i64, u64, String)>, RoutingError> {
@@ -1105,10 +1168,8 @@ pub fn is_verified_free(provider: &ProviderConfig, model: &str, zero_priced: boo
                 return true;
             }
         }
-        Some(ProviderProfileId::OpenCode) => {
-            if lower.contains("free") || lower == "big-pickle" {
-                return true;
-            }
+        Some(ProviderProfileId::OpenCode) if lower.contains("free") || lower == "big-pickle" => {
+            return true;
         }
         _ => {}
     }
@@ -1603,6 +1664,7 @@ fn set_unix_mode(path: &Path, mode: u32) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::sync::Arc;
 
@@ -1610,7 +1672,7 @@ mod tests {
         BillingMode, ProviderConfig, ProviderProfileId, QuotaBoundary, QuotaKind, QuotaLimit,
     };
 
-    use crate::benchmarks::BenchmarkModel;
+    use crate::benchmarks::{BenchmarkModel, PRICING_OVERRIDE_SOURCE};
     use crate::providers::AccountLimit;
 
     use super::{CatalogRecord, ReservationOutcome, RoutingStore};
@@ -1842,6 +1904,49 @@ mod tests {
         let models = store.benchmark_models(60).expect("active snapshot");
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "valid");
+    }
+
+    #[test]
+    fn pricing_overrides_merge_into_quality_benchmarks() {
+        let store = RoutingStore::open(None).expect("store");
+        let quality = BenchmarkModel::fixture("mimo-v2-pro", 40.0, 40.0, 40.0, 0.0, 0.0);
+        store
+            .replace_benchmarks("artificial-analysis", "Artificial Analysis", &[quality])
+            .expect("quality snapshot");
+        let pricing = BenchmarkModel {
+            id: "mimo-v2-pro".to_owned(),
+            creator: None,
+            intelligence: None,
+            coding_quality: None,
+            agentic_quality: None,
+            input_price_per_million: Some(0.435),
+            output_price_per_million: Some(0.87),
+            latency_seconds: None,
+            output_tokens_per_task: None,
+            reasoning_effort: None,
+            as_of: None,
+            release_date: None,
+            raw_metrics: BTreeMap::new(),
+        };
+        store
+            .replace_benchmarks(PRICING_OVERRIDE_SOURCE, "Pricing overrides", &[pricing])
+            .expect("pricing snapshot");
+
+        let models = store.benchmark_models(60).expect("merged benchmarks");
+        let model = models
+            .iter()
+            .find(|model| model.id == "mimo-v2-pro")
+            .expect("merged model");
+        assert_eq!(model.intelligence, Some(40.0));
+        assert_eq!(model.input_price_per_million, Some(0.435));
+        assert_eq!(model.output_price_per_million, Some(0.87));
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| model.id == "mimo-v2-pro")
+                .count(),
+            1
+        );
     }
 
     #[test]
