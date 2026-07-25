@@ -1,4 +1,4 @@
-# Contributing to Model Gateway
+# Contributing to Model Gateway Frontend Monorepo
 
 Welcome! This document is the **single source of truth** for the contribution workflow across all Model Gateway repositories.  
 All agents (Hermes and other automation) must read and follow this document before working on any repo in the fleet.
@@ -26,32 +26,29 @@ All agents (Hermes and other automation) must read and follow this document befo
 
 ## 1. Repository Overview
 
-This is a **pure Rust** HTTP server using Axum, Tokio, and rusqlite. No JavaScript, no Python — just a single Rust crate.
+This is a **Turborepo** monorepo managed with **Bun** (v1.3.14) and **Node.js** (v24.18.0) via `mise`.
 
-### Source layout
+### Apps
 
-| Module | Role |
-|---|---|
-| `src/gateway.rs` | Axum routes, request handling, SSE streaming, fallback logic |
-| `src/config.rs` | TOML config parsing, validation, provider/model structures |
-| `src/routing.rs` | SQLite-backed routing store: catalogs, benchmarks, quotas, cooldowns |
-| `src/providers.rs` | Provider profiles, catalog fetching, request preparation |
-| `src/benchmarks.rs` | Benchmark import/parse, task classification, quality/cost selection |
-| `src/secrets.rs` | Secret resolution: keyring, file, or environment |
-| `src/storage.rs` | Private module: atomic file writes, SQLite helpers |
-| `src/main.rs` | CLI (clap): setup, serve, config, credentials, catalog, benchmarks, healthcheck |
+| App        | Stack                      | Port |
+| ---------- | -------------------------- | ---- |
+| `app`      | Next.js (Web3 dashboard)   | —    |
+| `docs`     | Docusaurus                 | —    |
+| `web`      | Next.js (company website)  | —    |
+| `smashers` | Next.js (game site)        | —    |
+| `template` | Next.js (new-app scaffold) | —    |
 
 ### Commands
 
-| Command | What it does |
-|---|---|
-| `cargo build` | Build all targets (debug) |
-| `cargo build --release` | Build release binary |
-| `cargo test --all-features` | Run all unit + integration tests |
-| `cargo fmt --check` | Check formatting |
-| `cargo clippy --all-targets --all-features -- -D warnings` | Lint (deny warnings) |
-| `cargo +stable deny check` | Dependency policy audit (requires cargo-deny) |
-| `cargo doc --no-deps` | Generate documentation |
+| Command            | What it does                            |
+| ------------------ | --------------------------------------- |
+| `turbo build`      | Build all apps & packages               |
+| `turbo dev`        | Run everything in dev mode              |
+| `turbo test`       | Run tests (bun native, not vitest/jest) |
+| `turbo format`     | Check formatting                        |
+| `turbo format:fix` | Auto-format                             |
+| `turbo lint`       | ESLint + Prettier                       |
+| `turbo type-check` | TypeScript checks                       |
 
 ---
 
@@ -70,6 +67,7 @@ feat/foo  fix/bar  chore/baz  ...          (feature branches)
 - **No direct pushes.** Not by you, not by any agent, not by admin (0xPlayerOne). All pushes blocked by branch protection (`enforce_admins: true`).
 - **Only accepts merges from `staging`.** No other branch may merge into `main`.
 - **All CI must pass on `staging`** before a staging→main PR can merge.
+- **Vercel preview deployments** (if applicable) must also pass before merge.
 - **Linear history.** No merge commits — squash merge only. Every commit on `main` is a squashed summary of a staging batch.
 - **Force pushes are disabled** on `main`.
 
@@ -101,8 +99,8 @@ feat/foo  fix/bar  chore/baz  ...          (feature branches)
 
 ### Prerequisites
 
-- Rust toolchain (pinned to **1.87.0** via `rust-toolchain.toml` — installed automatically by `rustup`)
-- `cargo-deny` for dependency auditing (install via `cargo +stable install cargo-deny --version 0.20.2 --locked`)
+- `mise` (toolchain version manager) — installs bun and node at pinned versions
+- `git` (obviously)
 
 ### One-time setup
 
@@ -111,27 +109,27 @@ feat/foo  fix/bar  chore/baz  ...          (feature branches)
 git clone git@github.com:0xPlayerOne/model-gateway.git
 cd model-gateway
 
-# Rust toolchain is auto-installed by rustup when you enter the repo
-# (reads rust-toolchain.toml)
+# Install toolchain (reads mise.toml → installs bun 1.3.14 + node 24.18.0)
+mise install
 
-# Build (debug)
-cargo build
+# Install dependencies
+cargo fetch
 
-# Run tests to verify everything is working
-cargo test --all-features
+# Run everything in dev mode
+turbo dev
 ```
 
 ### Before committing
 
 ```bash
-cargo fmt --check          # Formatting
-cargo clippy --all-targets --all-features -- -D warnings  # Lint
-cargo test --all-features  # Run all tests
-cargo build --release      # Verify release builds cleanly
-cargo +stable deny check   # Dependency policy audit
+turbo lint           # ESLint + Prettier
+turbo type-check     # TypeScript type checking
+turbo test           # Run all tests
+turbo format:fix     # Auto-format (runs via husky pre-commit too)
 ```
 
-> **Note:** `cargo fmt` is run on all Rust source. Never bypass formatting or clippy warnings — fix the issue instead.
+> **Note:** Husky + lint-staged are active. Pre-commit hooks run `turbo format:fix` on staged files.  
+> Never use `--no-verify` to skip hooks — if a hook fails, fix the issue.
 
 ---
 
@@ -180,6 +178,7 @@ git push origin feat/my-feature
 
 - **Only admins can merge into `main`.** The daily review agent may pick up PRs once they are approved by an admin on GitHub.
 - All CI must be green on staging before this PR opens.
+- All Vercel preview deployments (if any) must pass.
 - Squash merge with a release summary message.
 - The `main` branch is then deployed to production by CI.
 - **After merge, rebase `staging` on `main`** to keep branch histories aligned and prevent future merge conflicts.
@@ -261,17 +260,11 @@ Since a commit can never be simultaneously pushed to `main`/`staging` AND be a P
 
 ### CI jobs
 
-| Job | What it checks |
-|---|---|
-| `fmt` | `cargo fmt --check` — formatting compliance |
-| `clippy` | `cargo clippy --all-targets --all-features -- -D warnings` — lint |
-| `test` | `cargo test --all-features` — all unit + integration tests |
-| `build` | `cargo build --release` — release compilation |
-| `deny` | `cargo +stable deny check` — dependency/advisory audit |
-| `native-smoke` | `./scripts/native-smoke.sh` — native binary smoke test |
-| `docker-smoke` | `./scripts/docker-smoke.sh` — Docker image smoke test |
-| `hermes-smoke` | `./scripts/hermes-smoke.sh` — gateway integration smoke test |
-| `release-smoke` | `./scripts/release-smoke.sh <dir>` — release archive validation |
+| Job                                | What it checks                              |
+| ---------------------------------- | ------------------------------------------- |
+| `Build, Format, Lint & Type Check` | Compilation, formatting, ESLint, TypeScript |
+| `Test`                             | `turbo test` — all unit + integration tests |
+| `Vercel Preview Comments`          | Preview deployment verification             |
 
 ### If CI fails
 

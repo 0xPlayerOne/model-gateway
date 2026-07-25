@@ -4,26 +4,25 @@ on:
   push:
     branches: [main, staging]
   pull_request:
-    branches: [staging]
+    branches: [main, staging]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{{{ github.ref }}}}
   cancel-in-progress: true
 
 jobs:
   quality:
     name: Build, Format, Lint & Type Check
+    if: github.event_name != 'pull_request' || github.head_ref != 'staging'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
         with:
           cache: true
-      - name: Install Rust components
-        run: rustup component add rustfmt clippy
       - name: Format check
         run: cargo fmt --check
       - name: Lint
