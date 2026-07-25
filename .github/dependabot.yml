@@ -1,25 +1,30 @@
 version: 2
 updates:
-  - package-ecosystem: npm
+  - package-ecosystem: cargo
     directory: /
     target-branch: staging
     schedule:
       interval: weekly
-      day: sunday
-    open-pull-requests-limit: 10
+      day: monday
+    # open-pull-requests-limit: 10  # removed — Weekly Release handles any volume
+    labels:
+      - dependencies
+      - rust
     groups:
-      production-dependencies:
-        dependency-type: production
+      rust-dependencies:
+        patterns:
+          - '*'
         update-types:
           - patch
           - minor
-      development-dependencies:
-        dependency-type: development
 
   - package-ecosystem: github-actions
     directory: /
     target-branch: staging
     schedule:
       interval: weekly
-      day: sunday
-    open-pull-requests-limit: 5
+      day: monday
+    # open-pull-requests-limit: 5  # removed — Weekly Release handles any volume
+    labels:
+      - dependencies
+      - ci
