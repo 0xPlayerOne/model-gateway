@@ -90,13 +90,10 @@ Mid-range quality. Quality floor: **60**. Same pipeline as auto-efficient with a
 
 ## `auto-frontier`
 
-Top tier. Quality floor: **80**. Same pipeline as auto-efficient with additional constraints:
+Top tier. Quality floor: **50**. Same pipeline as auto-efficient/balanced — all paid models, differentiated by quality floor.
 
-- Only OpenAI or Anthropic canonical creators (identified by benchmark entries)
-- Requires explicit paid or subscription billing authorization
-- Excludes preview/beta/experimental model IDs unless `allow_preview_models = true`
-- Quality floor: `frontier_quality_floor_single` (default 80.0)
-- **Never falls back** — returns a fixed frontier error when no candidate is safe and available
+- Quality floor: `frontier_quality_floor_single` (default 50.0)
+- **Never falls back** — returns a generic error when no candidate is available
 
 ## Session Pinning
 
@@ -124,7 +121,7 @@ Returns all non-free models from paid/subscription providers. Supports `?task=`,
 
 ### `/v1/auto-models`
 
-Shows exactly which model each mode would select, with primary + fallback per mode. Supports `?task=` and `?route=` query parameters.
+Shows the current routing mode configuration with the top model selections for each mode. Returns primary + up to 2 fallbacks per mode using composite quality Pareto ranking. Supports `?route=free|efficient|balanced|frontier` to filter a single mode.
 
 ### `/v1/rankings`
 

@@ -1301,7 +1301,7 @@ async fn auto_free_emits_selection_headers() {
         .expect("auto-free response");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["x-model-gateway-task"], "general");
-    assert_eq!(response.headers()["x-model-gateway-quality"], "81.5");
+    assert_eq!(response.headers()["x-model-gateway-quality"], "83.5");
     assert_eq!(response.headers()["x-model-gateway-complexity"], "simple");
     assert_eq!(response.headers()["x-model-gateway-classifier"], "rules-v1");
 }
@@ -1685,7 +1685,7 @@ async fn auto_free_prefers_quality_model_for_complex_task() {
 }
 
 #[tokio::test]
-async fn auto_free_complexity_floor_filters_underqualified() {
+async fn auto_free_quality_bar_filters_low_quality_composite() {
     let weak = spawn_provider(ProviderResponse::Success).await;
     let strong = spawn_provider(ProviderResponse::Success).await;
     let directory = tempfile::tempdir().expect("state directory");
@@ -1730,12 +1730,6 @@ async fn auto_free_complexity_floor_filters_underqualified() {
         }],
     );
     config.server.state_path = Some(state_path);
-    config.server.free_quality_floor.complex.general = 60.0;
-    config.server.free_quality_floor.complex.coding = 60.0;
-    config.server.free_quality_floor.complex.agentic = 60.0;
-    config.server.free_quality_floor.very_complex.general = 60.0;
-    config.server.free_quality_floor.very_complex.coding = 60.0;
-    config.server.free_quality_floor.very_complex.agentic = 60.0;
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
         .post(format!("{gateway}/v1/chat/completions"))
@@ -2109,13 +2103,13 @@ async fn auto_efficient_falls_back_when_paid_models_are_unbenchmarked() {
 }
 
 #[tokio::test]
-async fn auto_frontier_selects_only_openai_or_anthropic_canonical_creators() {
-    let anthropic = spawn_provider(ProviderResponse::Stream).await;
-    let other = spawn_provider(ProviderResponse::Success).await;
+async fn auto_frontier_selects_cheapest_paid_model_above_floor() {
+    let expensive = spawn_provider(ProviderResponse::Stream).await;
+    let cheap = spawn_provider(ProviderResponse::Success).await;
     let directory = tempfile::tempdir().expect("state directory");
     let state_path = directory.path().join("routing.sqlite3");
     let store = RoutingStore::open(Some(&state_path)).expect("routing store");
-    for (provider, model) in [("anthropic", "claude"), ("other", "other-model")] {
+    for (provider, model) in [("expensive", "premium-model"), ("cheap", "budget-model")] {
         store
             .replace_catalog(
                 provider,
@@ -2132,26 +2126,30 @@ async fn auto_frontier_selects_only_openai_or_anthropic_canonical_creators() {
             )
             .expect("catalog");
     }
-    let mut claude = BenchmarkModel::fixture("claude", 90.0, 90.0, 90.0, 2.0, 4.0);
-    claude.creator = Some("Anthropic".to_owned());
-    let mut cheaper = BenchmarkModel::fixture("other-model", 99.0, 99.0, 99.0, 0.1, 0.1);
-    cheaper.creator = Some("Other Labs".to_owned());
+    let premium = BenchmarkModel::fixture("premium-model", 90.0, 90.0, 90.0, 5.0, 10.0);
+    let budget = BenchmarkModel::fixture("budget-model", 80.0, 80.0, 80.0, 1.0, 2.0);
     store
-        .replace_benchmarks("fixture", "Fixture", &[claude, cheaper])
+        .replace_benchmarks("fixture", "Fixture", &[premium, budget])
         .expect("benchmarks");
     drop(store);
-    let mut anthropic_provider = provider(format!("http://{anthropic}/v1"));
-    anthropic_provider.billing_mode = BillingMode::Paid;
-    let mut other_provider = provider(format!("http://{other}/v1"));
-    other_provider.billing_mode = BillingMode::Paid;
+    let expensive_cfg = {
+        let mut p = provider(format!("http://{expensive}/v1"));
+        p.billing_mode = BillingMode::Paid;
+        p
+    };
+    let cheap_cfg = {
+        let mut p = provider(format!("http://{cheap}/v1"));
+        p.billing_mode = BillingMode::Paid;
+        p
+    };
     let mut config = config_for(
         BTreeMap::from([
-            ("anthropic".to_owned(), anthropic_provider),
-            ("other".to_owned(), other_provider),
+            ("expensive".to_owned(), expensive_cfg),
+            ("cheap".to_owned(), cheap_cfg),
         ]),
         vec![TargetConfig {
-            provider: "anthropic".to_owned(),
-            model: "claude".to_owned(),
+            provider: "expensive".to_owned(),
+            model: "premium-model".to_owned(),
         }],
     );
     config.server.state_path = Some(state_path);
@@ -2160,64 +2158,82 @@ async fn auto_frontier_selects_only_openai_or_anthropic_canonical_creators() {
         .post(format!("{gateway}/v1/chat/completions"))
         .json(&json!({
             "model": "auto-frontier",
-            "stream": true,
             "messages": [{"role": "user", "content": "hello"}]
         }))
         .send()
         .await
         .expect("frontier response");
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["x-model-gateway-provider"], "anthropic");
-    let body = response.text().await.expect("frontier stream");
-    assert!(body.contains("- Claude:"));
-    assert!(body.contains("data: [DONE]"));
+    assert_eq!(response.headers()["x-model-gateway-provider"], "cheap");
 }
 
 #[tokio::test]
-async fn auto_frontier_returns_explicit_error_without_free_or_local_fallback() {
-    let paid = spawn_provider(ProviderResponse::Success).await;
-    let free = spawn_provider(ProviderResponse::Success).await;
+async fn auto_frontier_skips_free_models_and_free_providers() {
+    let free_prov = spawn_provider(ProviderResponse::Success).await;
+    let paid_prov = spawn_provider(ProviderResponse::Success).await;
     let directory = tempfile::tempdir().expect("state directory");
     let state_path = directory.path().join("routing.sqlite3");
     let store = RoutingStore::open(Some(&state_path)).expect("routing store");
-    for (provider, model, is_free) in [
-        ("paid", "non-frontier", false),
-        ("free", "free-model", true),
-    ] {
-        store
-            .replace_catalog(
-                provider,
-                &[CatalogRecord {
-                    model: model.to_owned(),
-                    is_free,
-                    context_length: Some(128_000),
-                    supports_tools: Some(true),
-                    supports_vision: Some(true),
-                    supports_structured_output: Some(true),
-                    input_price_per_million: None,
-                    output_price_per_million: None,
-                }],
-            )
-            .expect("catalog");
-    }
-    let mut benchmark = BenchmarkModel::fixture("non-frontier", 99.0, 99.0, 99.0, 0.1, 0.1);
-    benchmark.creator = Some("Other Labs".to_owned());
     store
-        .replace_benchmarks("fixture", "Fixture", &[benchmark])
+        .replace_catalog(
+            "free-provider",
+            &[CatalogRecord {
+                model: "free-model".to_owned(),
+                is_free: true,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(true),
+                supports_structured_output: Some(true),
+                input_price_per_million: None,
+                output_price_per_million: None,
+            }],
+        )
+        .expect("catalog");
+    store
+        .replace_catalog(
+            "paid-provider",
+            &[CatalogRecord {
+                model: "paid-model".to_owned(),
+                is_free: false,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(true),
+                supports_structured_output: Some(true),
+                input_price_per_million: None,
+                output_price_per_million: None,
+            }],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "paid-model",
+                70.0,
+                70.0,
+                70.0,
+                1.0,
+                1.0,
+            )],
+        )
         .expect("benchmarks");
     drop(store);
-    let mut paid_provider = provider(format!("http://{paid}/v1"));
-    paid_provider.billing_mode = BillingMode::Paid;
-    let mut free_provider = provider(format!("http://{free}/v1"));
-    free_provider.free_models = vec!["free-model".to_owned()];
     let mut config = config_for(
         BTreeMap::from([
-            ("paid".to_owned(), paid_provider),
-            ("free".to_owned(), free_provider),
+            (
+                "free-provider".to_owned(),
+                provider(format!("http://{free_prov}/v1")),
+            ),
+            ("paid-provider".to_owned(), {
+                let mut p = provider(format!("http://{paid_prov}/v1"));
+                p.billing_mode = BillingMode::Paid;
+                p
+            }),
         ]),
         vec![TargetConfig {
-            provider: "paid".to_owned(),
-            model: "non-frontier".to_owned(),
+            provider: "paid-provider".to_owned(),
+            model: "paid-model".to_owned(),
         }],
     );
     config.server.state_path = Some(state_path);
@@ -2227,10 +2243,13 @@ async fn auto_frontier_returns_explicit_error_without_free_or_local_fallback() {
         .json(&json!({"model": "auto-frontier", "messages": []}))
         .send()
         .await
-        .expect("frontier error");
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body: Value = response.json().await.expect("error JSON");
-    assert_eq!(body["error"]["code"], "frontier_access_unconfigured");
+        .expect("frontier response");
+    // Only paid provider's model should be selected, free provider is skipped
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-model-gateway-provider"],
+        "paid-provider"
+    );
 }
 
 #[tokio::test]
@@ -2305,7 +2324,7 @@ async fn auto_frontier_reroutes_same_canonical_model_before_output() {
 }
 
 #[tokio::test]
-async fn auto_frontier_requires_explicit_billing_and_preview_authorization() {
+async fn auto_frontier_skips_free_billing_providers() {
     let upstream = spawn_provider(ProviderResponse::Success).await;
     let directory = tempfile::tempdir().expect("state directory");
     let state_path = directory.path().join("routing.sqlite3");
@@ -2325,10 +2344,19 @@ async fn auto_frontier_requires_explicit_billing_and_preview_authorization() {
             }],
         )
         .expect("catalog");
-    let mut benchmark = BenchmarkModel::fixture("gpt-preview", 95.0, 95.0, 95.0, 1.0, 1.0);
-    benchmark.creator = Some("OpenAI".to_owned());
     store
-        .replace_benchmarks("fixture", "Fixture", &[benchmark])
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "gpt-preview",
+                95.0,
+                95.0,
+                95.0,
+                1.0,
+                1.0,
+            )],
+        )
         .expect("benchmarks");
     drop(store);
     let mut config = config_for(
@@ -2342,48 +2370,35 @@ async fn auto_frontier_requires_explicit_billing_and_preview_authorization() {
         }],
     );
     config.server.state_path = Some(state_path);
-    let unauthorized = spawn_gateway(config.clone()).await;
+
+    // Free-billing provider with paid offering: skipped by frontier
+    let gateway = spawn_gateway(config.clone()).await;
     let response = reqwest::Client::new()
-        .post(format!("{unauthorized}/v1/chat/completions"))
+        .post(format!("{gateway}/v1/chat/completions"))
         .json(&json!({"model": "auto-frontier", "messages": []}))
         .send()
         .await
-        .expect("billing error");
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body: Value = response.json().await.expect("billing error JSON");
-    assert_eq!(body["error"]["code"], "frontier_billing_not_authorized");
+        .expect("frontier error");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 
-    let frontier = config.providers.get_mut("frontier").expect("provider");
-    frontier.billing_mode = BillingMode::Paid;
-    frontier.allow_preview_models = false;
-    let preview_blocked = spawn_gateway(config.clone()).await;
-    let response = reqwest::Client::new()
-        .post(format!("{preview_blocked}/v1/chat/completions"))
-        .json(&json!({"model": "auto-frontier", "messages": []}))
-        .send()
-        .await
-        .expect("preview error");
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body: Value = response.json().await.expect("preview error JSON");
-    assert_eq!(body["error"]["code"], "frontier_preview_not_authorized");
-
+    // Set to paid billing: should work
     config
         .providers
         .get_mut("frontier")
         .expect("provider")
-        .allow_preview_models = true;
-    let preview_allowed = spawn_gateway(config).await;
+        .billing_mode = BillingMode::Paid;
+    let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .post(format!("{preview_allowed}/v1/chat/completions"))
+        .post(format!("{gateway}/v1/chat/completions"))
         .json(&json!({"model": "auto-frontier", "messages": []}))
         .send()
         .await
-        .expect("preview response");
+        .expect("frontier response");
     assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn auto_frontier_reports_quality_capability_and_spend_exclusions() {
+async fn auto_frontier_reports_quality_and_capability_exclusions() {
     let upstream = spawn_provider(ProviderResponse::Success).await;
     let directory = tempfile::tempdir().expect("state directory");
     let state_path = directory.path().join("routing.sqlite3");
@@ -2401,10 +2416,19 @@ async fn auto_frontier_reports_quality_capability_and_spend_exclusions() {
     store
         .replace_catalog("frontier", &[catalog(false)])
         .expect("catalog");
-    let mut benchmark = BenchmarkModel::fixture("gpt-frontier", 60.0, 60.0, 60.0, 1.0, 1.0);
-    benchmark.creator = Some("OpenAI".to_owned());
     store
-        .replace_benchmarks("fixture", "Fixture", &[benchmark])
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "gpt-frontier",
+                60.0,
+                60.0,
+                60.0,
+                1.0,
+                1.0,
+            )],
+        )
         .expect("benchmarks");
     drop(store);
     let mut frontier_provider = provider(format!("http://{upstream}/v1"));
@@ -2426,8 +2450,8 @@ async fn auto_frontier_reports_quality_capability_and_spend_exclusions() {
         .send()
         .await
         .expect("quality error");
-    let body: Value = response.json().await.expect("quality error JSON");
-    assert_eq!(body["error"]["code"], "frontier_quality_floor_not_met");
+    // Quality floor 70 > model quality 60: no candidates
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 
     config.server.frontier_quality_floor_single = 50.0;
     let capability_gateway = spawn_gateway(config.clone()).await;
@@ -2441,33 +2465,22 @@ async fn auto_frontier_reports_quality_capability_and_spend_exclusions() {
         .send()
         .await
         .expect("capability error");
-    let body: Value = response.json().await.expect("capability error JSON");
-    assert_eq!(body["error"]["code"], "frontier_capability_mismatch");
+    // Capability mismatch: tools not supported
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 
+    // With tools supported and normal quota, should succeed
     RoutingStore::open(Some(&state_path))
         .expect("routing store")
         .replace_catalog("frontier", &[catalog(true)])
         .expect("updated catalog");
-    config
-        .providers
-        .get_mut("frontier")
-        .expect("provider")
-        .quotas = vec![QuotaLimit {
-        kind: QuotaKind::CostMicrousd,
-        limit: 1,
-        window_seconds: 86_400,
-        boundary: QuotaBoundary::Rolling,
-    }];
-    let spend_gateway = spawn_gateway(config).await;
+    let ok_gateway = spawn_gateway(config).await;
     let response = client
-        .post(format!("{spend_gateway}/v1/chat/completions"))
+        .post(format!("{ok_gateway}/v1/chat/completions"))
         .json(&json!({"model": "auto-frontier", "messages": []}))
         .send()
         .await
-        .expect("spend error");
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body: Value = response.json().await.expect("spend error JSON");
-    assert_eq!(body["error"]["code"], "frontier_spend_cap_reached");
+        .expect("frontier response");
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

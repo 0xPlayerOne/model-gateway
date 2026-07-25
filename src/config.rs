@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-use crate::benchmarks::Complexity;
 use crate::providers::PROFILE_DEFINITIONS;
 use crate::secrets::{SecretError, SecretResolver, validate_secret_name};
 use crate::storage::write_atomic;
@@ -42,73 +41,6 @@ pub struct Config {
     pub models: BTreeMap<String, ModelConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PerTaskFloor {
-    #[serde(default = "default_quality_floor_general")]
-    pub general: f64,
-    #[serde(default = "default_quality_floor_coding")]
-    pub coding: f64,
-    #[serde(default = "default_quality_floor_agentic")]
-    pub agentic: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TieredQualityFloors {
-    #[serde(default)]
-    pub simple: PerTaskFloor,
-    #[serde(default)]
-    pub medium: PerTaskFloor,
-    #[serde(default)]
-    pub complex: PerTaskFloor,
-    #[serde(default)]
-    pub very_complex: PerTaskFloor,
-}
-
-impl TieredQualityFloors {
-    pub fn floor_for(&self, task: crate::benchmarks::TaskKind, complexity: Complexity) -> f64 {
-        let task_floors = match complexity {
-            Complexity::Simple => &self.simple,
-            Complexity::Medium => &self.medium,
-            Complexity::Complex => &self.complex,
-            Complexity::VeryComplex => &self.very_complex,
-        };
-        match task {
-            crate::benchmarks::TaskKind::General => task_floors.general,
-            crate::benchmarks::TaskKind::Coding => task_floors.coding,
-            crate::benchmarks::TaskKind::Agentic => task_floors.agentic,
-        }
-    }
-}
-
-impl Default for TieredQualityFloors {
-    fn default() -> Self {
-        Self {
-            simple: PerTaskFloor {
-                general: 40.0,
-                coding: 35.0,
-                agentic: 25.0,
-            },
-            medium: PerTaskFloor {
-                general: 60.0,
-                coding: 55.0,
-                agentic: 45.0,
-            },
-            complex: PerTaskFloor {
-                general: 75.0,
-                coding: 70.0,
-                agentic: 60.0,
-            },
-            very_complex: PerTaskFloor {
-                general: 85.0,
-                coding: 80.0,
-                agentic: 75.0,
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -136,12 +68,6 @@ pub struct ServerConfig {
     pub catalog_max_age_seconds: u64,
     #[serde(default = "default_benchmark_max_age_seconds")]
     pub benchmark_max_age_seconds: u64,
-    #[serde(default)]
-    pub quality_floor: TieredQualityFloors,
-    #[serde(default)]
-    pub frontier_quality_floor: TieredQualityFloors,
-    #[serde(default)]
-    pub free_quality_floor: TieredQualityFloors,
     #[serde(default = "default_true")]
     pub auto_frontier_enabled: bool,
     #[serde(default = "default_true")]
@@ -377,8 +303,6 @@ pub struct ProviderConfig {
     pub quotas: Vec<QuotaLimit>,
     #[serde(default)]
     pub model_mappings: BTreeMap<String, String>,
-    #[serde(default = "default_true")]
-    pub allow_preview_models: bool,
 }
 
 impl Default for ProviderConfig {
@@ -402,7 +326,6 @@ impl Default for ProviderConfig {
             model_denylist: Vec::new(),
             quotas: Vec::new(),
             model_mappings: BTreeMap::new(),
-            allow_preview_models: true,
         }
     }
 }
@@ -506,9 +429,6 @@ impl Default for ServerConfig {
             state_path: None,
             catalog_max_age_seconds: default_catalog_max_age_seconds(),
             benchmark_max_age_seconds: default_benchmark_max_age_seconds(),
-            quality_floor: TieredQualityFloors::default(),
-            frontier_quality_floor: TieredQualityFloors::default(),
-            free_quality_floor: TieredQualityFloors::default(),
             auto_frontier_enabled: true,
             auto_free_enabled: true,
             auto_efficient_enabled: true,
@@ -610,96 +530,12 @@ impl Config {
             ));
         }
         if self.server.benchmark_max_age_seconds == 0
-            || !valid_quality_floor(self.server.quality_floor.simple.general)
-            || !valid_quality_floor(self.server.quality_floor.simple.coding)
-            || !valid_quality_floor(self.server.quality_floor.simple.agentic)
-            || !valid_quality_floor(self.server.quality_floor.medium.general)
-            || !valid_quality_floor(self.server.quality_floor.medium.coding)
-            || !valid_quality_floor(self.server.quality_floor.medium.agentic)
-            || !valid_quality_floor(self.server.quality_floor.complex.general)
-            || !valid_quality_floor(self.server.quality_floor.complex.coding)
-            || !valid_quality_floor(self.server.quality_floor.complex.agentic)
-            || !valid_quality_floor(self.server.quality_floor.very_complex.general)
-            || !valid_quality_floor(self.server.quality_floor.very_complex.coding)
-            || !valid_quality_floor(self.server.quality_floor.very_complex.agentic)
-            || self.server.quality_floor.simple.general > self.server.quality_floor.medium.general
-            || self.server.quality_floor.medium.general > self.server.quality_floor.complex.general
-            || self.server.quality_floor.complex.general
-                > self.server.quality_floor.very_complex.general
-            || self.server.quality_floor.simple.coding > self.server.quality_floor.medium.coding
-            || self.server.quality_floor.medium.coding > self.server.quality_floor.complex.coding
-            || self.server.quality_floor.complex.coding
-                > self.server.quality_floor.very_complex.coding
-            || self.server.quality_floor.simple.agentic > self.server.quality_floor.medium.agentic
-            || self.server.quality_floor.medium.agentic > self.server.quality_floor.complex.agentic
-            || self.server.quality_floor.complex.agentic
-                > self.server.quality_floor.very_complex.agentic
-            || !valid_quality_floor(self.server.frontier_quality_floor.simple.general)
-            || !valid_quality_floor(self.server.frontier_quality_floor.simple.coding)
-            || !valid_quality_floor(self.server.frontier_quality_floor.simple.agentic)
-            || !valid_quality_floor(self.server.frontier_quality_floor.medium.general)
-            || !valid_quality_floor(self.server.frontier_quality_floor.medium.coding)
-            || !valid_quality_floor(self.server.frontier_quality_floor.medium.agentic)
-            || !valid_quality_floor(self.server.frontier_quality_floor.complex.general)
-            || !valid_quality_floor(self.server.frontier_quality_floor.complex.coding)
-            || !valid_quality_floor(self.server.frontier_quality_floor.complex.agentic)
-            || !valid_quality_floor(self.server.frontier_quality_floor.very_complex.general)
-            || !valid_quality_floor(self.server.frontier_quality_floor.very_complex.coding)
-            || !valid_quality_floor(self.server.frontier_quality_floor.very_complex.agentic)
-            || self.server.frontier_quality_floor.simple.general
-                > self.server.frontier_quality_floor.medium.general
-            || self.server.frontier_quality_floor.medium.general
-                > self.server.frontier_quality_floor.complex.general
-            || self.server.frontier_quality_floor.complex.general
-                > self.server.frontier_quality_floor.very_complex.general
-            || self.server.frontier_quality_floor.simple.coding
-                > self.server.frontier_quality_floor.medium.coding
-            || self.server.frontier_quality_floor.medium.coding
-                > self.server.frontier_quality_floor.complex.coding
-            || self.server.frontier_quality_floor.complex.coding
-                > self.server.frontier_quality_floor.very_complex.coding
-            || self.server.frontier_quality_floor.simple.agentic
-                > self.server.frontier_quality_floor.medium.agentic
-            || self.server.frontier_quality_floor.medium.agentic
-                > self.server.frontier_quality_floor.complex.agentic
-            || self.server.frontier_quality_floor.complex.agentic
-                > self.server.frontier_quality_floor.very_complex.agentic
-            || !valid_quality_floor(self.server.free_quality_floor.simple.general)
-            || !valid_quality_floor(self.server.free_quality_floor.simple.coding)
-            || !valid_quality_floor(self.server.free_quality_floor.simple.agentic)
-            || !valid_quality_floor(self.server.free_quality_floor.medium.general)
-            || !valid_quality_floor(self.server.free_quality_floor.medium.coding)
-            || !valid_quality_floor(self.server.free_quality_floor.medium.agentic)
-            || !valid_quality_floor(self.server.free_quality_floor.complex.general)
-            || !valid_quality_floor(self.server.free_quality_floor.complex.coding)
-            || !valid_quality_floor(self.server.free_quality_floor.complex.agentic)
-            || !valid_quality_floor(self.server.free_quality_floor.very_complex.general)
-            || !valid_quality_floor(self.server.free_quality_floor.very_complex.coding)
-            || !valid_quality_floor(self.server.free_quality_floor.very_complex.agentic)
-            || self.server.free_quality_floor.simple.general
-                > self.server.free_quality_floor.medium.general
-            || self.server.free_quality_floor.medium.general
-                > self.server.free_quality_floor.complex.general
-            || self.server.free_quality_floor.complex.general
-                > self.server.free_quality_floor.very_complex.general
-            || self.server.free_quality_floor.simple.coding
-                > self.server.free_quality_floor.medium.coding
-            || self.server.free_quality_floor.medium.coding
-                > self.server.free_quality_floor.complex.coding
-            || self.server.free_quality_floor.complex.coding
-                > self.server.free_quality_floor.very_complex.coding
-            || self.server.free_quality_floor.simple.agentic
-                > self.server.free_quality_floor.medium.agentic
-            || self.server.free_quality_floor.medium.agentic
-                > self.server.free_quality_floor.complex.agentic
-            || self.server.free_quality_floor.complex.agentic
-                > self.server.free_quality_floor.very_complex.agentic
             || !valid_quality_floor(self.server.efficient_quality_floor)
             || !valid_quality_floor(self.server.balanced_quality_floor)
             || !valid_quality_floor(self.server.frontier_quality_floor_single)
         {
             return Err(ConfigError::Invalid(
-                "benchmark age and ordered quality floors must be valid (0-100)".to_owned(),
+                "benchmark age and quality floors must be valid (0-100)".to_owned(),
             ));
         }
         if self
@@ -835,9 +671,6 @@ fn apply_provider_environment_overrides(config: &mut Config) -> Result<(), Confi
                     .collect();
             }
         }
-        let preview_variable = variable("ALLOW_PREVIEW_MODELS");
-        apply_env_bool(&preview_variable, &mut provider.allow_preview_models)?;
-
         let base_url_variable = variable("BASE_URL");
         if let Ok(value) = env::var(&base_url_variable) {
             provider.base_url = value;
@@ -1058,54 +891,6 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
     apply_env_u64(
         "MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS",
         &mut server.benchmark_max_age_seconds,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_SIMPLE_GENERAL",
-        &mut server.quality_floor.simple.general,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_SIMPLE_CODING",
-        &mut server.quality_floor.simple.coding,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_SIMPLE_AGENTIC",
-        &mut server.quality_floor.simple.agentic,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_MEDIUM_GENERAL",
-        &mut server.quality_floor.medium.general,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_MEDIUM_CODING",
-        &mut server.quality_floor.medium.coding,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_MEDIUM_AGENTIC",
-        &mut server.quality_floor.medium.agentic,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_COMPLEX_GENERAL",
-        &mut server.quality_floor.complex.general,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_COMPLEX_CODING",
-        &mut server.quality_floor.complex.coding,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_COMPLEX_AGENTIC",
-        &mut server.quality_floor.complex.agentic,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_VERY_COMPLEX_GENERAL",
-        &mut server.quality_floor.very_complex.general,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_VERY_COMPLEX_CODING",
-        &mut server.quality_floor.very_complex.coding,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_VERY_COMPLEX_AGENTIC",
-        &mut server.quality_floor.very_complex.agentic,
     )?;
     apply_env_bool(
         "MODEL_GATEWAY_AUTO_FRONTIER_ENABLED",
@@ -1526,20 +1311,8 @@ const fn default_benchmark_max_age_seconds() -> u64 {
     604_800
 }
 
-const fn default_quality_floor_general() -> f64 {
-    40.0
-}
-
-const fn default_quality_floor_coding() -> f64 {
-    35.0
-}
-
-const fn default_quality_floor_agentic() -> f64 {
-    25.0
-}
-
 const fn default_free_quality_min_composite() -> f64 {
-    25.0
+    30.0
 }
 
 const fn default_free_quality_min_context() -> u64 {
@@ -1567,15 +1340,15 @@ const fn default_true() -> bool {
 }
 
 const fn default_efficient_quality_floor() -> f64 {
-    40.0
+    35.0
 }
 
 const fn default_balanced_quality_floor() -> f64 {
-    60.0
+    42.0
 }
 
 const fn default_frontier_quality_floor() -> f64 {
-    80.0
+    50.0
 }
 
 const fn default_connect_timeout_seconds() -> u64 {
@@ -1620,7 +1393,6 @@ mod tests {
             model_denylist: Vec::new(),
             quotas: Vec::new(),
             model_mappings: BTreeMap::new(),
-            allow_preview_models: false,
         }
     }
 
@@ -1744,7 +1516,7 @@ mod tests {
     #[test]
     fn free_models_quality_bar_defaults_are_permissive() {
         let quality = super::FreeModelsQualityBar::default();
-        assert_eq!(quality.min_composite_quality, 25.0);
+        assert_eq!(quality.min_composite_quality, 30.0);
         assert_eq!(quality.max_age_months, 18);
         assert_eq!(quality.max_input_price_per_million, 2.0);
         assert_eq!(quality.max_output_price_per_million, 10.0);
@@ -1938,16 +1710,16 @@ mod tests {
             max_output_price_per_million: 0.0,
         };
 
-        // composite = 0.5*28 + 0.3*20 + 0.2*12 = 22.4 < 25
-        let low = BenchmarkModel::fixture("low", 28.0, 20.0, 12.0, 1.0, 1.0);
+        // composite = 0.80*20 + 0.10*20 + 0.10*12 = 19.2 < 25
+        let low = BenchmarkModel::fixture("low", 20.0, 20.0, 12.0, 1.0, 1.0);
         assert!(!bar.passes(Some(&low), 9999999999, None, None, None, "test"));
 
-        // composite = 0.5*28 + 0.3*38 + 0.2*12 = 27.8 >= 25
+        // composite = 0.80*28 + 0.10*38 + 0.10*12 = 27.4 >= 25
         let mid = BenchmarkModel::fixture("mid", 28.0, 38.0, 12.0, 1.0, 1.0);
         assert!(bar.passes(Some(&mid), 9999999999, None, None, None, "test"));
 
-        // composite = 0.5*20 + 0.3*38 + 0.2*18 = 25.0 >= 25
-        let exact = BenchmarkModel::fixture("exact", 20.0, 38.0, 18.0, 1.0, 1.0);
+        // composite = 0.80*28 + 0.10*20 + 0.10*40 = 28.4 >= 25
+        let exact = BenchmarkModel::fixture("exact", 28.0, 20.0, 40.0, 1.0, 1.0);
         assert!(bar.passes(Some(&exact), 9999999999, None, None, None, "test"));
     }
 
@@ -1996,7 +1768,7 @@ mod tests {
         apply_server_environment_overrides(&mut config.server).expect("overrides");
         assert_eq!(
             config.server.free_models_quality.min_composite_quality,
-            25.0
+            30.0
         );
 
         unsafe {
@@ -2227,11 +1999,7 @@ mod tests {
                 .iter()
                 .any(|quota| quota.kind == QuotaKind::CostMicrousd)
         );
-        assert!(
-            config.server.frontier_quality_floor.simple.general
-                < config.server.frontier_quality_floor.complex.general
-        );
-        assert!(openrouter.allow_preview_models);
+        assert!(config.server.frontier_quality_floor_single > 0.0);
     }
 
     #[test]

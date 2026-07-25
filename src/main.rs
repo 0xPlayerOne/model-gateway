@@ -626,6 +626,9 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
     if config.server.auto_efficient_enabled {
         routes.push("auto-efficient");
     }
+    if config.server.auto_balanced_enabled {
+        routes.push("auto-balanced");
+    }
     if config.server.auto_frontier_enabled {
         routes.push("auto-frontier");
     }
