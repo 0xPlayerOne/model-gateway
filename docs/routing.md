@@ -54,7 +54,7 @@ Relays the only model reported by an OpenAI-compatible endpoint. Default endpoin
 Selects the best free model. Filter + rank pipeline:
 
 1. **`free_candidates`** — models from `catalog_models WHERE is_free = 1`
-2. **Quality bar** — `free_models_quality.passes()` filters by minimum quality per task, max age, max price, min context length, min model size
+2. **Quality bar** — `free_models_quality.passes()` filters by minimum composite quality (default 25), max age, max price ($2 input, $10 output), min context length, min model size
 3. **Composite quality** — `composite_quality()` for Pareto ranking
 4. **Pareto ranking** — `pareto_rank(composite_quality, cost=0, latency)`
    - For free models (cost=0), degenerates to quality vs latency

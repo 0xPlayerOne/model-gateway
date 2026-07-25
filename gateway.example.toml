@@ -59,8 +59,8 @@ agentic = 85.0
 [server.free_models_quality]
 min_composite_quality = 25.0
 max_age_months = 18
-max_input_price_per_million = 5.0
-max_output_price_per_million = 15.0
+max_input_price_per_million = 2.0
+max_output_price_per_million = 10.0
 
 [providers.openrouter]
 profile = "open_router"
