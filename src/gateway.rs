@@ -20,13 +20,11 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
 
 use crate::benchmarks::{
-    BenchmarkImport, BenchmarkModel, Complexity, ScoredCandidate, TaskKind, classify,
-    composite_quality, is_frontier_model, is_preview_model, pareto_rank, parse_artificial_analysis,
-    quality_for,
+    BenchmarkImport, BenchmarkModel, ScoredCandidate, TaskKind, classify, composite_quality,
+    pareto_rank, parse_artificial_analysis, quality_for,
 };
 use crate::config::{
-    BillingMode, Config, ProviderConfig, ProviderProfileId, QuotaKind, ServerConfig, TargetConfig,
-    TieredQualityFloors,
+    BillingMode, Config, ProviderConfig, ProviderProfileId, ServerConfig, TargetConfig,
 };
 use crate::providers::prepare_request;
 use crate::routing::{
@@ -284,6 +282,44 @@ fn find_benchmark_raw<'a>(
     best_exact.or(best_fallback).map(|(b, _, _)| b)
 }
 
+fn find_all_matching_benchmarks<'a>(
+    benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
+    model: &str,
+) -> Vec<&'a BenchmarkModel> {
+    let mut exact: Vec<&'a BenchmarkModel> = Vec::new();
+    let mut fuzzy: Vec<&'a BenchmarkModel> = Vec::new();
+    for (benchmark_id, models) in benchmarks {
+        if is_exact_benchmark_match(model, benchmark_id) {
+            exact.extend(models);
+        } else if benchmark_ids_match(model, benchmark_id) {
+            fuzzy.extend(models);
+        }
+    }
+    if !exact.is_empty() {
+        return exact;
+    }
+    if !fuzzy.is_empty() {
+        return fuzzy;
+    }
+    let stripped = strip_model_noise(model);
+    if stripped != normalize_identifier(model) {
+        for (benchmark_id, models) in benchmarks {
+            if is_exact_benchmark_match(&stripped, benchmark_id) {
+                exact.extend(models);
+            } else if benchmark_ids_match(&stripped, benchmark_id) {
+                fuzzy.extend(models);
+            }
+        }
+        if !exact.is_empty() {
+            return exact;
+        }
+        if !fuzzy.is_empty() {
+            return fuzzy;
+        }
+    }
+    Vec::new()
+}
+
 fn is_exact_benchmark_match(catalog_id: &str, benchmark_id: &str) -> bool {
     let catalog_variants = normalized_identifier_variants(catalog_id);
     let benchmark_variants = normalized_identifier_variants(benchmark_id);
@@ -521,7 +557,6 @@ async fn list_providers(
             "free_model_count": free_model_count,
             "model_allowlist_count": config.model_allowlist.len(),
             "model_denylist_count": config.model_denylist.len(),
-            "allow_preview_models": config.allow_preview_models,
             "available": runtime.available,
         }));
     }
@@ -546,7 +581,6 @@ async fn list_providers(
                 "free_model_count": 0,
                 "model_allowlist_count": 0,
                 "model_denylist_count": 0,
-                "allow_preview_models": false,
                 "available": false,
             }));
         }
@@ -663,6 +697,10 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
                 ) && !is_provider_auto_route(&offering.model)
                 {
                     catalog_paid_models.insert((offering.provider.clone(), offering.model.clone()));
+                    catalog_paid_models.insert((
+                        offering.provider.clone(),
+                        format!("{}/{}", offering.provider, offering.model),
+                    ));
                 }
             }
         }
@@ -755,19 +793,7 @@ struct RankingQuery {
 
 #[derive(Debug, Deserialize)]
 struct AutoModelsQuery {
-    task: Option<String>,
     route: Option<String>,
-}
-
-impl AutoModelsQuery {
-    fn task_filter(&self) -> Option<TaskKind> {
-        match self.task.as_deref() {
-            Some("general") => Some(TaskKind::General),
-            Some("coding") => Some(TaskKind::Coding),
-            Some("agentic") => Some(TaskKind::Agentic),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -896,36 +922,6 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
         .collect()
 }
 
-fn model_entry(
-    quality: f64,
-    cost: u64,
-    latency: f64,
-    model: &str,
-    creator: &Option<String>,
-    input_price: Option<f64>,
-    output_price: Option<f64>,
-) -> Value {
-    json!({
-        "model": model,
-        "creator": creator,
-        "quality": quality,
-        "expected_cost_microusd": cost,
-        "latency_seconds": latency,
-        "input_price_per_million": input_price,
-        "output_price_per_million": output_price,
-    })
-}
-
-fn cost_microusd(input: Option<f64>, output: Option<f64>) -> u64 {
-    match (input, output) {
-        (Some(input), Some(output)) => {
-            let c = (1000.0 * input + 500.0 * output) / 1_000_000.0 * 1_000_000.0;
-            (c.max(0.0) as u64).max(1)
-        }
-        _ => 0,
-    }
-}
-
 struct CatalogModelEntry<'a> {
     offering: &'a CatalogOffering,
     benchmark: Option<&'a BenchmarkModel>,
@@ -973,240 +969,345 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
     })
 }
 
-fn pick_two<T>(
-    mut scored: Vec<ScoredCandidate<T>>,
-) -> (Option<ScoredCandidate<T>>, Option<ScoredCandidate<T>>) {
-    scored = pareto_rank(scored);
-    scored.sort_by(|a, b| {
-        a.expected_cost_microusd
-            .cmp(&b.expected_cost_microusd)
-            .then_with(|| a.latency_seconds.total_cmp(&b.latency_seconds))
-            .then_with(|| b.quality.total_cmp(&a.quality))
-    });
-    let mut iter = scored.into_iter();
-    let primary = iter.next();
-    let fallback = iter.next();
-    (primary, fallback)
+struct ModelCandidate {
+    quality: Option<f64>,
+    benchmark: Option<BenchmarkModel>,
+    offering: CatalogOffering,
 }
 
-fn select_efficient_for_tier(
-    models: &[BenchmarkModel],
-    task: TaskKind,
-    quality_floor: f64,
-) -> Option<(Value, Option<Value>)> {
-    let scored: Vec<ScoredCandidate<&BenchmarkModel>> = models
-        .iter()
-        .filter_map(|model| {
-            let quality = quality_for(model, task)?;
-            if quality < quality_floor {
-                return None;
-            }
-            let cost = cost_microusd(
-                model.input_price_per_million,
-                model.output_price_per_million,
-            );
-            let latency = model.latency_seconds.unwrap_or(f64::MAX);
-            Some(ScoredCandidate {
-                quality,
-                expected_cost_microusd: cost,
-                latency_seconds: latency,
-                value: model,
-            })
-        })
-        .collect();
-    let (primary, fallback) = pick_two(scored);
-    primary.map(|p| {
-        let primary_entry = model_entry(
-            p.quality,
-            p.expected_cost_microusd,
-            p.latency_seconds,
-            &p.value.id,
-            &p.value.creator,
-            p.value.input_price_per_million,
-            p.value.output_price_per_million,
-        );
-        let fallback_entry = fallback.map(|f| {
-            model_entry(
-                f.quality,
-                f.expected_cost_microusd,
-                f.latency_seconds,
-                &f.value.id,
-                &f.value.creator,
-                f.value.input_price_per_million,
-                f.value.output_price_per_million,
-            )
-        });
-        (primary_entry, fallback_entry)
-    })
-}
-
-fn select_free_for_tier(
+fn collect_free_candidates(
     offerings: &[CatalogOffering],
-    benchmark_map: &BTreeMap<String, Vec<BenchmarkModel>>,
+    benchmark_by_model: &BTreeMap<String, Vec<BenchmarkModel>>,
     providers: &BTreeMap<String, ProviderConfig>,
     runtimes: &BTreeMap<String, ProviderRuntime>,
-    server: &ServerConfig,
-    task: TaskKind,
-    quality_floor: f64,
-) -> Option<(Value, Option<Value>)> {
-    let scored: Vec<ScoredCandidate<(&str, &str)>> = offerings
-        .iter()
-        .filter_map(|offering| {
-            let provider = providers.get(&offering.provider)?;
-            let runtime = runtimes.get(&offering.provider)?;
-            if !runtime.available {
-                return None;
+    cfg: &ServerConfig,
+    provider_filter: Option<&str>,
+) -> Vec<ModelCandidate> {
+    let mut candidates = Vec::new();
+    for offering in offerings {
+        if provider_filter.is_some_and(|p| p != offering.provider) {
+            continue;
+        }
+        let Some(provider) = providers.get(&offering.provider) else {
+            continue;
+        };
+        let Some(runtime) = runtimes.get(&offering.provider) else {
+            continue;
+        };
+        if !runtime.available
+            || (!provider.model_allowlist.is_empty()
+                && !provider
+                    .model_allowlist
+                    .iter()
+                    .any(|m| m == &offering.model))
+            || provider.model_denylist.iter().any(|m| m == &offering.model)
+        {
+            continue;
+        }
+        if is_model_denied(&offering.model, &offering.provider, cfg) {
+            continue;
+        }
+        let canonical = provider
+            .model_mappings
+            .get(&offering.model)
+            .cloned()
+            .unwrap_or_else(|| offering.model.clone());
+        let matching = find_all_matching_benchmarks(benchmark_by_model, &canonical);
+        if !cfg.free_models_quality.passes(
+            matching.first().copied(),
+            offering.refreshed_at,
+            offering.input_price_per_million,
+            offering.output_price_per_million,
+            offering.context_length,
+            &canonical,
+        ) {
+            continue;
+        }
+        if matching.is_empty() {
+            candidates.push(ModelCandidate {
+                quality: None,
+                benchmark: None,
+                offering: offering.clone(),
+            });
+        } else {
+            for benchmark in matching {
+                let Some(quality) = composite_quality(benchmark) else {
+                    continue;
+                };
+                candidates.push(ModelCandidate {
+                    quality: Some(quality),
+                    benchmark: Some(benchmark.clone()),
+                    offering: offering.clone(),
+                });
             }
-            let canonical = provider
-                .model_mappings
-                .get(&offering.model)
-                .map(String::as_str)
-                .unwrap_or(&offering.model);
-            let benchmark = find_benchmark(benchmark_map, canonical, task);
-            let quality = benchmark.and_then(|b| quality_for(b, task))?;
-            if quality < quality_floor {
-                return None;
-            }
-            if !server.free_models_quality.passes(
-                task,
-                benchmark,
-                offering.refreshed_at,
-                offering.input_price_per_million,
-                offering.output_price_per_million,
-                offering.context_length,
-                canonical,
-            ) {
-                return None;
-            }
-            let latency = benchmark
-                .and_then(|b| b.latency_seconds)
-                .unwrap_or(f64::MAX);
-            Some(ScoredCandidate {
-                quality,
-                expected_cost_microusd: 0,
-                latency_seconds: latency,
-                value: (offering.model.as_str(), offering.provider.as_str()),
-            })
-        })
-        .collect();
-    let (primary, fallback) = pick_two(scored);
-    primary.map(|p| {
-        let primary_entry = json!({
-            "model": p.value.0, "provider": p.value.1,
-            "quality": p.quality, "latency_seconds": p.latency_seconds,
-        });
-        let fallback_entry = fallback.map(|f| {
-            json!({
-                "model": f.value.0, "provider": f.value.1,
-                "quality": f.quality, "latency_seconds": f.latency_seconds,
-            })
-        });
-        (primary_entry, fallback_entry)
-    })
+        }
+    }
+    candidates
 }
 
-fn build_tier_routes(
-    tasks: &[TaskKind],
-    task_filter: Option<TaskKind>,
-    complexities: &[Complexity],
-    floors: &TieredQualityFloors,
-    select: impl Fn(TaskKind, Complexity, f64) -> Option<(Value, Option<Value>)>,
-) -> Value {
-    let mut result = json!({});
-    for &task in tasks {
-        if let Some(filter) = task_filter {
-            if task != filter {
-                continue;
-            }
+fn collect_paid_candidates(
+    offerings: &[CatalogOffering],
+    benchmark_by_model: &BTreeMap<String, Vec<BenchmarkModel>>,
+    providers: &BTreeMap<String, ProviderConfig>,
+    runtimes: &BTreeMap<String, ProviderRuntime>,
+    cfg: &ServerConfig,
+    provider_filter: Option<&str>,
+) -> Vec<ModelCandidate> {
+    let mut candidates = Vec::new();
+    for offering in offerings {
+        if provider_filter.is_some_and(|p| p != offering.provider) {
+            continue;
         }
-        let task_key = task.as_str();
-        let mut entries = Vec::new();
-        for &complexity in complexities {
-            let floor = floors.floor_for(task, complexity);
-            if let Some((primary, fallback)) = select(task, complexity, floor) {
-                let mut entry = json!({
-                    "complexity": complexity.as_str(),
-                    "quality_floor": floor,
-                    "primary": primary,
+        let Some(provider) = providers.get(&offering.provider) else {
+            continue;
+        };
+        let Some(runtime) = runtimes.get(&offering.provider) else {
+            continue;
+        };
+        if !runtime.available
+            || offering.is_free
+            || !matches!(
+                provider.billing_mode,
+                BillingMode::Paid | BillingMode::Subscription
+            )
+            || (!provider.model_allowlist.is_empty()
+                && !provider
+                    .model_allowlist
+                    .iter()
+                    .any(|m| m == &offering.model))
+            || provider.model_denylist.iter().any(|m| m == &offering.model)
+        {
+            continue;
+        }
+        if is_model_denied(&offering.model, &offering.provider, cfg) {
+            continue;
+        }
+        let canonical = provider
+            .model_mappings
+            .get(&offering.model)
+            .cloned()
+            .unwrap_or_else(|| offering.model.clone());
+        let matching = find_all_matching_benchmarks(benchmark_by_model, &canonical);
+        if matching.is_empty() {
+            candidates.push(ModelCandidate {
+                quality: None,
+                benchmark: None,
+                offering: offering.clone(),
+            });
+        } else {
+            for benchmark in matching {
+                let Some(quality) = composite_quality(benchmark) else {
+                    continue;
+                };
+                candidates.push(ModelCandidate {
+                    quality: Some(quality),
+                    benchmark: Some(benchmark.clone()),
+                    offering: offering.clone(),
                 });
-                if let Some(fb) = fallback {
-                    entry["fallback"] = fb;
-                }
-                entries.push(entry);
             }
         }
-        result[task_key] = json!(entries);
     }
-    result
+    candidates
 }
 
 async fn list_auto_models(
     State(state): State<AppState>,
     Query(query): Query<AutoModelsQuery>,
 ) -> Response {
-    let tasks = [TaskKind::General, TaskKind::Coding, TaskKind::Agentic];
-    let complexities = [
-        Complexity::Simple,
-        Complexity::Medium,
-        Complexity::Complex,
-        Complexity::VeryComplex,
-    ];
-    let task_filter = query.task_filter();
-
     let cfg = &state.config.server;
-
     let benchmark_max_age = cfg.benchmark_max_age_seconds;
     let catalog_max_age = cfg.catalog_max_age_seconds;
 
-    let (benchmarks, free_offerings) = match tokio::try_join!(
-        routing_operation(state.routing.clone(), move |routing| routing.benchmark_models(benchmark_max_age)),
-        routing_operation(state.routing.clone(), move |routing| routing.free_candidates(catalog_max_age)),
+    let (free_offerings, paid_offerings, benchmarks) = match tokio::try_join!(
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.free_candidates(catalog_max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.all_candidates(catalog_max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.benchmark_models(benchmark_max_age)
+        }),
     ) {
         Ok(v) => v,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": {"message": "routing unavailable", "type": "server_error", "code": "routing_unavailable"}}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "routing unavailable", "type": "server_error", "code": "routing_unavailable"}})),
+            )
+                .into_response();
+        }
     };
 
-    let mut benchmark_map = BTreeMap::new();
-    for b in &benchmarks {
-        benchmark_map
-            .entry(b.id.clone())
-            .or_insert_with(Vec::new)
-            .push(b.clone());
+    let mut benchmark_by_model = BTreeMap::<String, Vec<BenchmarkModel>>::new();
+    for benchmark in &benchmarks {
+        benchmark_by_model
+            .entry(benchmark.id.clone())
+            .or_default()
+            .push(benchmark.clone());
     }
+
+    let free_candidates = collect_free_candidates(
+        &free_offerings,
+        &benchmark_by_model,
+        &state.config.providers,
+        &state.providers,
+        cfg,
+        None,
+    );
+    let paid_candidates = collect_paid_candidates(
+        &paid_offerings,
+        &benchmark_by_model,
+        &state.config.providers,
+        &state.providers,
+        cfg,
+        None,
+    );
 
     let mut routes = BTreeMap::new();
 
-    if query.route.as_deref().is_none_or(|r| r == "efficient") {
-        routes.insert("efficient".to_owned(), json!({
-            "label": "Auto-Efficient",
-            "tiers": {
-                "simple": {"quality_floor": cfg.quality_floor.floor_for(TaskKind::General, Complexity::Simple)},
-                "medium": {"quality_floor": cfg.quality_floor.floor_for(TaskKind::General, Complexity::Medium)},
-                "complex": {"quality_floor": cfg.quality_floor.floor_for(TaskKind::General, Complexity::Complex)},
-                "very_complex": {"quality_floor": cfg.quality_floor.floor_for(TaskKind::General, Complexity::VeryComplex)}
-            },
-            "routing": build_tier_routes(&tasks, task_filter, &complexities, &cfg.quality_floor, |task, _complexity, floor| {
-                select_efficient_for_tier(&benchmarks, task, floor)
-            })
-        }));
+    if query.route.as_deref().is_none_or(|r| r == "free") && cfg.auto_free_enabled {
+        routes.insert(
+            "free".to_owned(),
+            select_mode_models(
+                &free_candidates,
+                "auto-free",
+                "Auto-Free",
+                cfg.free_models_quality.min_composite_quality,
+                None,
+            ),
+        );
     }
 
-    if query.route.as_deref().is_none_or(|r| r == "free") {
-        routes.insert("free".to_owned(), json!({
-            "label": "Auto-Free",
-            "tiers": {
-                "simple": {"quality_floor": cfg.free_quality_floor.floor_for(TaskKind::General, Complexity::Simple)},
-                "medium": {"quality_floor": cfg.free_quality_floor.floor_for(TaskKind::General, Complexity::Medium)},
-                "complex": {"quality_floor": cfg.free_quality_floor.floor_for(TaskKind::General, Complexity::Complex)},
-                "very_complex": {"quality_floor": cfg.free_quality_floor.floor_for(TaskKind::General, Complexity::VeryComplex)}
-            },
-            "routing": build_tier_routes(&tasks, task_filter, &complexities, &cfg.free_quality_floor, |task, _complexity, floor| {
-                select_free_for_tier(&free_offerings, &benchmark_map, &state.config.providers, &state.providers, cfg, task, floor)
-            })
-        }));
+    if query.route.as_deref().is_none_or(|r| r == "efficient") && cfg.auto_efficient_enabled {
+        routes.insert(
+            "efficient".to_owned(),
+            select_mode_models(
+                &paid_candidates,
+                "auto-efficient",
+                "Auto-Efficient",
+                cfg.efficient_quality_floor,
+                Some(cfg.balanced_quality_floor),
+            ),
+        );
+    }
+
+    if query.route.as_deref().is_none_or(|r| r == "balanced") && cfg.auto_balanced_enabled {
+        routes.insert(
+            "balanced".to_owned(),
+            select_mode_models(
+                &paid_candidates,
+                "auto-balanced",
+                "Auto-Balanced",
+                cfg.balanced_quality_floor,
+                Some(cfg.frontier_quality_floor_single),
+            ),
+        );
+    }
+
+    if query.route.as_deref().is_none_or(|r| r == "frontier") && cfg.auto_frontier_enabled {
+        routes.insert(
+            "frontier".to_owned(),
+            select_mode_models(
+                &paid_candidates,
+                "auto-frontier",
+                "Auto-Frontier",
+                cfg.frontier_quality_floor_single,
+                None,
+            ),
+        );
     }
 
     Json(json!({"object": "auto_models", "routes": routes})).into_response()
+}
+
+fn select_mode_models(
+    candidates: &[ModelCandidate],
+    mode: &str,
+    label: &str,
+    quality_floor: f64,
+    quality_ceiling: Option<f64>,
+) -> Value {
+    let mut scored: Vec<ScoredCandidate<(&str, &str)>> = Vec::new();
+
+    for candidate in candidates {
+        let Some(quality) = candidate.quality else {
+            continue;
+        };
+        if quality < quality_floor {
+            continue;
+        }
+        if quality_ceiling.is_some_and(|ceiling| quality >= ceiling) {
+            continue;
+        }
+        let benchmark = candidate.benchmark.as_ref();
+        let latency = benchmark
+            .and_then(|b| b.latency_seconds)
+            .unwrap_or(f64::MAX);
+        let expected_cost_microusd = match (
+            candidate
+                .offering
+                .input_price_per_million
+                .or_else(|| benchmark.and_then(|b| b.input_price_per_million)),
+            candidate
+                .offering
+                .output_price_per_million
+                .or_else(|| benchmark.and_then(|b| b.output_price_per_million)),
+        ) {
+            (Some(input_price), Some(output_price)) => expected_cost_microusd(
+                256,
+                benchmark
+                    .and_then(|b| b.output_tokens_per_task)
+                    .unwrap_or(256)
+                    .min(256),
+                input_price,
+                output_price,
+            ),
+            _ => continue,
+        };
+        scored.push(ScoredCandidate {
+            quality,
+            expected_cost_microusd,
+            latency_seconds: latency,
+            value: (
+                candidate.offering.model.as_str(),
+                candidate.offering.provider.as_str(),
+            ),
+        });
+    }
+
+    let mut ranked = pareto_rank(scored);
+    ranked.sort_by(|a, b| {
+        a.expected_cost_microusd
+            .cmp(&b.expected_cost_microusd)
+            .then_with(|| a.latency_seconds.total_cmp(&b.latency_seconds))
+            .then_with(|| b.quality.total_cmp(&a.quality))
+    });
+
+    let mut iter = ranked.into_iter();
+    let primary = iter.next();
+    let fallbacks: Vec<Value> = iter.take(2).map(|f| mode_model_entry(&f)).collect();
+
+    let primary_entry = primary.map(|p| mode_model_entry(&p));
+
+    json!({
+        "label": label,
+        "enabled": true,
+        "mode": mode,
+        "quality_floor": quality_floor,
+        "primary": primary_entry,
+        "fallbacks": fallbacks,
+    })
+}
+
+fn mode_model_entry(candidate: &ScoredCandidate<(&str, &str)>) -> Value {
+    json!({
+        "model": candidate.value.0,
+        "provider": candidate.value.1,
+        "quality": candidate.quality,
+        "expected_cost_microusd": candidate.expected_cost_microusd,
+        "latency_seconds": candidate.latency_seconds,
+    })
 }
 
 async fn list_free_models(
@@ -1286,63 +1387,24 @@ async fn list_free_models(
             .push(b.clone());
     }
 
+    let candidates = collect_free_candidates(
+        &offerings,
+        &benchmark_map,
+        &state.config.providers,
+        &state.providers,
+        &state.config.server,
+        provider_filter,
+    );
+
     let mut providers = BTreeMap::new();
     let mut data = Vec::new();
 
-    for offering in &offerings {
-        if provider_filter.is_some_and(|provider| provider != offering.provider) {
-            continue;
-        }
-        let Some(config) = state.config.providers.get(&offering.provider) else {
+    for candidate in &candidates {
+        let Some(config) = state.config.providers.get(&candidate.offering.provider) else {
             continue;
         };
-        let Some(runtime) = state.providers.get(&offering.provider) else {
-            continue;
-        };
-        if !runtime.available
-            || (!config.model_allowlist.is_empty()
-                && !config
-                    .model_allowlist
-                    .iter()
-                    .any(|model| model == &offering.model))
-            || config
-                .model_denylist
-                .iter()
-                .any(|model| model == &offering.model)
-        {
-            continue;
-        }
-        if is_model_denied(&offering.model, &offering.provider, &state.config.server) {
-            continue;
-        }
 
-        let canonical = config
-            .model_mappings
-            .get(&offering.model)
-            .map(String::as_str)
-            .unwrap_or(&offering.model);
-        let benchmark = find_benchmark(&benchmark_map, canonical, task);
-        let quality = benchmark.and_then(|benchmark| quality_for(benchmark, task));
-
-        let effective_input = offering
-            .input_price_per_million
-            .or_else(|| benchmark.and_then(|b| b.input_price_per_million));
-        let effective_output = offering
-            .output_price_per_million
-            .or_else(|| benchmark.and_then(|b| b.output_price_per_million));
-        if !state.config.server.free_models_quality.passes(
-            task,
-            benchmark,
-            offering.refreshed_at,
-            effective_input,
-            effective_output,
-            offering.context_length,
-            canonical,
-        ) {
-            continue;
-        }
-
-        let reference = quota_reference(config, &offering.model);
+        let reference = quota_reference(config, &candidate.offering.model);
         let limits = reference
             .as_ref()
             .map(|r| r.rules.clone())
@@ -1350,11 +1412,11 @@ async fn list_free_models(
         let limit_kind = reference.as_ref().map(|r| r.as_of).unwrap_or("unknown");
         let source_url = reference.as_ref().map(|r| r.source_url);
 
-        providers.entry(offering.provider.clone()).or_insert_with(|| {
+        providers.entry(candidate.offering.provider.clone()).or_insert_with(|| {
             json!({
                 "name": config.profile
                     .map(|profile| profile.definition().display_name.to_owned())
-                    .unwrap_or_else(|| offering.provider.clone()),
+                    .unwrap_or_else(|| candidate.offering.provider.clone()),
                 "billing_mode": match config.billing_mode {
                     BillingMode::Free => "free",
                     BillingMode::Paid => "paid",
@@ -1371,9 +1433,9 @@ async fn list_free_models(
         });
 
         data.push((
-            quality,
-            benchmark.cloned(),
-            offering.clone(),
+            candidate.quality,
+            candidate.benchmark.clone(),
+            candidate.offering.clone(),
             limit_kind,
             source_url,
         ));
@@ -1552,53 +1614,25 @@ async fn list_paid_models(
             .push(b.clone());
     }
 
+    let candidates = collect_paid_candidates(
+        &offerings,
+        &benchmark_map,
+        &state.config.providers,
+        &state.providers,
+        &state.config.server,
+        provider_filter,
+    );
+
     let mut providers = BTreeMap::new();
     let mut data = Vec::new();
 
-    for offering in &offerings {
-        if provider_filter.is_some_and(|provider| provider != offering.provider) {
-            continue;
-        }
-        let Some(config) = state.config.providers.get(&offering.provider) else {
+    for candidate in &candidates {
+        let Some(config) = state.config.providers.get(&candidate.offering.provider) else {
             continue;
         };
-        let Some(runtime) = state.providers.get(&offering.provider) else {
-            continue;
-        };
-        if !runtime.available
-            || !matches!(
-                config.billing_mode,
-                BillingMode::Paid | BillingMode::Subscription
-            )
-            || (!config.model_allowlist.is_empty()
-                && !config
-                    .model_allowlist
-                    .iter()
-                    .any(|model| model == &offering.model))
-            || config
-                .model_denylist
-                .iter()
-                .any(|model| model == &offering.model)
-        {
-            continue;
-        }
-        if offering.is_free {
-            continue;
-        }
-        if is_model_denied(&offering.model, &offering.provider, &state.config.server) {
-            continue;
-        }
-
-        let canonical = config
-            .model_mappings
-            .get(&offering.model)
-            .map(String::as_str)
-            .unwrap_or(&offering.model);
-        let benchmark = find_benchmark(&benchmark_map, canonical, task);
-        let quality = benchmark.and_then(|benchmark| quality_for(benchmark, task));
 
         providers
-            .entry(offering.provider.clone())
+            .entry(candidate.offering.provider.clone())
             .or_insert_with(|| {
                 let billing_label = match config.billing_mode {
                     BillingMode::Paid => "paid",
@@ -1608,12 +1642,16 @@ async fn list_paid_models(
                 json!({
                     "name": config.profile
                         .map(|profile| profile.definition().display_name.to_owned())
-                        .unwrap_or_else(|| offering.provider.clone()),
+                        .unwrap_or_else(|| candidate.offering.provider.clone()),
                     "billing_mode": billing_label,
                 })
             });
 
-        data.push((quality, benchmark.cloned(), offering.clone()));
+        data.push((
+            candidate.quality,
+            candidate.benchmark.clone(),
+            candidate.offering.clone(),
+        ));
     }
 
     let mut seen = std::collections::HashSet::new();
@@ -1842,7 +1880,6 @@ async fn chat_completions(
     };
     let mut attempts = 0usize;
     let mut last_error = None;
-    let mut frontier_exhaustion_code = None;
     let mut targets = targets;
     let mut target_index = 0;
     while target_index < targets.len() {
@@ -1866,18 +1903,7 @@ async fn chat_completions(
             .await
             {
                 Ok(ReservationOutcome::Reserved(token)) => reservation = Some(token),
-                Ok(ReservationOutcome::Cooldown) => {
-                    frontier_exhaustion_code.get_or_insert("frontier_all_candidates_unhealthy");
-                    continue;
-                }
-                Ok(ReservationOutcome::QuotaExceeded(QuotaKind::CostMicrousd)) => {
-                    frontier_exhaustion_code = Some("frontier_spend_cap_reached");
-                    continue;
-                }
-                Ok(ReservationOutcome::QuotaExceeded(_)) => {
-                    if frontier_exhaustion_code != Some("frontier_spend_cap_reached") {
-                        frontier_exhaustion_code = Some("frontier_quota_exhausted");
-                    }
+                Ok(ReservationOutcome::Cooldown) | Ok(ReservationOutcome::QuotaExceeded(_)) => {
                     continue;
                 }
                 Err(error) => {
@@ -2204,13 +2230,6 @@ async fn chat_completions(
             &provider,
             attempts,
         ),
-        None if model == "auto-frontier" => error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            request_id,
-            "all eligible frontier candidates are exhausted or unhealthy",
-            "upstream_error",
-            Some(frontier_exhaustion_code.unwrap_or("frontier_all_candidates_unhealthy")),
-        ),
         None => error_response(
             StatusCode::BAD_GATEWAY,
             request_id,
@@ -2325,7 +2344,8 @@ async fn resolve_targets(
                 "route_disabled",
             ));
         }
-        return resolve_auto_frontier_targets(state, request, session_hash).await;
+        return resolve_benchmark_targets(state, request, session_hash, BenchmarkPolicy::Frontier)
+            .await;
     }
     if let Some(config) = state.config.models.get(model) {
         return Ok(config
@@ -2470,7 +2490,6 @@ async fn resolve_auto_free_targets(
                 .output_price_per_million
                 .or_else(|| benchmark.and_then(|b| b.output_price_per_million));
             if !state.config.server.free_models_quality.passes(
-                classification.task,
                 benchmark,
                 offering.refreshed_at,
                 effective_input,
@@ -2642,16 +2661,6 @@ async fn resolve_auto_balanced_targets(
     Ok(targets)
 }
 
-async fn resolve_auto_frontier_targets(
-    state: &AppState,
-    request: &Value,
-    session_hash: Option<&str>,
-) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
-    let targets =
-        resolve_benchmark_targets(state, request, session_hash, BenchmarkPolicy::Frontier).await?;
-    Ok(targets)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BenchmarkPolicy {
     Efficient,
@@ -2715,14 +2724,6 @@ async fn resolve_benchmark_targets(
             .push(benchmark);
     }
     let mut candidates = Vec::new();
-    let mut frontier_saw_mapping = false;
-    let mut frontier_saw_identity = false;
-    let mut frontier_saw_billing = false;
-    let mut frontier_saw_available = false;
-    let mut frontier_preview_blocked = false;
-    let mut frontier_reached_capability = false;
-    let mut frontier_saw_capability = false;
-    let mut frontier_saw_quality = false;
     for offering in offerings {
         let Some(provider) = state.config.providers.get(&offering.provider) else {
             continue;
@@ -2750,32 +2751,7 @@ async fn resolve_benchmark_targets(
         let Some(model_benchmarks) = benchmark_by_model.get(canonical) else {
             continue;
         };
-        if policy == BenchmarkPolicy::Frontier {
-            frontier_saw_mapping = true;
-            if !model_benchmarks
-                .iter()
-                .any(|benchmark| is_frontier_model(benchmark.creator.as_deref(), canonical))
-            {
-                continue;
-            }
-            frontier_saw_identity = true;
-            if provider.billing_mode == BillingMode::Free {
-                continue;
-            }
-            frontier_saw_billing = true;
-            if !runtime.available {
-                continue;
-            }
-            frontier_saw_available = true;
-            if (is_preview_model(canonical) || is_preview_model(&offering.model))
-                && !provider.allow_preview_models
-            {
-                frontier_preview_blocked = true;
-                continue;
-            }
-        } else if !runtime.available
-            || (!offering.is_free && provider.billing_mode == BillingMode::Free)
-        {
+        if !runtime.available || offering.is_free || provider.billing_mode == BillingMode::Free {
             continue;
         }
         let capability_mismatch = offering
@@ -2784,17 +2760,11 @@ async fn resolve_benchmark_targets(
             || (requirements.tools && offering.supports_tools != Some(true))
             || (requirements.vision && offering.supports_vision != Some(true))
             || (requirements.structured && offering.supports_structured_output != Some(true));
-        if policy == BenchmarkPolicy::Frontier {
-            frontier_reached_capability = true;
-        }
         if capability_mismatch {
             continue;
         }
         if is_model_denied(&offering.model, &offering.provider, &state.config.server) {
             continue;
-        }
-        if policy == BenchmarkPolicy::Frontier {
-            frontier_saw_capability = true;
         }
         let has_effort_variants = model_benchmarks
             .iter()
@@ -2805,11 +2775,6 @@ async fn resolve_benchmark_targets(
                 .any(|benchmark| benchmark.reasoning_effort.as_deref() == Some(effort))
         });
         for benchmark in model_benchmarks {
-            if policy == BenchmarkPolicy::Frontier
-                && !is_frontier_model(benchmark.creator.as_deref(), canonical)
-            {
-                continue;
-            }
             if requested_effort_supported
                 && has_effort_variants
                 && benchmark.reasoning_effort.as_deref() != requested_effort
@@ -2822,9 +2787,6 @@ async fn resolve_benchmark_targets(
             let quality = raw_quality;
             if quality < quality_floor {
                 continue;
-            }
-            if policy == BenchmarkPolicy::Frontier {
-                frontier_saw_quality = true;
             }
             let expected_cost_microusd = if offering.is_free {
                 0
@@ -2922,50 +2884,6 @@ async fn resolve_benchmark_targets(
             .then_with(|| right_pinned.cmp(&left_pinned))
             .then_with(|| (&left.provider, &left.model).cmp(&(&right.provider, &right.model)))
     });
-    if policy == BenchmarkPolicy::Frontier && targets.is_empty() {
-        let (message, code) = if !frontier_saw_mapping {
-            (
-                "no configured offering has a fresh canonical benchmark mapping",
-                "frontier_no_benchmark_mapping",
-            )
-        } else if !frontier_saw_identity {
-            (
-                "no mapping identifies an OpenAI GPT/reasoning or Anthropic Claude model",
-                "frontier_access_unconfigured",
-            )
-        } else if !frontier_saw_billing {
-            (
-                "frontier provider billing is not explicitly authorized",
-                "frontier_billing_not_authorized",
-            )
-        } else if !frontier_saw_available {
-            (
-                "configured frontier provider credentials are unavailable",
-                "frontier_access_unavailable",
-            )
-        } else if frontier_preview_blocked && !frontier_reached_capability {
-            (
-                "frontier preview models require explicit provider authorization",
-                "frontier_preview_not_authorized",
-            )
-        } else if frontier_reached_capability && !frontier_saw_capability {
-            (
-                "no frontier candidate satisfies the request capabilities",
-                "frontier_capability_mismatch",
-            )
-        } else if !frontier_saw_quality {
-            (
-                "no frontier candidate clears the configured quality floor",
-                "frontier_quality_floor_not_met",
-            )
-        } else {
-            (
-                "no frontier candidate is safely available",
-                "frontier_no_candidate",
-            )
-        };
-        return Err((StatusCode::SERVICE_UNAVAILABLE, message.to_owned(), code));
-    }
     Ok(targets)
 }
 
@@ -4256,13 +4174,12 @@ mod tests {
 
     use super::{
         ModelMetadata, RequestRequirements, SelectionMetadata, StreamChoice, add_model_headers,
-        benchmark_ids_match, copy_safe_headers, cost_microusd, decorate_json_response,
-        estimate_request_tokens, expected_cost_microusd, find_benchmark, find_benchmark_raw,
-        footer_sse_event, header_value, is_fallback_status, is_model_denied,
-        is_provider_auto_route, is_reasoning_effort, log_request, malformed_sse_event, model_entry,
-        parse_json_usage, parse_sse_usage, parse_usage_value, rank_benchmark_models,
-        rate_limit_reset_delay, request_id, request_id_from_response, session_material, sse_model,
-        strip_model_noise, take_sse_event, transform_sse_event,
+        benchmark_ids_match, copy_safe_headers, decorate_json_response, estimate_request_tokens,
+        expected_cost_microusd, find_benchmark, find_benchmark_raw, footer_sse_event, header_value,
+        is_fallback_status, is_model_denied, is_provider_auto_route, is_reasoning_effort,
+        log_request, malformed_sse_event, parse_json_usage, parse_sse_usage, parse_usage_value,
+        rank_benchmark_models, rate_limit_reset_delay, request_id, request_id_from_response,
+        session_material, sse_model, strip_model_noise, take_sse_event, transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -4790,40 +4707,6 @@ mod tests {
             ..crate::config::ServerConfig::default()
         };
         assert!(!is_model_denied("anything", "provider", &empty));
-    }
-
-    #[test]
-    fn cost_microusd_computes_expected_costs() {
-        assert_eq!(cost_microusd(Some(3.0), Some(15.0)), 10_500);
-        assert_eq!(cost_microusd(Some(0.0), Some(0.0)), 1);
-        assert_eq!(cost_microusd(None, Some(5.0)), 0);
-        assert_eq!(cost_microusd(Some(5.0), None), 0);
-        assert_eq!(cost_microusd(None, None), 0);
-    }
-
-    #[test]
-    fn model_entry_creates_json_with_expected_fields() {
-        let entry = model_entry(
-            85.5,
-            100_000,
-            0.5,
-            "gpt-4o",
-            &Some("OpenAI".to_owned()),
-            Some(10.0),
-            Some(30.0),
-        );
-        assert_eq!(entry["model"], "gpt-4o");
-        assert_eq!(entry["creator"], "OpenAI");
-        assert!((entry["quality"].as_f64().unwrap() - 85.5).abs() < 0.001);
-        assert_eq!(entry["expected_cost_microusd"], 100_000);
-        assert!((entry["latency_seconds"].as_f64().unwrap() - 0.5).abs() < 0.001);
-
-        let no_creator = model_entry(50.0, 0, 1.0, "local-model", &None, None, None);
-        assert_eq!(no_creator["creator"], serde_json::Value::Null);
-        assert_eq!(
-            no_creator["input_price_per_million"],
-            serde_json::Value::Null
-        );
     }
 
     #[test]

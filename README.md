@@ -54,9 +54,9 @@ Each mode picks ONE model from the Pareto frontier. Session pinning keeps you on
 | `auto-free` | Free quality bar | Best free model. Falls back to `local`. | Recommended |
 | `auto-efficient` | 40 | Best bang-for-buck. Pareto ranks by composite quality, cost, latency. Falls back to `auto-free`, then `local`. | **Yes** |
 | `auto-balanced` | 60 | Mid-range quality. Great models, affordable pricing. Falls back to `auto-free`, then `local`. | **Yes** |
-| `auto-frontier` | 80 | Top tier. OpenAI/Anthropic canonical models only. Never falls back. | **Yes** |
+| `auto-frontier` | 50 | Top tier. Highest quality floor. Never falls back. | **Yes** |
 
-Composite quality score: `0.5*intelligence + 0.3*coding + 0.2*agentic` — well-rounded, not task-specific.
+Composite quality score: `0.80*intelligence + 0.10*coding + 0.10*agentic` — heavily weighted toward general intelligence.
 
 See [docs/routing.md](docs/routing.md) for detailed routing logic and cache-aware design.
 

@@ -33,18 +33,31 @@ Environment overrides are applied on every load and take precedence over TOML.
 Routing uses a single composite quality floor per mode (not per-task or per-complexity):
 
 ```
-composite_quality = 0.5 * intelligence + 0.3 * coding_quality + 0.2 * agentic_quality
+composite_quality = 0.80 * intelligence + 0.10 * coding_quality + 0.10 * agentic_quality
 ```
 
 | Env Variable | Default | Route |
 |---|---|---|
-| `MODEL_GATEWAY_EFFICIENT_QUALITY_FLOOR` | `40.0` | auto-efficient |
-| `MODEL_GATEWAY_BALANCED_QUALITY_FLOOR` | `60.0` | auto-balanced |
-| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR` | `80.0` | auto-frontier |
+| `MODEL_GATEWAY_EFFICIENT_QUALITY_FLOOR` | `35.0` | auto-efficient |
+| `MODEL_GATEWAY_BALANCED_QUALITY_FLOOR` | `42.0` | auto-balanced |
+| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR` | `50.0` | auto-frontier |
 
 Each floor must be 0–100. Higher floors select higher-quality models. The Pareto frontier picks the most efficient model above the floor (best quality/cost/latency tradeoff).
 
-The legacy `TieredQualityFloors` config (per-task×complexity) is still valid for the `/v1/auto-models` display but no longer drives routing decisions.
+## Free Models Quality Bar
+
+Filters low-quality, stale, or expensive models from `/v1/free-models` and auto-free routing. Uses composite quality (not per-task).
+
+| Env Variable | Default | Description |
+|---|---|---|
+| `MODEL_GATEWAY_FREE_QUALITY_MIN_COMPOSITE` | `30.0` | Minimum composite quality score (0–100) |
+| `MODEL_GATEWAY_FREE_QUALITY_MIN_CONTEXT` | `8192` | Minimum context length |
+| `MODEL_GATEWAY_FREE_QUALITY_MIN_MODEL_SIZE` | `27` | Minimum parameter count in billions |
+| `MODEL_GATEWAY_FREE_QUALITY_MAX_AGE_MONTHS` | `18` | Maximum model age |
+| `MODEL_GATEWAY_FREE_QUALITY_MAX_INPUT_PRICE` | `2.0` | Maximum input price per million tokens |
+| `MODEL_GATEWAY_FREE_QUALITY_MAX_OUTPUT_PRICE` | `10.0` | Maximum output price per million tokens |
+
+Set any value to 0 to disable that filter. Models without benchmark data always pass quality/age filters (new models are not penalized).
 
 ## Billing Mode
 

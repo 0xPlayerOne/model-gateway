@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-use crate::benchmarks::Complexity;
 use crate::providers::PROFILE_DEFINITIONS;
 use crate::secrets::{SecretError, SecretResolver, validate_secret_name};
 use crate::storage::write_atomic;
@@ -42,73 +41,6 @@ pub struct Config {
     pub models: BTreeMap<String, ModelConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PerTaskFloor {
-    #[serde(default = "default_quality_floor_general")]
-    pub general: f64,
-    #[serde(default = "default_quality_floor_coding")]
-    pub coding: f64,
-    #[serde(default = "default_quality_floor_agentic")]
-    pub agentic: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TieredQualityFloors {
-    #[serde(default)]
-    pub simple: PerTaskFloor,
-    #[serde(default)]
-    pub medium: PerTaskFloor,
-    #[serde(default)]
-    pub complex: PerTaskFloor,
-    #[serde(default)]
-    pub very_complex: PerTaskFloor,
-}
-
-impl TieredQualityFloors {
-    pub fn floor_for(&self, task: crate::benchmarks::TaskKind, complexity: Complexity) -> f64 {
-        let task_floors = match complexity {
-            Complexity::Simple => &self.simple,
-            Complexity::Medium => &self.medium,
-            Complexity::Complex => &self.complex,
-            Complexity::VeryComplex => &self.very_complex,
-        };
-        match task {
-            crate::benchmarks::TaskKind::General => task_floors.general,
-            crate::benchmarks::TaskKind::Coding => task_floors.coding,
-            crate::benchmarks::TaskKind::Agentic => task_floors.agentic,
-        }
-    }
-}
-
-impl Default for TieredQualityFloors {
-    fn default() -> Self {
-        Self {
-            simple: PerTaskFloor {
-                general: 40.0,
-                coding: 35.0,
-                agentic: 25.0,
-            },
-            medium: PerTaskFloor {
-                general: 60.0,
-                coding: 55.0,
-                agentic: 45.0,
-            },
-            complex: PerTaskFloor {
-                general: 75.0,
-                coding: 70.0,
-                agentic: 60.0,
-            },
-            very_complex: PerTaskFloor {
-                general: 85.0,
-                coding: 80.0,
-                agentic: 75.0,
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -136,12 +68,6 @@ pub struct ServerConfig {
     pub catalog_max_age_seconds: u64,
     #[serde(default = "default_benchmark_max_age_seconds")]
     pub benchmark_max_age_seconds: u64,
-    #[serde(default)]
-    pub quality_floor: TieredQualityFloors,
-    #[serde(default)]
-    pub frontier_quality_floor: TieredQualityFloors,
-    #[serde(default)]
-    pub free_quality_floor: TieredQualityFloors,
     #[serde(default = "default_true")]
     pub auto_frontier_enabled: bool,
     #[serde(default = "default_true")]
@@ -165,12 +91,8 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FreeModelsQualityBar {
-    #[serde(default = "default_free_quality_min_general")]
-    pub min_general_index: f64,
-    #[serde(default = "default_free_quality_min_coding")]
-    pub min_coding_index: f64,
-    #[serde(default = "default_free_quality_min_agentic")]
-    pub min_agentic_index: f64,
+    #[serde(default = "default_free_quality_min_composite")]
+    pub min_composite_quality: f64,
     #[serde(default = "default_free_quality_min_context")]
     pub min_context_length: u64,
     #[serde(default = "default_free_quality_min_model_size")]
@@ -186,9 +108,7 @@ pub struct FreeModelsQualityBar {
 impl Default for FreeModelsQualityBar {
     fn default() -> Self {
         Self {
-            min_general_index: default_free_quality_min_general(),
-            min_coding_index: default_free_quality_min_coding(),
-            min_agentic_index: default_free_quality_min_agentic(),
+            min_composite_quality: default_free_quality_min_composite(),
             min_context_length: default_free_quality_min_context(),
             min_model_size_b: default_free_quality_min_model_size(),
             max_age_months: default_free_quality_max_age_months(),
@@ -199,22 +119,12 @@ impl Default for FreeModelsQualityBar {
 }
 
 impl FreeModelsQualityBar {
-    /// Returns the task-specific minimum quality index.
-    fn threshold_for(&self, task: crate::benchmarks::TaskKind) -> f64 {
-        match task {
-            crate::benchmarks::TaskKind::General => self.min_general_index,
-            crate::benchmarks::TaskKind::Coding => self.min_coding_index,
-            crate::benchmarks::TaskKind::Agentic => self.min_agentic_index,
-        }
-    }
-
     /// Returns `true` if the model passes the quality bar and should be included
     /// in the free-models response. Models without benchmark data always pass
     /// the quality/age filters (new models are not penalized).
     #[allow(clippy::too_many_arguments)]
     pub fn passes(
         &self,
-        task: crate::benchmarks::TaskKind,
         benchmark: Option<&crate::benchmarks::BenchmarkModel>,
         refreshed_at: i64,
         effective_input_price: Option<f64>,
@@ -228,11 +138,10 @@ impl FreeModelsQualityBar {
             .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
             .unwrap_or(i64::MAX);
 
-        // Quality filter: skip if benchmark exists but score is below threshold
+        // Quality filter: skip if benchmark exists but composite score is below threshold
         if let Some(benchmark) = benchmark {
-            let quality = crate::benchmarks::quality_for(benchmark, task);
-            if let Some(score) = quality {
-                if score < self.threshold_for(task) {
+            if let Some(score) = crate::benchmarks::composite_quality(benchmark) {
+                if score < self.min_composite_quality {
                     return false;
                 }
             }
@@ -394,8 +303,6 @@ pub struct ProviderConfig {
     pub quotas: Vec<QuotaLimit>,
     #[serde(default)]
     pub model_mappings: BTreeMap<String, String>,
-    #[serde(default = "default_true")]
-    pub allow_preview_models: bool,
 }
 
 impl Default for ProviderConfig {
@@ -419,7 +326,6 @@ impl Default for ProviderConfig {
             model_denylist: Vec::new(),
             quotas: Vec::new(),
             model_mappings: BTreeMap::new(),
-            allow_preview_models: true,
         }
     }
 }
@@ -523,9 +429,6 @@ impl Default for ServerConfig {
             state_path: None,
             catalog_max_age_seconds: default_catalog_max_age_seconds(),
             benchmark_max_age_seconds: default_benchmark_max_age_seconds(),
-            quality_floor: TieredQualityFloors::default(),
-            frontier_quality_floor: TieredQualityFloors::default(),
-            free_quality_floor: TieredQualityFloors::default(),
             auto_frontier_enabled: true,
             auto_free_enabled: true,
             auto_efficient_enabled: true,
@@ -627,96 +530,12 @@ impl Config {
             ));
         }
         if self.server.benchmark_max_age_seconds == 0
-            || !valid_quality_floor(self.server.quality_floor.simple.general)
-            || !valid_quality_floor(self.server.quality_floor.simple.coding)
-            || !valid_quality_floor(self.server.quality_floor.simple.agentic)
-            || !valid_quality_floor(self.server.quality_floor.medium.general)
-            || !valid_quality_floor(self.server.quality_floor.medium.coding)
-            || !valid_quality_floor(self.server.quality_floor.medium.agentic)
-            || !valid_quality_floor(self.server.quality_floor.complex.general)
-            || !valid_quality_floor(self.server.quality_floor.complex.coding)
-            || !valid_quality_floor(self.server.quality_floor.complex.agentic)
-            || !valid_quality_floor(self.server.quality_floor.very_complex.general)
-            || !valid_quality_floor(self.server.quality_floor.very_complex.coding)
-            || !valid_quality_floor(self.server.quality_floor.very_complex.agentic)
-            || self.server.quality_floor.simple.general > self.server.quality_floor.medium.general
-            || self.server.quality_floor.medium.general > self.server.quality_floor.complex.general
-            || self.server.quality_floor.complex.general
-                > self.server.quality_floor.very_complex.general
-            || self.server.quality_floor.simple.coding > self.server.quality_floor.medium.coding
-            || self.server.quality_floor.medium.coding > self.server.quality_floor.complex.coding
-            || self.server.quality_floor.complex.coding
-                > self.server.quality_floor.very_complex.coding
-            || self.server.quality_floor.simple.agentic > self.server.quality_floor.medium.agentic
-            || self.server.quality_floor.medium.agentic > self.server.quality_floor.complex.agentic
-            || self.server.quality_floor.complex.agentic
-                > self.server.quality_floor.very_complex.agentic
-            || !valid_quality_floor(self.server.frontier_quality_floor.simple.general)
-            || !valid_quality_floor(self.server.frontier_quality_floor.simple.coding)
-            || !valid_quality_floor(self.server.frontier_quality_floor.simple.agentic)
-            || !valid_quality_floor(self.server.frontier_quality_floor.medium.general)
-            || !valid_quality_floor(self.server.frontier_quality_floor.medium.coding)
-            || !valid_quality_floor(self.server.frontier_quality_floor.medium.agentic)
-            || !valid_quality_floor(self.server.frontier_quality_floor.complex.general)
-            || !valid_quality_floor(self.server.frontier_quality_floor.complex.coding)
-            || !valid_quality_floor(self.server.frontier_quality_floor.complex.agentic)
-            || !valid_quality_floor(self.server.frontier_quality_floor.very_complex.general)
-            || !valid_quality_floor(self.server.frontier_quality_floor.very_complex.coding)
-            || !valid_quality_floor(self.server.frontier_quality_floor.very_complex.agentic)
-            || self.server.frontier_quality_floor.simple.general
-                > self.server.frontier_quality_floor.medium.general
-            || self.server.frontier_quality_floor.medium.general
-                > self.server.frontier_quality_floor.complex.general
-            || self.server.frontier_quality_floor.complex.general
-                > self.server.frontier_quality_floor.very_complex.general
-            || self.server.frontier_quality_floor.simple.coding
-                > self.server.frontier_quality_floor.medium.coding
-            || self.server.frontier_quality_floor.medium.coding
-                > self.server.frontier_quality_floor.complex.coding
-            || self.server.frontier_quality_floor.complex.coding
-                > self.server.frontier_quality_floor.very_complex.coding
-            || self.server.frontier_quality_floor.simple.agentic
-                > self.server.frontier_quality_floor.medium.agentic
-            || self.server.frontier_quality_floor.medium.agentic
-                > self.server.frontier_quality_floor.complex.agentic
-            || self.server.frontier_quality_floor.complex.agentic
-                > self.server.frontier_quality_floor.very_complex.agentic
-            || !valid_quality_floor(self.server.free_quality_floor.simple.general)
-            || !valid_quality_floor(self.server.free_quality_floor.simple.coding)
-            || !valid_quality_floor(self.server.free_quality_floor.simple.agentic)
-            || !valid_quality_floor(self.server.free_quality_floor.medium.general)
-            || !valid_quality_floor(self.server.free_quality_floor.medium.coding)
-            || !valid_quality_floor(self.server.free_quality_floor.medium.agentic)
-            || !valid_quality_floor(self.server.free_quality_floor.complex.general)
-            || !valid_quality_floor(self.server.free_quality_floor.complex.coding)
-            || !valid_quality_floor(self.server.free_quality_floor.complex.agentic)
-            || !valid_quality_floor(self.server.free_quality_floor.very_complex.general)
-            || !valid_quality_floor(self.server.free_quality_floor.very_complex.coding)
-            || !valid_quality_floor(self.server.free_quality_floor.very_complex.agentic)
-            || self.server.free_quality_floor.simple.general
-                > self.server.free_quality_floor.medium.general
-            || self.server.free_quality_floor.medium.general
-                > self.server.free_quality_floor.complex.general
-            || self.server.free_quality_floor.complex.general
-                > self.server.free_quality_floor.very_complex.general
-            || self.server.free_quality_floor.simple.coding
-                > self.server.free_quality_floor.medium.coding
-            || self.server.free_quality_floor.medium.coding
-                > self.server.free_quality_floor.complex.coding
-            || self.server.free_quality_floor.complex.coding
-                > self.server.free_quality_floor.very_complex.coding
-            || self.server.free_quality_floor.simple.agentic
-                > self.server.free_quality_floor.medium.agentic
-            || self.server.free_quality_floor.medium.agentic
-                > self.server.free_quality_floor.complex.agentic
-            || self.server.free_quality_floor.complex.agentic
-                > self.server.free_quality_floor.very_complex.agentic
             || !valid_quality_floor(self.server.efficient_quality_floor)
             || !valid_quality_floor(self.server.balanced_quality_floor)
             || !valid_quality_floor(self.server.frontier_quality_floor_single)
         {
             return Err(ConfigError::Invalid(
-                "benchmark age and ordered quality floors must be valid (0-100)".to_owned(),
+                "benchmark age and quality floors must be valid (0-100)".to_owned(),
             ));
         }
         if self
@@ -852,9 +671,6 @@ fn apply_provider_environment_overrides(config: &mut Config) -> Result<(), Confi
                     .collect();
             }
         }
-        let preview_variable = variable("ALLOW_PREVIEW_MODELS");
-        apply_env_bool(&preview_variable, &mut provider.allow_preview_models)?;
-
         let base_url_variable = variable("BASE_URL");
         if let Ok(value) = env::var(&base_url_variable) {
             provider.base_url = value;
@@ -1076,54 +892,6 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
         "MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS",
         &mut server.benchmark_max_age_seconds,
     )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_SIMPLE_GENERAL",
-        &mut server.quality_floor.simple.general,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_SIMPLE_CODING",
-        &mut server.quality_floor.simple.coding,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_SIMPLE_AGENTIC",
-        &mut server.quality_floor.simple.agentic,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_MEDIUM_GENERAL",
-        &mut server.quality_floor.medium.general,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_MEDIUM_CODING",
-        &mut server.quality_floor.medium.coding,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_MEDIUM_AGENTIC",
-        &mut server.quality_floor.medium.agentic,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_COMPLEX_GENERAL",
-        &mut server.quality_floor.complex.general,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_COMPLEX_CODING",
-        &mut server.quality_floor.complex.coding,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_COMPLEX_AGENTIC",
-        &mut server.quality_floor.complex.agentic,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_VERY_COMPLEX_GENERAL",
-        &mut server.quality_floor.very_complex.general,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_VERY_COMPLEX_CODING",
-        &mut server.quality_floor.very_complex.coding,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_QUALITY_FLOOR_VERY_COMPLEX_AGENTIC",
-        &mut server.quality_floor.very_complex.agentic,
-    )?;
     apply_env_bool(
         "MODEL_GATEWAY_AUTO_FRONTIER_ENABLED",
         &mut server.auto_frontier_enabled,
@@ -1137,16 +905,8 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
         &mut server.auto_efficient_enabled,
     )?;
     apply_env_f64(
-        "MODEL_GATEWAY_FREE_QUALITY_MIN_GENERAL",
-        &mut server.free_models_quality.min_general_index,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_FREE_QUALITY_MIN_CODING",
-        &mut server.free_models_quality.min_coding_index,
-    )?;
-    apply_env_f64(
-        "MODEL_GATEWAY_FREE_QUALITY_MIN_AGENTIC",
-        &mut server.free_models_quality.min_agentic_index,
+        "MODEL_GATEWAY_FREE_QUALITY_MIN_COMPOSITE",
+        &mut server.free_models_quality.min_composite_quality,
     )?;
     apply_env_u64(
         "MODEL_GATEWAY_FREE_QUALITY_MIN_CONTEXT",
@@ -1275,19 +1035,9 @@ fn validate_server(server: &ServerConfig) -> Result<(), ConfigError> {
             "server limits and timeouts must be greater than zero".to_owned(),
         ));
     }
-    if !valid_quality_floor(server.free_models_quality.min_general_index) {
+    if !valid_quality_floor(server.free_models_quality.min_composite_quality) {
         return Err(ConfigError::Invalid(
-            "free_models_quality.min_general_index must be between 0 and 100".to_owned(),
-        ));
-    }
-    if !valid_quality_floor(server.free_models_quality.min_coding_index) {
-        return Err(ConfigError::Invalid(
-            "free_models_quality.min_coding_index must be between 0 and 100".to_owned(),
-        ));
-    }
-    if !valid_quality_floor(server.free_models_quality.min_agentic_index) {
-        return Err(ConfigError::Invalid(
-            "free_models_quality.min_agentic_index must be between 0 and 100".to_owned(),
+            "free_models_quality.min_composite_quality must be between 0 and 100".to_owned(),
         ));
     }
     if !server
@@ -1561,28 +1311,8 @@ const fn default_benchmark_max_age_seconds() -> u64 {
     604_800
 }
 
-const fn default_quality_floor_general() -> f64 {
-    40.0
-}
-
-const fn default_quality_floor_coding() -> f64 {
-    35.0
-}
-
-const fn default_quality_floor_agentic() -> f64 {
-    25.0
-}
-
-const fn default_free_quality_min_general() -> f64 {
-    25.0
-}
-
-const fn default_free_quality_min_coding() -> f64 {
-    35.0
-}
-
-const fn default_free_quality_min_agentic() -> f64 {
-    15.0
+const fn default_free_quality_min_composite() -> f64 {
+    30.0
 }
 
 const fn default_free_quality_min_context() -> u64 {
@@ -1598,11 +1328,11 @@ const fn default_free_quality_max_age_months() -> u64 {
 }
 
 const fn default_free_quality_max_input_price() -> f64 {
-    5.0
+    2.0
 }
 
 const fn default_free_quality_max_output_price() -> f64 {
-    15.0
+    10.0
 }
 
 const fn default_true() -> bool {
@@ -1610,15 +1340,15 @@ const fn default_true() -> bool {
 }
 
 const fn default_efficient_quality_floor() -> f64 {
-    40.0
+    35.0
 }
 
 const fn default_balanced_quality_floor() -> f64 {
-    60.0
+    42.0
 }
 
 const fn default_frontier_quality_floor() -> f64 {
-    80.0
+    50.0
 }
 
 const fn default_connect_timeout_seconds() -> u64 {
@@ -1663,7 +1393,6 @@ mod tests {
             model_denylist: Vec::new(),
             quotas: Vec::new(),
             model_mappings: BTreeMap::new(),
-            allow_preview_models: false,
         }
     }
 
@@ -1787,23 +1516,19 @@ mod tests {
     #[test]
     fn free_models_quality_bar_defaults_are_permissive() {
         let quality = super::FreeModelsQualityBar::default();
-        assert_eq!(quality.min_general_index, 25.0);
-        assert_eq!(quality.min_coding_index, 35.0);
-        assert_eq!(quality.min_agentic_index, 15.0);
+        assert_eq!(quality.min_composite_quality, 30.0);
         assert_eq!(quality.max_age_months, 18);
-        assert_eq!(quality.max_input_price_per_million, 5.0);
-        assert_eq!(quality.max_output_price_per_million, 15.0);
+        assert_eq!(quality.max_input_price_per_million, 2.0);
+        assert_eq!(quality.max_output_price_per_million, 10.0);
     }
 
     #[test]
     fn free_models_quality_bar_validation_accepts_valid_values() {
         let server = ServerConfig {
             free_models_quality: super::FreeModelsQualityBar {
-                min_general_index: 30.0,
+                min_composite_quality: 30.0,
                 min_context_length: 0,
                 min_model_size_b: 0,
-                min_coding_index: 35.0,
-                min_agentic_index: 15.0,
                 max_age_months: 12,
                 max_input_price_per_million: 10.0,
                 max_output_price_per_million: 20.0,
@@ -1814,10 +1539,10 @@ mod tests {
     }
 
     #[test]
-    fn free_models_quality_bar_rejects_invalid_min_general_index() {
+    fn free_models_quality_bar_rejects_invalid_min_composite_quality() {
         let server = ServerConfig {
             free_models_quality: super::FreeModelsQualityBar {
-                min_general_index: 150.0,
+                min_composite_quality: 150.0,
                 ..super::FreeModelsQualityBar::default()
             },
             ..ServerConfig::default()
@@ -1826,7 +1551,7 @@ mod tests {
 
         let server = ServerConfig {
             free_models_quality: super::FreeModelsQualityBar {
-                min_general_index: -1.0,
+                min_composite_quality: -1.0,
                 ..super::FreeModelsQualityBar::default()
             },
             ..ServerConfig::default()
@@ -1836,93 +1561,54 @@ mod tests {
 
     #[test]
     fn free_models_quality_bar_passes_unbenchmarked_models() {
-        use crate::benchmarks::TaskKind;
         let quality = super::FreeModelsQualityBar {
-            min_general_index: 50.0,
+            min_composite_quality: 50.0,
             min_context_length: 0,
             min_model_size_b: 0,
             ..super::FreeModelsQualityBar::default()
         };
         // Model without benchmark always passes quality check
-        assert!(quality.passes(
-            TaskKind::General,
-            None,
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
+        assert!(quality.passes(None, 9999999999, None, None, None, "test"));
     }
 
     #[test]
     fn free_models_quality_bar_filters_low_quality_benchmarked_models() {
-        use crate::benchmarks::{BenchmarkModel, TaskKind};
+        use crate::benchmarks::BenchmarkModel;
         let quality = super::FreeModelsQualityBar {
-            min_general_index: 50.0,
+            min_composite_quality: 50.0,
             min_context_length: 0,
             min_model_size_b: 0,
-            min_coding_index: 35.0,
-            min_agentic_index: 15.0,
             max_age_months: 0,                // disable age filter
             max_input_price_per_million: 0.0, // disable price filter
             max_output_price_per_million: 0.0,
         };
         let model = BenchmarkModel::fixture("weak-model", 30.0, 10.0, 5.0, 1.0, 1.0);
-        assert!(!quality.passes(
-            TaskKind::General,
-            Some(&model),
-            9999999999,
-            Some(1.0),
-            Some(1.0),
-            None,
-            "test"
-        ));
-        assert!(!quality.passes(
-            TaskKind::Coding,
-            Some(&model),
-            9999999999,
-            Some(1.0),
-            Some(1.0),
-            None,
-            "test"
-        ));
+        assert!(!quality.passes(Some(&model), 9999999999, Some(1.0), Some(1.0), None, "test"));
+        assert!(!quality.passes(Some(&model), 9999999999, Some(1.0), Some(1.0), None, "test"));
     }
 
     #[test]
     fn free_models_quality_bar_passes_high_quality_benchmarked_models() {
-        use crate::benchmarks::{BenchmarkModel, TaskKind};
+        use crate::benchmarks::BenchmarkModel;
         let quality = super::FreeModelsQualityBar {
-            min_general_index: 50.0,
+            min_composite_quality: 50.0,
             min_context_length: 0,
             min_model_size_b: 0,
-            min_coding_index: 35.0,
-            min_agentic_index: 15.0,
             max_age_months: 0,
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
         };
         let model = BenchmarkModel::fixture("strong-model", 80.0, 85.0, 70.0, 1.0, 1.0);
-        assert!(quality.passes(
-            TaskKind::General,
-            Some(&model),
-            9999999999,
-            Some(1.0),
-            Some(1.0),
-            None,
-            "test"
-        ));
+        assert!(quality.passes(Some(&model), 9999999999, Some(1.0), Some(1.0), None, "test"));
     }
 
     #[test]
     fn free_models_quality_bar_filters_expensive_models() {
-        use crate::benchmarks::{BenchmarkModel, TaskKind};
+        use crate::benchmarks::BenchmarkModel;
         let quality = super::FreeModelsQualityBar {
-            min_general_index: 0.0,
+            min_composite_quality: 0.0,
             min_context_length: 0,
             min_model_size_b: 0,
-            min_coding_index: 0.0,
-            min_agentic_index: 0.0,
             max_age_months: 0,
             max_input_price_per_million: 2.0,
             max_output_price_per_million: 10.0,
@@ -1930,7 +1616,6 @@ mod tests {
         let model = BenchmarkModel::fixture("expensive-model", 70.0, 70.0, 70.0, 0.5, 15.0);
         // Output price (15.0) exceeds limit (10.0)
         assert!(!quality.passes(
-            TaskKind::General,
             Some(&model),
             9999999999,
             Some(0.5),
@@ -1941,38 +1626,20 @@ mod tests {
 
         let model = BenchmarkModel::fixture("cheap-model", 70.0, 70.0, 70.0, 3.0, 5.0);
         // Input price (3.0) exceeds limit (2.0)
-        assert!(!quality.passes(
-            TaskKind::General,
-            Some(&model),
-            9999999999,
-            Some(3.0),
-            Some(5.0),
-            None,
-            "test"
-        ));
+        assert!(!quality.passes(Some(&model), 9999999999, Some(3.0), Some(5.0), None, "test"));
 
         let model = BenchmarkModel::fixture("affordable-model", 70.0, 70.0, 70.0, 1.0, 5.0);
         // Both prices within limits
-        assert!(quality.passes(
-            TaskKind::General,
-            Some(&model),
-            9999999999,
-            Some(1.0),
-            Some(5.0),
-            None,
-            "test"
-        ));
+        assert!(quality.passes(Some(&model), 9999999999, Some(1.0), Some(5.0), None, "test"));
     }
 
     #[test]
     fn free_models_quality_bar_filters_old_models() {
-        use crate::benchmarks::{BenchmarkModel, TaskKind};
+        use crate::benchmarks::BenchmarkModel;
         let quality = super::FreeModelsQualityBar {
-            min_general_index: 0.0,
+            min_composite_quality: 0.0,
             min_context_length: 0,
             min_model_size_b: 0,
-            min_coding_index: 35.0,
-            min_agentic_index: 15.0,
             max_age_months: 12, // 1 year
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
@@ -1983,7 +1650,6 @@ mod tests {
             ..BenchmarkModel::fixture("recent", 70.0, 70.0, 70.0, 1.0, 1.0)
         };
         assert!(quality.passes(
-            TaskKind::General,
             Some(&recent),
             9999999999,
             Some(1.0),
@@ -1997,20 +1663,12 @@ mod tests {
             release_date: Some("2024-01-01".to_owned()),
             ..BenchmarkModel::fixture("old", 70.0, 70.0, 70.0, 1.0, 1.0)
         };
-        assert!(!quality.passes(
-            TaskKind::General,
-            Some(&old),
-            9999999999,
-            Some(1.0),
-            Some(1.0),
-            None,
-            "test"
-        ));
+        assert!(!quality.passes(Some(&old), 9999999999, Some(1.0), Some(1.0), None, "test"));
     }
 
     #[test]
     fn free_models_quality_bar_uses_refreshed_at_fallback() {
-        use crate::benchmarks::{BenchmarkModel, TaskKind};
+        use crate::benchmarks::BenchmarkModel;
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2018,11 +1676,9 @@ mod tests {
             .unwrap_or(0);
 
         let quality = super::FreeModelsQualityBar {
-            min_general_index: 0.0,
+            min_composite_quality: 0.0,
             min_context_length: 0,
             min_model_size_b: 0,
-            min_coding_index: 35.0,
-            min_agentic_index: 15.0,
             max_age_months: 6, // 6 months
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
@@ -2030,18 +1686,9 @@ mod tests {
         let model = BenchmarkModel::fixture("any", 70.0, 70.0, 70.0, 1.0, 1.0);
 
         // Fresh refreshed_at passes
-        assert!(quality.passes(
-            TaskKind::General,
-            Some(&model),
-            now,
-            Some(1.0),
-            Some(1.0),
-            None,
-            "test"
-        ));
+        assert!(quality.passes(Some(&model), now, Some(1.0), Some(1.0), None, "test"));
         // Very old refreshed_at fails
         assert!(!quality.passes(
-            TaskKind::General,
             Some(&model),
             now - 365 * 86400 * 3,
             Some(1.0),
@@ -2052,12 +1699,10 @@ mod tests {
     }
 
     #[test]
-    fn free_models_quality_bar_uses_per_task_thresholds() {
-        use crate::benchmarks::{BenchmarkModel, TaskKind};
+    fn free_models_quality_bar_uses_composite_quality_threshold() {
+        use crate::benchmarks::BenchmarkModel;
         let bar = super::FreeModelsQualityBar {
-            min_general_index: 25.0,
-            min_coding_index: 35.0,
-            min_agentic_index: 15.0,
+            min_composite_quality: 25.0,
             min_context_length: 0,
             min_model_size_b: 0,
             max_age_months: 0,
@@ -2065,95 +1710,17 @@ mod tests {
             max_output_price_per_million: 0.0,
         };
 
-        // high general, low coding, low agentic
-        let model = BenchmarkModel::fixture("model", 28.0, 20.0, 12.0, 1.0, 1.0);
-        assert!(bar.passes(
-            TaskKind::General,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
-        assert!(!bar.passes(
-            TaskKind::Coding,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
-        assert!(!bar.passes(
-            TaskKind::Agentic,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
+        // composite = 0.80*20 + 0.10*20 + 0.10*12 = 19.2 < 25
+        let low = BenchmarkModel::fixture("low", 20.0, 20.0, 12.0, 1.0, 1.0);
+        assert!(!bar.passes(Some(&low), 9999999999, None, None, None, "test"));
 
-        // high general, high coding, low agentic
-        let model = BenchmarkModel::fixture("model", 28.0, 38.0, 12.0, 1.0, 1.0);
-        assert!(bar.passes(
-            TaskKind::General,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
-        assert!(bar.passes(
-            TaskKind::Coding,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
-        assert!(!bar.passes(
-            TaskKind::Agentic,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
+        // composite = 0.80*28 + 0.10*38 + 0.10*12 = 27.4 >= 25
+        let mid = BenchmarkModel::fixture("mid", 28.0, 38.0, 12.0, 1.0, 1.0);
+        assert!(bar.passes(Some(&mid), 9999999999, None, None, None, "test"));
 
-        // low general, high coding, high agentic
-        let model = BenchmarkModel::fixture("model", 20.0, 38.0, 18.0, 1.0, 1.0);
-        assert!(!bar.passes(
-            TaskKind::General,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
-        assert!(bar.passes(
-            TaskKind::Coding,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
-        assert!(bar.passes(
-            TaskKind::Agentic,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
+        // composite = 0.80*28 + 0.10*20 + 0.10*40 = 28.4 >= 25
+        let exact = BenchmarkModel::fixture("exact", 28.0, 20.0, 40.0, 1.0, 1.0);
+        assert!(bar.passes(Some(&exact), 9999999999, None, None, None, "test"));
     }
 
     #[test]
@@ -2175,10 +1742,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_per_task_quality_thresholds() {
+    fn rejects_invalid_composite_quality_threshold() {
         let server = ServerConfig {
             free_models_quality: super::FreeModelsQualityBar {
-                min_coding_index: 150.0,
+                min_composite_quality: 150.0,
                 ..super::FreeModelsQualityBar::default()
             },
             ..ServerConfig::default()
@@ -2187,7 +1754,7 @@ mod tests {
 
         let server = ServerConfig {
             free_models_quality: super::FreeModelsQualityBar {
-                min_agentic_index: -5.0,
+                min_composite_quality: -1.0,
                 ..super::FreeModelsQualityBar::default()
             },
             ..ServerConfig::default()
@@ -2196,42 +1763,41 @@ mod tests {
     }
 
     #[test]
-    fn environment_overrides_apply_to_free_quality_per_task_thresholds() {
+    fn environment_overrides_apply_to_free_quality_composite_threshold() {
         let mut config = valid_config("http://localhost:11434/v1");
         apply_server_environment_overrides(&mut config.server).expect("overrides");
-        assert_eq!(config.server.free_models_quality.min_general_index, 25.0);
+        assert_eq!(
+            config.server.free_models_quality.min_composite_quality,
+            30.0
+        );
 
         unsafe {
-            std::env::set_var("MODEL_GATEWAY_FREE_QUALITY_MIN_CODING", "42.0");
-            std::env::set_var("MODEL_GATEWAY_FREE_QUALITY_MIN_AGENTIC", "8.0");
+            std::env::set_var("MODEL_GATEWAY_FREE_QUALITY_MIN_COMPOSITE", "42.0");
         }
         let mut config = valid_config("http://localhost:11434/v1");
         apply_server_environment_overrides(&mut config.server).expect("overrides");
-        assert_eq!(config.server.free_models_quality.min_coding_index, 42.0);
-        assert_eq!(config.server.free_models_quality.min_agentic_index, 8.0);
+        assert_eq!(
+            config.server.free_models_quality.min_composite_quality,
+            42.0
+        );
         unsafe {
-            std::env::remove_var("MODEL_GATEWAY_FREE_QUALITY_MIN_CODING");
-            std::env::remove_var("MODEL_GATEWAY_FREE_QUALITY_MIN_AGENTIC");
+            std::env::remove_var("MODEL_GATEWAY_FREE_QUALITY_MIN_COMPOSITE");
         }
     }
 
     #[test]
     fn toml_round_trip_preserves_free_models_quality() {
         let original = super::FreeModelsQualityBar {
-            min_general_index: 30.0,
+            min_composite_quality: 30.0,
             min_context_length: 0,
             min_model_size_b: 0,
-            min_coding_index: 40.0,
-            min_agentic_index: 20.0,
             max_age_months: 24,
             max_input_price_per_million: 3.0,
             max_output_price_per_million: 12.0,
         };
         let encoded = toml::to_string(&original).expect("serialize");
         let decoded: super::FreeModelsQualityBar = toml::from_str(&encoded).expect("deserialize");
-        assert_eq!(decoded.min_general_index, 30.0);
-        assert_eq!(decoded.min_coding_index, 40.0);
-        assert_eq!(decoded.min_agentic_index, 20.0);
+        assert_eq!(decoded.min_composite_quality, 30.0);
         assert_eq!(decoded.max_age_months, 24);
         assert_eq!(decoded.max_input_price_per_million, 3.0);
         assert_eq!(decoded.max_output_price_per_million, 12.0);
@@ -2239,13 +1805,11 @@ mod tests {
 
     #[test]
     fn null_quality_scores_pass_through_quality_bar() {
-        use crate::benchmarks::{BenchmarkModel, TaskKind};
+        use crate::benchmarks::BenchmarkModel;
         let bar = super::FreeModelsQualityBar {
-            min_general_index: 50.0,
+            min_composite_quality: 50.0,
             min_context_length: 0,
             min_model_size_b: 0,
-            min_coding_index: 50.0,
-            min_agentic_index: 50.0,
             max_age_months: 0,
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
@@ -2257,38 +1821,14 @@ mod tests {
             agentic_quality: None,
             ..BenchmarkModel::fixture("null-scores", 0.0, 0.0, 0.0, 1.0, 1.0)
         };
-        assert!(bar.passes(
-            TaskKind::General,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
-        assert!(bar.passes(
-            TaskKind::Coding,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
-        assert!(bar.passes(
-            TaskKind::Agentic,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
+        assert!(bar.passes(Some(&model), 9999999999, None, None, None, "test"));
+        assert!(bar.passes(Some(&model), 9999999999, None, None, None, "test"));
+        assert!(bar.passes(Some(&model), 9999999999, None, None, None, "test"));
     }
 
     #[test]
     fn release_date_takes_precedence_over_refreshed_at() {
-        use crate::benchmarks::{BenchmarkModel, TaskKind};
+        use crate::benchmarks::BenchmarkModel;
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2296,11 +1836,9 @@ mod tests {
             .unwrap_or(0);
 
         let bar = super::FreeModelsQualityBar {
-            min_general_index: 0.0,
+            min_composite_quality: 0.0,
             min_context_length: 0,
             min_model_size_b: 0,
-            min_coding_index: 35.0,
-            min_agentic_index: 15.0,
             max_age_months: 12, // 1 year
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
@@ -2311,27 +1849,11 @@ mod tests {
             release_date: Some("2026-01-01".to_owned()),
             ..BenchmarkModel::fixture("recent-release", 70.0, 70.0, 70.0, 1.0, 1.0)
         };
-        assert!(bar.passes(
-            TaskKind::General,
-            Some(&model),
-            old_refreshed,
-            None,
-            None,
-            None,
-            "test"
-        ));
+        assert!(bar.passes(Some(&model), old_refreshed, None, None, None, "test"));
 
         // Without release_date, ancient refreshed_at fails
         let no_release = BenchmarkModel::fixture("old-refreshed", 70.0, 70.0, 70.0, 1.0, 1.0);
-        assert!(!bar.passes(
-            TaskKind::General,
-            Some(&no_release),
-            old_refreshed,
-            None,
-            None,
-            None,
-            "test"
-        ));
+        assert!(!bar.passes(Some(&no_release), old_refreshed, None, None, None, "test"));
     }
 
     #[test]
@@ -2477,11 +1999,7 @@ mod tests {
                 .iter()
                 .any(|quota| quota.kind == QuotaKind::CostMicrousd)
         );
-        assert!(
-            config.server.frontier_quality_floor.simple.general
-                < config.server.frontier_quality_floor.complex.general
-        );
-        assert!(openrouter.allow_preview_models);
+        assert!(config.server.frontier_quality_floor_single > 0.0);
     }
 
     #[test]
@@ -2618,9 +2136,7 @@ mod tests {
     fn context_filter_rejects_tiny_context_when_available() {
         use crate::benchmarks::BenchmarkModel;
         let filter = super::FreeModelsQualityBar {
-            min_general_index: 0.0,
-            min_coding_index: 0.0,
-            min_agentic_index: 0.0,
+            min_composite_quality: 0.0,
             min_context_length: 8_000,
             min_model_size_b: 0,
             max_age_months: 0,
@@ -2628,25 +2144,9 @@ mod tests {
             max_output_price_per_million: 0.0,
         };
         let model = BenchmarkModel::fixture("m", 50.0, 50.0, 50.0, 1.0, 1.0);
-        assert!(!filter.passes(
-            super::super::benchmarks::TaskKind::General,
-            Some(&model),
-            9999999999,
-            None,
-            None,
-            Some(4096),
-            "test",
-        ));
+        assert!(!filter.passes(Some(&model), 9999999999, None, None, Some(4096), "test",));
         // null context passes (unknown)
-        assert!(filter.passes(
-            super::super::benchmarks::TaskKind::General,
-            None,
-            9999999999,
-            None,
-            None,
-            None,
-            "test"
-        ));
+        assert!(filter.passes(None, 9999999999, None, None, None, "test"));
     }
 
     #[test]

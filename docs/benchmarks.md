@@ -85,7 +85,7 @@ Task-specific quality is used for response headers and listing endpoints (`/v1/f
 Routing uses a single **composite quality** score instead of task-specific scores:
 
 ```
-composite_quality = 0.5 * intelligence + 0.3 * coding_quality + 0.2 * agentic_quality
+composite_quality = 0.80 * intelligence + 0.10 * coding_quality + 0.10 * agentic_quality
 ```
 
 If `coding_quality` or `agentic_quality` is None, the weight redistributes to `intelligence`. This gives a well-rounded score that doesn't favor any single task type — important since each mode recommends a single model that should handle all tasks well.
@@ -103,7 +103,7 @@ The same `classify()` function also determines task complexity:
 | `Complex` | Score 4–5 (tools, keywords, longer context) |
 | `VeryComplex` | Score 6+ (tools + keywords + long conversation + structured output) |
 
-Complexity is used for response headers and the `/v1/auto-models` display. Routing uses composite quality with a single floor per mode.
+Complexity is used for response headers only. Routing uses composite quality with a single floor per mode.
 
 ## Ranking Endpoint
 
@@ -161,9 +161,9 @@ Rankings are sorted by quality score (descending), then by combined price (ascen
 | `auto-free` | Uses composite quality for Pareto ranking (quality × latency). Falls back to unbenchmarked models if none exist. | Composite |
 | `auto-efficient` | **Requires** benchmarks. Models without matching benchmark entries are excluded. | Composite |
 | `auto-balanced` | **Requires** benchmarks. Same as auto-efficient with higher quality floor. | Composite |
-| `auto-frontier` | **Requires** benchmarks. Also filters by canonical creator (OpenAI/Anthropic only). | Composite |
+| `auto-frontier` | **Requires** benchmarks. Highest quality floor. | Composite |
 
-All paid routes use composite quality (`0.5*intelligence + 0.3*coding + 0.2*agentic`). The Pareto frontier operates on ALL benchmark entries including different reasoning_effort levels, naturally picking the most efficient variant.
+All paid routes use composite quality (`0.80*intelligence + 0.10*coding + 0.10*agentic`). The Pareto frontier operates on ALL benchmark entries including different reasoning_effort levels, naturally picking the most efficient variant.
 
 ## Configuration
 

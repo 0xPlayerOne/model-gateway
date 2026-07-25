@@ -216,7 +216,7 @@ impl TaskKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Complexity {
     Simple,
     Medium,
@@ -380,44 +380,7 @@ pub fn composite_quality(model: &BenchmarkModel) -> Option<f64> {
     let intelligence = model.intelligence?;
     let coding = model.coding_quality.unwrap_or(intelligence);
     let agentic = model.agentic_quality.unwrap_or(intelligence);
-    Some(0.5 * intelligence + 0.3 * coding + 0.2 * agentic)
-}
-
-pub fn is_frontier_model(creator: Option<&str>, canonical_model: &str) -> bool {
-    let Some(creator) = creator.map(str::trim) else {
-        return false;
-    };
-    let model = canonical_model
-        .rsplit('/')
-        .next()
-        .unwrap_or(canonical_model)
-        .to_ascii_lowercase();
-    if creator.eq_ignore_ascii_case("anthropic") {
-        return model == "claude" || model.starts_with("claude-");
-    }
-    if !creator.eq_ignore_ascii_case("openai") {
-        return false;
-    }
-    if model == "gpt" || model.starts_with("gpt-") {
-        return true;
-    }
-    let mut characters = model.chars();
-    characters.next() == Some('o')
-        && characters
-            .next()
-            .is_some_and(|value| value.is_ascii_digit())
-        && characters
-            .next()
-            .is_none_or(|value| matches!(value, '-' | '_' | '.'))
-}
-
-pub fn is_preview_model(model: &str) -> bool {
-    let model = model.to_ascii_lowercase();
-    ["preview", "beta", "experimental"].iter().any(|marker| {
-        model
-            .split(['/', '-', ':', '_'])
-            .any(|part| part == *marker)
-    })
+    Some(0.80 * intelligence + 0.10 * coding + 0.10 * agentic)
 }
 
 pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, String> {
@@ -561,8 +524,7 @@ mod tests {
 
     use super::{
         BenchmarkImport, BenchmarkModel, Complexity, ScoredCandidate, TaskKind, classify,
-        composite_quality, is_frontier_model, is_preview_model, pareto_rank,
-        parse_artificial_analysis,
+        composite_quality, pareto_rank, parse_artificial_analysis,
     };
 
     #[test]
@@ -749,28 +711,10 @@ mod tests {
     }
 
     #[test]
-    fn frontier_family_requires_canonical_gpt_reasoning_or_claude_identity() {
-        assert!(is_frontier_model(Some("OpenAI"), "gpt-5"));
-        assert!(is_frontier_model(Some("OpenAI"), "openai/o3-mini"));
-        assert!(is_frontier_model(Some("Anthropic"), "claude-sonnet-4-6"));
-        assert!(!is_frontier_model(Some("OpenAI"), "text-embedding-3"));
-        assert!(!is_frontier_model(Some("Anthropic"), "not-claude"));
-        assert!(!is_frontier_model(Some("Other"), "gpt-5"));
-    }
-
-    #[test]
-    fn preview_detection_uses_model_id_segments() {
-        assert!(is_preview_model("openai/gpt-5-preview"));
-        assert!(is_preview_model("claude_beta"));
-        assert!(!is_preview_model("previewlabs/model"));
-        assert!(!is_preview_model("openai/gpt-5"));
-    }
-
-    #[test]
     fn composite_quality_uses_weighted_average() {
         let model = BenchmarkModel::fixture("test", 80.0, 70.0, 60.0, 0.0, 0.0);
         let quality = composite_quality(&model).expect("quality");
-        assert!((quality - (0.5 * 80.0 + 0.3 * 70.0 + 0.2 * 60.0)).abs() < 0.01);
+        assert!((quality - (0.80 * 80.0 + 0.10 * 70.0 + 0.10 * 60.0)).abs() < 0.01);
     }
 
     #[test]
@@ -794,7 +738,7 @@ mod tests {
         let mut model = BenchmarkModel::fixture("test", 80.0, 70.0, 0.0, 0.0, 0.0);
         model.agentic_quality = None;
         let quality = composite_quality(&model).expect("quality");
-        let expected = 0.5 * 80.0 + 0.3 * 70.0 + 0.2 * 80.0;
+        let expected = 0.80 * 80.0 + 0.10 * 70.0 + 0.10 * 80.0;
         assert!((quality - expected).abs() < 0.01);
     }
 }

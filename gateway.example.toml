@@ -12,57 +12,15 @@ auto_frontier_enabled = true
 auto_free_enabled = true
 auto_efficient_enabled = true
 auto_balanced_enabled = true
-efficient_quality_floor = 40.0
-balanced_quality_floor = 60.0
-frontier_quality_floor_single = 80.0
-
-[server.quality_floor.simple]
-general = 40.0
-coding = 35.0
-agentic = 25.0
-
-[server.quality_floor.medium]
-general = 60.0
-coding = 55.0
-agentic = 45.0
-
-[server.quality_floor.complex]
-general = 75.0
-coding = 70.0
-agentic = 60.0
-
-[server.quality_floor.very_complex]
-general = 85.0
-coding = 80.0
-agentic = 75.0
-
-[server.frontier_quality_floor.simple]
-general = 50.0
-coding = 45.0
-agentic = 35.0
-
-[server.frontier_quality_floor.medium]
-general = 70.0
-coding = 65.0
-agentic = 55.0
-
-[server.frontier_quality_floor.complex]
-general = 85.0
-coding = 80.0
-agentic = 70.0
-
-[server.frontier_quality_floor.very_complex]
-general = 92.0
-coding = 90.0
-agentic = 85.0
+efficient_quality_floor = 35.0
+balanced_quality_floor = 42.0
+frontier_quality_floor_single = 50.0
 
 [server.free_models_quality]
-min_general_index = 25.0
-min_coding_index = 35.0
-min_agentic_index = 15.0
+min_composite_quality = 30.0
 max_age_months = 18
-max_input_price_per_million = 5.0
-max_output_price_per_million = 15.0
+max_input_price_per_million = 2.0
+max_output_price_per_million = 10.0
 
 [providers.openrouter]
 profile = "open_router"
@@ -75,7 +33,6 @@ connect_timeout_seconds = 10
 response_header_timeout_seconds = 300
 stream_idle_timeout_seconds = 180
 billing_mode = "paid"
-allow_preview_models = true
 
 [providers.openrouter.model_mappings]
 "anthropic/claude-sonnet-4.6" = "claude-sonnet-4-6"
