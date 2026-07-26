@@ -1,5 +1,33 @@
 use std::process::Command;
 
+/// Strip environment variables that would trigger automatic provider discovery
+/// via `discover_environment_providers` in the gateway's config loader.
+/// Without this, the user's shell environment can leak into CI tests and
+/// produce non-deterministic provider counts and quota-reference output.
+fn strip_provider_env_vars(mut cmd: Command) -> Command {
+    for var in [
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "FIREWORKS_API_KEY",
+        "ZAI_API_KEY",
+        "GOOGLE_API_KEY",
+        "KILOCODE_API_KEY",
+        "OPENCODE_API_KEY",
+        "MISTRAL_API_KEY",
+        "NOUS_PORTAL_API_KEY",
+        "NVIDIA_NIM_API_KEY",
+        "GROQ_API_KEY",
+        "ORCAROUTER_API_KEY",
+        "OLLAMA_API_KEY",
+        "SILICON_FLOW_API_KEY",
+    ] {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 #[test]
 fn credential_list_succeeds_before_configuration_exists() {
     let directory = tempfile::tempdir().expect("tempdir");
@@ -23,7 +51,7 @@ fn credential_list_succeeds_before_configuration_exists() {
 #[test]
 fn config_check_discovers_environment_providers_without_setup() {
     let directory = tempfile::tempdir().expect("tempdir");
-    let output = Command::new(env!("CARGO_BIN_EXE_model-gateway"))
+    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
         .args(["config", "check"])
         .env(
             "MODEL_GATEWAY_CONFIG",
@@ -98,7 +126,7 @@ model = "fixture"
 "#,
     )
     .expect("write config");
-    let output = Command::new(env!("CARGO_BIN_EXE_model-gateway"))
+    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
         .args(["catalog", "status"])
         .env("MODEL_GATEWAY_CONFIG", &config_path)
         .env(

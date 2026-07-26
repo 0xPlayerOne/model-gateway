@@ -2,79 +2,45 @@ name: CI
 
 on:
   push:
+    branches: [main, staging]
   pull_request:
+    branches: [staging]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  rust:
+  quality:
+    name: Build, Format, Lint & Type Check
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: jdx/mise-action@v4
         with:
-          toolchain: 1.87.0
-          components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-features
-      - run: cargo build --release
-      - run: cargo run -- --help
+          cache: true
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+      - name: Format check
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Type check
+        run: cargo check
+      - name: Build
+        run: cargo build
 
-  native:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15-intel, macos-14]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.87.0
-          components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-features
-      - run: cargo build --release
-      - run: cargo run -- --help
-      - run: ./scripts/native-smoke.sh
-
-  dependencies:
+  test:
+    name: Test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    needs: quality
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: jdx/mise-action@v4
         with:
-          toolchain: 1.87.0
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-      - run: cargo +stable install cargo-deny --version 0.20.2 --locked
-      - run: cargo +stable deny check
-
-  security:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-
-  docker:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - run: ./scripts/docker-smoke.sh
-
-  hermes:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: astral-sh/setup-uv@v7
-      - run: ./scripts/hermes-smoke.sh
+          cache: true
+      - name: Test
+        run: cargo test

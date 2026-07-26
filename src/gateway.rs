@@ -3727,10 +3727,9 @@ fn take_sse_event(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     let (position, delimiter_len) =
         if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
             (position, 4)
-        } else if let Some(position) = buffer.windows(2).position(|window| window == b"\n\n") {
-            (position, 2)
         } else {
-            return None;
+            let position = buffer.windows(2).position(|window| window == b"\n\n")?;
+            (position, 2)
         };
     Some(buffer.drain(..position + delimiter_len).collect())
 }

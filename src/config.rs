@@ -2160,4 +2160,216 @@ mod tests {
         assert_eq!(parse_model_size("small-model"), None);
         assert_eq!(parse_model_size(""), None);
     }
+
+    #[test]
+    fn is_safe_extra_header_accepts_valid_headers() {
+        use super::is_safe_extra_header;
+        // Basic alphanumeric
+        assert!(is_safe_extra_header("X-Custom-Header"));
+        assert!(is_safe_extra_header("x-custom-header"));
+        assert!(is_safe_extra_header("X_Header_1"));
+        // Allowed special characters
+        assert!(is_safe_extra_header("X!Header"));
+        assert!(is_safe_extra_header("X#Header"));
+        assert!(is_safe_extra_header("Content-Type"));
+        assert!(is_safe_extra_header("x-my-header-v2"));
+        assert!(is_safe_extra_header("X-Auth-Method")); // "auth" but not "authorization"
+        assert!(is_safe_extra_header("X-Key-Name")); // "key" but not "api-key"
+    }
+
+    #[test]
+    fn is_safe_extra_header_rejects_empty() {
+        use super::is_safe_extra_header;
+        assert!(!is_safe_extra_header(""));
+    }
+
+    #[test]
+    fn is_safe_extra_header_rejects_blocked_names() {
+        use super::is_safe_extra_header;
+        // Exact match blocked names
+        assert!(!is_safe_extra_header("authorization"));
+        assert!(!is_safe_extra_header("Authorization"));
+        assert!(!is_safe_extra_header("proxy-authorization"));
+        assert!(!is_safe_extra_header("host"));
+        assert!(!is_safe_extra_header("content-length"));
+        assert!(!is_safe_extra_header("transfer-encoding"));
+        assert!(!is_safe_extra_header("connection"));
+        assert!(!is_safe_extra_header("cookie"));
+        assert!(!is_safe_extra_header("set-cookie"));
+        assert!(!is_safe_extra_header("x-api-key"));
+        assert!(!is_safe_extra_header("api-key"));
+        assert!(!is_safe_extra_header("x-auth-token"));
+    }
+
+    #[test]
+    fn is_safe_extra_header_rejects_contains_forbidden_substrings() {
+        use super::is_safe_extra_header;
+        // Contains "authorization" as substring
+        assert!(!is_safe_extra_header("x-custom-authorization"));
+        assert!(!is_safe_extra_header("my-authorization-header"));
+        // Contains "api-key"
+        assert!(!is_safe_extra_header("x-custom-api-key"));
+        assert!(!is_safe_extra_header("my-api-key-value"));
+        // Contains "token"
+        assert!(!is_safe_extra_header("x-access-token"));
+        assert!(!is_safe_extra_header("refresh-token-value"));
+        // But "token" as part of a compound word that doesn't contain "token" is not blocked
+        // actually it IS blocked because contains("token") is true
+    }
+
+    #[test]
+    fn is_safe_extra_header_rejects_proxy_prefix() {
+        use super::is_safe_extra_header;
+        assert!(!is_safe_extra_header("proxy-foo"));
+        assert!(!is_safe_extra_header("proxy-bar"));
+        assert!(!is_safe_extra_header("Proxy-Method")); // case-insensitive check
+    }
+
+    #[test]
+    fn is_safe_extra_header_rejects_non_ascii_chars() {
+        use super::is_safe_extra_header;
+        assert!(!is_safe_extra_header("X-Header-é")); // non-ASCII
+        assert!(!is_safe_extra_header("X-Header-你")); // Unicode
+        assert!(!is_safe_extra_header("header space")); // space not allowed
+        assert!(!is_safe_extra_header("header\nnewline")); // control char
+    }
+
+    #[test]
+    fn is_loopback_host_detects_loopback() {
+        use super::is_loopback_host;
+        // Named localhost (case-sensitive match)
+        assert!(is_loopback_host(Some("localhost")));
+        assert!(!is_loopback_host(Some("LOCALHOST")));
+        // IPv4 loopback
+        assert!(is_loopback_host(Some("127.0.0.1")));
+        assert!(is_loopback_host(Some("127.0.0.0")));
+        assert!(is_loopback_host(Some("127.255.255.255")));
+        // IPv6 loopback (with and without brackets)
+        assert!(is_loopback_host(Some("::1")));
+        assert!(is_loopback_host(Some("[::1]")));
+        // Non-loopback
+        assert!(!is_loopback_host(Some("example.com")));
+        assert!(!is_loopback_host(Some("192.168.1.1")));
+        assert!(!is_loopback_host(Some("10.0.0.1")));
+        assert!(!is_loopback_host(Some("8.8.8.8")));
+        // None
+        assert!(!is_loopback_host(None));
+        // Invalid host string
+        assert!(!is_loopback_host(Some("not-an-ip")));
+    }
+
+    #[test]
+    fn is_private_host_detects_private_ranges() {
+        use super::is_private_host;
+        // Docker internal
+        assert!(is_private_host(Some("host.docker.internal")));
+        // Private IPv4
+        assert!(is_private_host(Some("10.0.0.1")));
+        assert!(is_private_host(Some("10.255.255.255")));
+        assert!(is_private_host(Some("172.16.0.1")));
+        assert!(is_private_host(Some("172.31.255.255")));
+        assert!(is_private_host(Some("192.168.0.1")));
+        assert!(is_private_host(Some("192.168.255.255")));
+        assert!(is_private_host(Some("169.254.1.1"))); // link-local
+        // CG-NAT
+        assert!(is_private_host(Some("100.64.0.1")));
+        assert!(is_private_host(Some("100.127.255.255")));
+        // Loopback
+        assert!(is_private_host(Some("127.0.0.1")));
+        // Private IPv6
+        assert!(is_private_host(Some("[::1]")));
+        assert!(is_private_host(Some("[fd00::1]"))); // unique-local
+        assert!(is_private_host(Some("[fe80::1]"))); // link-local
+        // Public IP
+        assert!(!is_private_host(Some("8.8.8.8")));
+        assert!(!is_private_host(Some("1.1.1.1")));
+        assert!(!is_private_host(Some("example.com")));
+        // None
+        assert!(!is_private_host(None));
+        // Invalid
+        assert!(!is_private_host(Some("not-an-ip")));
+    }
+
+    #[test]
+    fn is_private_ipv4_detects_all_private_ranges() {
+        use super::is_private_ipv4;
+        use std::net::Ipv4Addr;
+        // Private 10.x.x.x
+        assert!(is_private_ipv4(Ipv4Addr::new(10, 0, 0, 0)));
+        assert!(is_private_ipv4(Ipv4Addr::new(10, 255, 255, 255)));
+        // Private 172.16-31.x.x
+        assert!(is_private_ipv4(Ipv4Addr::new(172, 16, 0, 0)));
+        assert!(is_private_ipv4(Ipv4Addr::new(172, 31, 255, 255)));
+        // Private 192.168.x.x
+        assert!(is_private_ipv4(Ipv4Addr::new(192, 168, 0, 0)));
+        assert!(is_private_ipv4(Ipv4Addr::new(192, 168, 255, 255)));
+        // Link-local 169.254.x.x
+        assert!(is_private_ipv4(Ipv4Addr::new(169, 254, 0, 1)));
+        assert!(is_private_ipv4(Ipv4Addr::new(169, 254, 255, 255)));
+        // Loopback 127.x.x.x
+        assert!(is_private_ipv4(Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(is_private_ipv4(Ipv4Addr::new(127, 255, 255, 255)));
+        // CG-NAT 100.64-127.x.x
+        assert!(is_private_ipv4(Ipv4Addr::new(100, 64, 0, 1)));
+        assert!(is_private_ipv4(Ipv4Addr::new(100, 127, 255, 255)));
+        // Public IPs
+        assert!(!is_private_ipv4(Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(!is_private_ipv4(Ipv4Addr::new(1, 1, 1, 1)));
+        assert!(!is_private_ipv4(Ipv4Addr::new(100, 63, 0, 1))); // just outside CG-NAT
+        assert!(!is_private_ipv4(Ipv4Addr::new(100, 128, 0, 1))); // just outside CG-NAT
+        assert!(!is_private_ipv4(Ipv4Addr::new(172, 15, 255, 255))); // just outside private
+        assert!(!is_private_ipv4(Ipv4Addr::new(172, 32, 0, 0))); // just outside private
+    }
+
+    #[test]
+    fn is_private_ipv6_detects_private_ranges() {
+        use super::is_private_ipv6;
+        use std::net::Ipv6Addr;
+        // Loopback
+        assert!(is_private_ipv6(Ipv6Addr::LOCALHOST));
+        assert!(is_private_ipv6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)));
+        // Unique-local (fd00::/8)
+        assert!(is_private_ipv6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)));
+        assert!(is_private_ipv6(Ipv6Addr::new(
+            0xfdff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
+        )));
+        // Link-local (fe80::/10)
+        assert!(is_private_ipv6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)));
+        assert!(is_private_ipv6(Ipv6Addr::new(
+            0xfebf, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
+        )));
+        // Public IPv6
+        assert!(!is_private_ipv6(Ipv6Addr::new(
+            0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888
+        ))); // Google DNS
+        // Special-purpose but not private
+        assert!(!is_private_ipv6(Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0))); // 6to4
+    }
+
+    #[test]
+    fn validate_identifier_accepts_valid_names() {
+        use super::validate_identifier;
+        assert!(validate_identifier("my-provider", "test").is_ok());
+        assert!(validate_identifier("provider-1", "test").is_ok());
+        assert!(validate_identifier("my.provider", "test").is_ok());
+        assert!(validate_identifier("a", "test").is_ok());
+        assert!(validate_identifier(&"a".repeat(128), "test").is_ok());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_invalid_names() {
+        use super::validate_identifier;
+        // Empty
+        assert!(validate_identifier("", "test").is_err());
+        // Too long
+        assert!(validate_identifier(&"a".repeat(129), "test").is_err());
+        // Invalid characters
+        assert!(validate_identifier("my provider", "test").is_err());
+        assert!(validate_identifier("provider/name", "test").is_err());
+        assert!(validate_identifier("provider@name", "test").is_err());
+        assert!(validate_identifier("provider!name", "test").is_err());
+        // Unicode
+        assert!(validate_identifier("héllo", "test").is_err());
+        assert!(validate_identifier("你好", "test").is_err());
+    }
 }

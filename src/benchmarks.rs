@@ -131,6 +131,8 @@ pub struct BenchmarkImport {
     pub models: Vec<BenchmarkModel>,
 }
 
+pub const PRICING_OVERRIDE_SOURCE: &str = "pricing-overrides";
+
 impl BenchmarkImport {
     pub fn normalize(mut self) -> Result<Self, String> {
         for model in &mut self.models {
@@ -469,6 +471,10 @@ fn scaled_number(value: &Value, keys: &[(&str, f64)]) -> Option<f64> {
     None
 }
 
+// Howard Hinnant / public-domain civil calendar helper
+// Shared via routing module
+use crate::routing::civil_from_days;
+
 fn epoch_date_string() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -477,21 +483,6 @@ fn epoch_date_string() -> String {
     let days = secs.div_euclid(86_400) as i64;
     let (year, month, day) = civil_from_days(days);
     format!("{year:04}-{month:02}-{day:02}")
-}
-
-// Howard Hinnant / public-domain civil calendar helpers
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096).div_euclid(365);
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2).div_euclid(153);
-    let day = doy - (153 * mp + 2).div_euclid(5) + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-    (year, month, day)
 }
 
 fn aa_reasoning_effort(item: &Value) -> Option<String> {

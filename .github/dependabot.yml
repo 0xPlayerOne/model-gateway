@@ -23,8 +23,8 @@ updates:
     target-branch: staging
     schedule:
       interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
+      day: sunday
+    open-pull-requests-limit: 99
     labels:
       - dependencies
       - ci
