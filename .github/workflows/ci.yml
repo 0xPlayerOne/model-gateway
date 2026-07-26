@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, staging]
   pull_request:
-    branches: [main, staging]
+    branches: [staging]
 
 permissions:
   contents: read
@@ -16,7 +16,6 @@ concurrency:
 jobs:
   quality:
     name: Build, Format, Lint & Type Check
-    if: github.event_name != 'pull_request' || github.head_ref != 'staging'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
