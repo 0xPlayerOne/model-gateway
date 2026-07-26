@@ -1373,7 +1373,7 @@ fn quota_window_start(now: i64, quota: &QuotaLimit) -> i64 {
     }
 }
 
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
+pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -1387,7 +1387,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = year - i64::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 }.div_euclid(400);
     let yoe = year - era * 400;
