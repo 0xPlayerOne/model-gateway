@@ -38,4 +38,4 @@ jobs:
             --body "Weekly release. Auto-generated on push to staging.
 
 Changes since last main merge:
-- See commit history for full list"
+  - See commit history for full list"
