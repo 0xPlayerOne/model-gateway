@@ -95,7 +95,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: native-*
           path: dist
@@ -138,7 +138,7 @@ jobs:
         if: github.event_name == 'push'
         shell: bash
         run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/model-gateway" >> "$GITHUB_ENV"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: github.event_name == 'push'
         with:
           pattern: native-*
@@ -193,7 +193,7 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: native-*
           path: dist
