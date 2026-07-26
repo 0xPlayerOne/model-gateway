@@ -1,0 +1,41 @@
+name: Release PR
+
+on:
+  push:
+    branches: [staging]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  create-release-pr:
+    name: Create Release PR into main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check if staging-to-main PR already exists
+        id: check-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh pr list --base main --head staging --state all --json number 2>/dev/null | jq 'length')
+          echo "existing=$EXISTING" >> "$GITHUB_OUTPUT"
+
+      - name: Create release PR
+        if: steps.check-pr.outputs.existing == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE=$(date +%Y-%m-%d)
+          gh pr create \
+            --base main \
+            --head staging \
+            --title "Release: staging -> main ($DATE)" \
+            --body "Weekly release. Auto-generated on push to staging.
+
+Changes since last main merge:
+- See commit history for full list"
