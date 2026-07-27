@@ -62,7 +62,7 @@ jobs:
         with:
           install: true
           install-python: false
-          cache-build: false
+          cache-build: true
           cache-lint: true
           task: lint
       - name: Lint
