@@ -48,11 +48,14 @@ if [ "${1:-audit}" = should_run ]; then
 fi
 
 if [ "${1:-}" = profile ]; then
-  python_requirements="$(
-    git ls-files -z '*requirements*.txt' |
-      node -e 'let data=""; process.stdin.on("data", (chunk) => { data += chunk; }).on("end", () => process.stdout.write(JSON.stringify(data.split("\\0").filter(Boolean))));'
-  )"
-  [ "$python_requirements" = "[]" ] && python_requirements='[""]'
+  python_requirements='["none"]'
+  if has_python_manifest && ! repo_foundry_governance_only && ! repo_foundry_pr_dependencies_unchanged python; then
+    python_requirements="$(
+      git ls-files -z '*requirements*.txt' |
+        node -e 'let data=""; process.stdin.on("data", (chunk) => { data += chunk; }).on("end", () => process.stdout.write(JSON.stringify(data.split("\\0").filter(Boolean))));'
+    )"
+    [ "$python_requirements" = "[]" ] && python_requirements='["project"]'
+  fi
   for ecosystem in javascript rust python; do
     if should_run "$ecosystem"; then
       printf '%s=true\n' "$ecosystem"
@@ -147,7 +150,7 @@ audit_rust() {
 
 audit_python() {
   requirement_files=()
-  if [ -n "${REPO_FOUNDRY_PYTHON_REQUIREMENT:-}" ]; then
+  if [ -n "${REPO_FOUNDRY_PYTHON_REQUIREMENT:-}" ] && [ "$REPO_FOUNDRY_PYTHON_REQUIREMENT" != project ] && [ "$REPO_FOUNDRY_PYTHON_REQUIREMENT" != none ]; then
     if ! git ls-files --error-unmatch -- "${REPO_FOUNDRY_PYTHON_REQUIREMENT}" >/dev/null 2>&1; then
       echo "Python requirement file is not tracked: ${REPO_FOUNDRY_PYTHON_REQUIREMENT}" >&2
       return 1
