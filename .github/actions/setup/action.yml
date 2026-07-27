@@ -34,6 +34,10 @@ inputs:
     description: Cache materialized JavaScript dependencies; auto skips large Bun node_modules trees and keeps compact link-based installs.
     required: false
     default: auto
+  cache-packages:
+    description: Restore JavaScript package-manager caches; auto skips large Bun lockfiles, or use true/false to override.
+    required: false
+    default: auto
   cache-lint:
     description: Restore the JavaScript/TypeScript lint cache.
     required: false
@@ -213,6 +217,30 @@ runs:
         esac
         printf 'javascript_package_manager=%s\n' "$javascript_package_manager" >> "$GITHUB_OUTPUT"
 
+        javascript_packages_cache=true
+        case "$REPO_FOUNDRY_CACHE_PACKAGES" in
+          false) javascript_packages_cache=false ;;
+          true) : ;;
+          auto)
+            # Large Bun stores can take longer to transfer and extract than a
+            # clean registry install. Keep normal projects cached, but avoid
+            # the expensive archive once tracked Bun lockfiles exceed 512 KiB.
+            if [ "$javascript_package_manager" = bun ]; then
+              bun_lock_bytes=0
+              while IFS= read -r lockfile; do
+                [ -f "$lockfile" ] || continue
+                lock_bytes="$(wc -c < "$lockfile")"
+                bun_lock_bytes=$((bun_lock_bytes + lock_bytes))
+              done < <(printf '%s\n' "$tracked_files" | awk '/(^|\/)bun\.lock(b)?$/')
+              if [ "$bun_lock_bytes" -gt 524288 ]; then
+                javascript_packages_cache=false
+              fi
+            fi
+            ;;
+          *) echo "Unsupported cache-packages value: $REPO_FOUNDRY_CACHE_PACKAGES" >&2; exit 2 ;;
+        esac
+        printf 'javascript_packages_cache=%s\n' "$javascript_packages_cache" >> "$GITHUB_OUTPUT"
+
         python=false
         if has_python_source || [ -f pyproject.toml ] ||
           [ -f requirements.txt ] || [ -f requirements-dev.txt ]; then
@@ -378,6 +406,7 @@ runs:
         REPO_FOUNDRY_TASK_JAVASCRIPT: ${{ inputs.task-javascript }}
         REPO_FOUNDRY_TASK_PYTHON: ${{ inputs.task-python }}
         REPO_FOUNDRY_TASK_RUST: ${{ inputs.task-rust }}
+        REPO_FOUNDRY_CACHE_PACKAGES: ${{ inputs.cache-packages }}
 
     - name: Setup uv
       if: >-
@@ -417,7 +446,7 @@ runs:
         restore-keys: |
           ${{ runner.os }}-corepack-
     - name: Cache JavaScript packages
-      if: inputs.install == 'true' && inputs.install-javascript == 'true' && steps.profile.outputs.javascript == 'true' && hashFiles('**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json') != '' && steps.javascript-dependencies.outputs.cache-hit != 'true'
+      if: inputs.install == 'true' && inputs.install-javascript == 'true' && steps.profile.outputs.javascript_packages_cache == 'true' && steps.profile.outputs.javascript == 'true' && hashFiles('**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json') != '' && steps.javascript-dependencies.outputs.cache-hit != 'true'
       uses: actions/cache@v5
       with:
         path: |
