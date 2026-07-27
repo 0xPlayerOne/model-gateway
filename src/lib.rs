@@ -3,6 +3,7 @@
 pub mod benchmarks;
 pub mod config;
 pub mod gateway;
+pub mod pricing;
 pub mod providers;
 pub mod routing;
 pub mod secrets;

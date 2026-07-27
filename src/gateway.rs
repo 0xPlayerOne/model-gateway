@@ -26,6 +26,7 @@ use crate::benchmarks::{
 use crate::config::{
     BillingMode, Config, ProviderConfig, ProviderProfileId, ServerConfig, TargetConfig,
 };
+use crate::pricing::{EffectivePrice, PriceScope, PriceSourceKind, normalize_price_id};
 use crate::providers::prepare_request;
 use crate::routing::{
     CatalogOffering, ReservationOutcome, ReservationRelease, ReservationToken, RoutingError,
@@ -350,6 +351,21 @@ const VARIANT_KEYWORDS: &[&str] = &[
     "omni",
 ];
 
+const IDENTITY_VARIANT_TOKENS: &[&str] = &[
+    "pro",
+    "flash",
+    "lite",
+    "reasoning",
+    "non",
+    "preview",
+    "medium",
+    "thinking",
+    "max",
+    "mini",
+    "highspeed",
+    "omni",
+];
+
 const NOISE_TOKENS: &[&str] = &[
     "fp8", "fp16", "bf16", "int4", "int8", "latest", "thinking", "free",
 ];
@@ -406,6 +422,9 @@ fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
     let benchmark_variants = normalized_identifier_variants(benchmark_id);
     for catalog in &catalog_variants {
         for benchmark in &benchmark_variants {
+            if identity_variant_tokens(catalog) != identity_variant_tokens(benchmark) {
+                continue;
+            }
             if catalog == benchmark {
                 return true;
             }
@@ -433,6 +452,9 @@ fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
     for catalog in &catalog_variants {
         let cat_tokens: Vec<&str> = catalog.split('-').collect();
         for benchmark in &benchmark_variants {
+            if identity_variant_tokens(catalog) != identity_variant_tokens(benchmark) {
+                continue;
+            }
             let bench_tokens: Vec<&str> = benchmark.split('-').collect();
             for cat_start in 0..cat_tokens.len() {
                 let cat_suffix = cat_tokens[cat_start..].join("-");
@@ -459,6 +481,13 @@ fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
     }
 
     false
+}
+
+fn identity_variant_tokens(identifier: &str) -> BTreeSet<&str> {
+    identifier
+        .split('-')
+        .filter(|token| IDENTITY_VARIANT_TOKENS.contains(token))
+        .collect()
 }
 
 /// Known model ID normalizations for cases where the catalog and AA
@@ -925,6 +954,7 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
 struct CatalogModelEntry<'a> {
     offering: &'a CatalogOffering,
     benchmark: Option<&'a BenchmarkModel>,
+    price: Option<EffectivePrice>,
     composite_quality: Option<f64>,
     rank: usize,
     effort_level: Option<&'a str>,
@@ -933,12 +963,16 @@ struct CatalogModelEntry<'a> {
 
 fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
     let input_price = entry
-        .offering
-        .input_price_per_million
+        .price
+        .as_ref()
+        .map(|price| price.input_price_per_million)
+        .or(entry.offering.input_price_per_million)
         .or_else(|| entry.benchmark.and_then(|b| b.input_price_per_million));
     let output_price = entry
-        .offering
-        .output_price_per_million
+        .price
+        .as_ref()
+        .map(|price| price.output_price_per_million)
+        .or(entry.offering.output_price_per_million)
         .or_else(|| entry.benchmark.and_then(|b| b.output_price_per_million));
     json!({
         "model": {
@@ -965,6 +999,9 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
         "price_per_million": {
             "input": input_price,
             "output": output_price,
+            "source": entry.price.as_ref().map(|price| price.source.clone()),
+            "estimated": entry.price.as_ref().map(|price| price.estimated),
+            "pricing_eligible": input_price.is_some() && output_price.is_some(),
         },
     })
 }
@@ -972,7 +1009,24 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
 struct ModelCandidate {
     quality: Option<f64>,
     benchmark: Option<BenchmarkModel>,
+    price: Option<EffectivePrice>,
     offering: CatalogOffering,
+}
+
+struct PaidCandidateContext<'a> {
+    providers: &'a BTreeMap<String, ProviderConfig>,
+    runtimes: &'a BTreeMap<String, ProviderRuntime>,
+    cfg: &'a ServerConfig,
+    provider_filter: Option<&'a str>,
+    routing: &'a RoutingStore,
+    pricing_max_age_seconds: u64,
+}
+
+struct ModeModelValue<'a> {
+    model: &'a str,
+    provider: &'a str,
+    price: Option<&'a EffectivePrice>,
+    pricing_eligible: bool,
 }
 
 fn collect_free_candidates(
@@ -1013,30 +1067,60 @@ fn collect_free_candidates(
             .cloned()
             .unwrap_or_else(|| offering.model.clone());
         let matching = find_all_matching_benchmarks(benchmark_by_model, &canonical);
-        if !cfg.free_models_quality.passes(
-            matching.first().copied(),
-            offering.refreshed_at,
-            offering.input_price_per_million,
-            offering.output_price_per_million,
-            offering.context_length,
-            &canonical,
-        ) {
-            continue;
-        }
         if matching.is_empty() {
-            candidates.push(ModelCandidate {
-                quality: None,
-                benchmark: None,
-                offering: offering.clone(),
-            });
+            if cfg.free_models_quality.passes(
+                None,
+                offering.refreshed_at,
+                offering.input_price_per_million,
+                offering.output_price_per_million,
+                offering.context_length,
+                &canonical,
+            ) {
+                candidates.push(ModelCandidate {
+                    quality: None,
+                    benchmark: None,
+                    price: None,
+                    offering: offering.clone(),
+                });
+            }
         } else {
+            let mut has_quality = false;
             for benchmark in matching {
                 let Some(quality) = composite_quality(benchmark) else {
                     continue;
                 };
+                has_quality = true;
+                if !cfg.free_models_quality.passes(
+                    Some(benchmark),
+                    offering.refreshed_at,
+                    offering.input_price_per_million,
+                    offering.output_price_per_million,
+                    offering.context_length,
+                    &canonical,
+                ) {
+                    continue;
+                }
                 candidates.push(ModelCandidate {
                     quality: Some(quality),
                     benchmark: Some(benchmark.clone()),
+                    price: None,
+                    offering: offering.clone(),
+                });
+            }
+            if !has_quality
+                && cfg.free_models_quality.passes(
+                    None,
+                    offering.refreshed_at,
+                    offering.input_price_per_million,
+                    offering.output_price_per_million,
+                    offering.context_length,
+                    &canonical,
+                )
+            {
+                candidates.push(ModelCandidate {
+                    quality: None,
+                    benchmark: None,
+                    price: None,
                     offering: offering.clone(),
                 });
             }
@@ -1048,20 +1132,20 @@ fn collect_free_candidates(
 fn collect_paid_candidates(
     offerings: &[CatalogOffering],
     benchmark_by_model: &BTreeMap<String, Vec<BenchmarkModel>>,
-    providers: &BTreeMap<String, ProviderConfig>,
-    runtimes: &BTreeMap<String, ProviderRuntime>,
-    cfg: &ServerConfig,
-    provider_filter: Option<&str>,
+    context: PaidCandidateContext<'_>,
 ) -> Vec<ModelCandidate> {
     let mut candidates = Vec::new();
     for offering in offerings {
-        if provider_filter.is_some_and(|p| p != offering.provider) {
+        if context
+            .provider_filter
+            .is_some_and(|p| p != offering.provider)
+        {
             continue;
         }
-        let Some(provider) = providers.get(&offering.provider) else {
+        let Some(provider) = context.providers.get(&offering.provider) else {
             continue;
         };
-        let Some(runtime) = runtimes.get(&offering.provider) else {
+        let Some(runtime) = context.runtimes.get(&offering.provider) else {
             continue;
         };
         if !runtime.available
@@ -1079,19 +1163,34 @@ fn collect_paid_candidates(
         {
             continue;
         }
-        if is_model_denied(&offering.model, &offering.provider, cfg) {
+        if is_model_denied(&offering.model, &offering.provider, context.cfg) {
             continue;
         }
-        let canonical = provider
-            .model_mappings
-            .get(&offering.model)
+        let canonical_mapping = provider.model_mappings.get(&offering.model);
+        let canonical = canonical_mapping
             .cloned()
             .unwrap_or_else(|| offering.model.clone());
+        let price = context
+            .routing
+            .effective_price(
+                &offering.provider,
+                provider.pricing_profile.as_deref().or_else(|| {
+                    provider
+                        .profile
+                        .and_then(|profile| profile.models_dev_key())
+                }),
+                &offering.model,
+                canonical_mapping.map(String::as_str),
+                context.pricing_max_age_seconds,
+            )
+            .ok()
+            .flatten();
         let matching = find_all_matching_benchmarks(benchmark_by_model, &canonical);
         if matching.is_empty() {
             candidates.push(ModelCandidate {
                 quality: None,
                 benchmark: None,
+                price: price.clone(),
                 offering: offering.clone(),
             });
         } else {
@@ -1099,9 +1198,13 @@ fn collect_paid_candidates(
                 let Some(quality) = composite_quality(benchmark) else {
                     continue;
                 };
+                let effective_price = price
+                    .clone()
+                    .or_else(|| benchmark_price_for_model(&canonical, benchmark));
                 candidates.push(ModelCandidate {
                     quality: Some(quality),
                     benchmark: Some(benchmark.clone()),
+                    price: effective_price,
                     offering: offering.clone(),
                 });
             }
@@ -1158,10 +1261,14 @@ async fn list_auto_models(
     let paid_candidates = collect_paid_candidates(
         &paid_offerings,
         &benchmark_by_model,
-        &state.config.providers,
-        &state.providers,
-        cfg,
-        None,
+        PaidCandidateContext {
+            providers: &state.config.providers,
+            runtimes: &state.providers,
+            cfg,
+            provider_filter: None,
+            routing: &state.routing,
+            pricing_max_age_seconds: cfg.pricing_max_age_seconds,
+        },
     );
 
     let mut routes = BTreeMap::new();
@@ -1228,7 +1335,7 @@ fn select_mode_models(
     quality_floor: f64,
     quality_ceiling: Option<f64>,
 ) -> Value {
-    let mut scored: Vec<ScoredCandidate<(&str, &str)>> = Vec::new();
+    let mut scored: Vec<ScoredCandidate<ModeModelValue<'_>>> = Vec::new();
 
     for candidate in candidates {
         let Some(quality) = candidate.quality else {
@@ -1244,35 +1351,32 @@ fn select_mode_models(
         let latency = benchmark
             .and_then(|b| b.latency_seconds)
             .unwrap_or(f64::MAX);
-        let expected_cost_microusd = match (
-            candidate
-                .offering
-                .input_price_per_million
-                .or_else(|| benchmark.and_then(|b| b.input_price_per_million)),
-            candidate
-                .offering
-                .output_price_per_million
-                .or_else(|| benchmark.and_then(|b| b.output_price_per_million)),
-        ) {
-            (Some(input_price), Some(output_price)) => expected_cost_microusd(
-                256,
-                benchmark
-                    .and_then(|b| b.output_tokens_per_task)
-                    .unwrap_or(256)
-                    .min(256),
-                input_price,
-                output_price,
-            ),
-            _ => continue,
+        let expected_cost_microusd = if candidate.offering.is_free {
+            0
+        } else {
+            match candidate.price.as_ref() {
+                Some(price) => expected_cost_microusd(
+                    256,
+                    benchmark
+                        .and_then(|b| b.output_tokens_per_task)
+                        .unwrap_or(256)
+                        .min(256),
+                    price.input_price_per_million,
+                    price.output_price_per_million,
+                ),
+                _ => continue,
+            }
         };
         scored.push(ScoredCandidate {
             quality,
             expected_cost_microusd,
             latency_seconds: latency,
-            value: (
-                candidate.offering.model.as_str(),
-                candidate.offering.provider.as_str(),
-            ),
+            value: ModeModelValue {
+                model: candidate.offering.model.as_str(),
+                provider: candidate.offering.provider.as_str(),
+                price: candidate.price.as_ref(),
+                pricing_eligible: candidate.offering.is_free || candidate.price.is_some(),
+            },
         });
     }
 
@@ -1300,13 +1404,20 @@ fn select_mode_models(
     })
 }
 
-fn mode_model_entry(candidate: &ScoredCandidate<(&str, &str)>) -> Value {
+fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
     json!({
-        "model": candidate.value.0,
-        "provider": candidate.value.1,
+        "model": candidate.value.model,
+        "provider": candidate.value.provider,
         "quality": candidate.quality,
         "expected_cost_microusd": candidate.expected_cost_microusd,
         "latency_seconds": candidate.latency_seconds,
+        "pricing_eligible": candidate.value.pricing_eligible,
+        "price_per_million": candidate.value.price.map(|price| json!({
+            "input": price.input_price_per_million,
+            "output": price.output_price_per_million,
+            "source": price.source,
+            "estimated": price.estimated,
+        })),
     })
 }
 
@@ -1516,6 +1627,7 @@ async fn list_free_models(
                 catalog_model_json(&CatalogModelEntry {
                     offering: &offering,
                     benchmark: benchmark.as_ref(),
+                    price: None,
                     composite_quality,
                     rank: index + 1,
                     effort_level,
@@ -1617,10 +1729,14 @@ async fn list_paid_models(
     let candidates = collect_paid_candidates(
         &offerings,
         &benchmark_map,
-        &state.config.providers,
-        &state.providers,
-        &state.config.server,
-        provider_filter,
+        PaidCandidateContext {
+            providers: &state.config.providers,
+            runtimes: &state.providers,
+            cfg: &state.config.server,
+            provider_filter,
+            routing: &state.routing,
+            pricing_max_age_seconds: state.config.server.pricing_max_age_seconds,
+        },
     );
 
     let mut providers = BTreeMap::new();
@@ -1650,19 +1766,20 @@ async fn list_paid_models(
         data.push((
             candidate.quality,
             candidate.benchmark.clone(),
+            candidate.price.clone(),
             candidate.offering.clone(),
         ));
     }
 
     let mut seen = std::collections::HashSet::new();
-    data.retain(|(_, _, offering)| {
+    data.retain(|(_, _, _, offering)| {
         let normalized = normalize_identifier(&offering.model);
         seen.insert(normalized)
     });
 
     data.sort_by(|left, right| {
-        let (left_quality, _, left_offering) = left;
-        let (right_quality, _, right_offering) = right;
+        let (left_quality, _, _, left_offering) = left;
+        let (right_quality, _, _, right_offering) = right;
         match (left_quality, right_quality) {
             (Some(lq), Some(rq)) => rq
                 .total_cmp(lq)
@@ -1677,7 +1794,7 @@ async fn list_paid_models(
         .into_iter()
         .enumerate()
         .take(limit)
-        .map(|(index, (_quality, benchmark, offering))| {
+        .map(|(index, (_quality, benchmark, price, offering))| {
             let composite_quality = benchmark.as_ref().and_then(composite_quality);
             let effort_level = benchmark
                 .as_ref()
@@ -1685,6 +1802,7 @@ async fn list_paid_models(
             catalog_model_json(&CatalogModelEntry {
                 offering: &offering,
                 benchmark: benchmark.as_ref(),
+                price,
                 composite_quality,
                 rank: index + 1,
                 effort_level,
@@ -2388,6 +2506,30 @@ fn selected_target(state: &AppState, target: &TargetConfig) -> SelectedTarget {
         .and_then(|provider| provider.profile)
         .map(|profile| profile.definition().display_name.to_owned())
         .unwrap_or_else(|| target.provider.clone());
+    let price = state
+        .config
+        .providers
+        .get(&target.provider)
+        .and_then(|provider| {
+            state
+                .routing
+                .effective_price(
+                    &target.provider,
+                    provider.pricing_profile.as_deref().or_else(|| {
+                        provider
+                            .profile
+                            .and_then(|profile| profile.models_dev_key())
+                    }),
+                    &target.model,
+                    provider
+                        .model_mappings
+                        .get(&target.model)
+                        .map(String::as_str),
+                    state.config.server.pricing_max_age_seconds,
+                )
+                .ok()
+                .flatten()
+        });
     SelectedTarget {
         runtime_provider: target.provider.clone(),
         provider: target.provider.clone(),
@@ -2397,8 +2539,8 @@ fn selected_target(state: &AppState, target: &TargetConfig) -> SelectedTarget {
         managed: false,
         quotas: Vec::new(),
         expected_cost_microusd: 0,
-        input_price_per_million: None,
-        output_price_per_million: None,
+        input_price_per_million: price.as_ref().map(|price| price.input_price_per_million),
+        output_price_per_million: price.as_ref().map(|price| price.output_price_per_million),
         reasoning_effort: None,
         selection: None,
     }
@@ -2743,14 +2885,14 @@ async fn resolve_benchmark_targets(
         {
             continue;
         }
-        let canonical = provider
-            .model_mappings
-            .get(&offering.model)
+        let canonical_mapping = provider.model_mappings.get(&offering.model);
+        let canonical = canonical_mapping
             .map(String::as_str)
             .unwrap_or(&offering.model);
-        let Some(model_benchmarks) = benchmark_by_model.get(canonical) else {
+        let model_benchmarks = find_all_matching_benchmarks(&benchmark_by_model, canonical);
+        if model_benchmarks.is_empty() {
             continue;
-        };
+        }
         if !runtime.available || offering.is_free || provider.billing_mode == BillingMode::Free {
             continue;
         }
@@ -2766,6 +2908,21 @@ async fn resolve_benchmark_targets(
         if is_model_denied(&offering.model, &offering.provider, &state.config.server) {
             continue;
         }
+        let effective_price = state
+            .routing
+            .effective_price(
+                &offering.provider,
+                provider.pricing_profile.as_deref().or_else(|| {
+                    provider
+                        .profile
+                        .and_then(|profile| profile.models_dev_key())
+                }),
+                &offering.model,
+                canonical_mapping.map(String::as_str),
+                state.config.server.pricing_max_age_seconds,
+            )
+            .ok()
+            .flatten();
         let has_effort_variants = model_benchmarks
             .iter()
             .any(|benchmark| benchmark.reasoning_effort.is_some());
@@ -2788,27 +2945,23 @@ async fn resolve_benchmark_targets(
             if quality < quality_floor {
                 continue;
             }
+            let Some(effective_price) = effective_price
+                .clone()
+                .or_else(|| benchmark_price_for_model(canonical, benchmark))
+            else {
+                continue;
+            };
             let expected_cost_microusd = if offering.is_free {
                 0
             } else {
-                let (Some(input_price), Some(output_price)) = (
-                    offering
-                        .input_price_per_million
-                        .or(benchmark.input_price_per_million),
-                    offering
-                        .output_price_per_million
-                        .or(benchmark.output_price_per_million),
-                ) else {
-                    continue;
-                };
                 expected_cost_microusd(
                     requirements.estimated_input_tokens,
                     benchmark
                         .output_tokens_per_task
                         .unwrap_or(requirements.estimated_output_tokens)
                         .min(requirements.estimated_output_tokens),
-                    input_price,
-                    output_price,
+                    effective_price.input_price_per_million,
+                    effective_price.output_price_per_million,
                 )
             };
             let reference = quota_reference(provider, &offering.model);
@@ -2830,12 +2983,8 @@ async fn resolve_benchmark_targets(
                         .map(|reference| reference.rules)
                         .unwrap_or_default(),
                     expected_cost_microusd,
-                    input_price_per_million: offering
-                        .input_price_per_million
-                        .or(benchmark.input_price_per_million),
-                    output_price_per_million: offering
-                        .output_price_per_million
-                        .or(benchmark.output_price_per_million),
+                    input_price_per_million: Some(effective_price.input_price_per_million),
+                    output_price_per_million: Some(effective_price.output_price_per_million),
                     reasoning_effort: benchmark.reasoning_effort.clone(),
                     selection: Some(SelectionMetadata {
                         canonical_model: canonical.to_owned(),
@@ -2892,6 +3041,32 @@ fn is_reasoning_effort(effort: &str) -> bool {
         effort.to_ascii_lowercase().as_str(),
         "low" | "medium" | "high" | "xhigh"
     )
+}
+
+fn benchmark_price(benchmark: &BenchmarkModel) -> Option<EffectivePrice> {
+    if benchmark.input_price_per_million == Some(0.0)
+        && benchmark.output_price_per_million == Some(0.0)
+    {
+        return None;
+    }
+    Some(EffectivePrice {
+        input_price_per_million: benchmark.input_price_per_million?,
+        output_price_per_million: benchmark.output_price_per_million?,
+        source: "benchmark".to_owned(),
+        source_kind: PriceSourceKind::Benchmark,
+        scope: PriceScope::Canonical,
+        provider_key: None,
+        model_id: benchmark.id.clone(),
+        fetched_at: None,
+        valid_from: None,
+        valid_until: None,
+        estimated: true,
+    })
+}
+
+fn benchmark_price_for_model(model: &str, benchmark: &BenchmarkModel) -> Option<EffectivePrice> {
+    (normalize_price_id(model) == normalize_price_id(&benchmark.id))
+        .then(|| benchmark_price(benchmark))?
 }
 
 fn expected_cost_microusd(
@@ -4332,7 +4507,7 @@ mod tests {
             "should prefer base variant over penalized keywords"
         );
 
-        // When only variant-keyword benchmarks exist, pick the least-penalized
+        // A base model must not inherit quality from a different product variant.
         let mut benchmarks = BTreeMap::new();
         benchmarks.insert(
             "mimo-v2-5-pro".to_owned(),
@@ -4356,10 +4531,14 @@ mod tests {
                 1.0,
             )],
         );
-        let result = find_benchmark(&benchmarks, "xiaomimimo/mimo-v2.5", TaskKind::General)
-            .expect("mimo-v2.5 pro only");
-        assert_eq!(result.intelligence, Some(42.2));
-        assert_eq!(result.id, "mimo-v2-5-pro");
+        assert!(find_benchmark(&benchmarks, "xiaomimimo/mimo-v2.5", TaskKind::General).is_none());
+        assert!(!benchmark_ids_match("mimo-v2.5", "mimo-v2-5-pro"));
+        assert!(!benchmark_ids_match("mimo-v2.5-pro", "mimo-v2-5-0424"));
+        assert!(!benchmark_ids_match("deepseek-v4-flash", "deepseek-v4-pro"));
+        assert!(benchmark_ids_match(
+            "stepfun/step-3.7-flash:free",
+            "step-3-7-flash"
+        ));
     }
 
     #[test]

@@ -291,6 +291,29 @@ impl ProviderProfileId {
         self.definition().suggested_model
     }
 
+    pub const fn models_dev_key(self) -> Option<&'static str> {
+        match self {
+            Self::KiloCode => Some("kilo"),
+            Self::OpenCode => Some("opencode"),
+            Self::OpenCodeGo => Some("opencode-go"),
+            Self::OpenRouter => Some("openrouter"),
+            Self::OpenaiApi => Some("openai"),
+            Self::Anthropic => Some("anthropic"),
+            Self::Deepseek => Some("deepseek"),
+            Self::Fireworks => Some("fireworks_ai"),
+            Self::Zai => Some("zai"),
+            Self::GoogleGemini => Some("google"),
+            Self::Mistral => Some("mistral"),
+            Self::NousPortal => Some("nousresearch"),
+            Self::NvidiaNim => Some("nvidia"),
+            Self::Groq => Some("groq"),
+            Self::OrcaRouter => Some("orcarouter"),
+            Self::OllamaCloud => Some("ollama"),
+            Self::SiliconFlow => Some("siliconflow"),
+            Self::Ollama | Self::LmStudio | Self::Custom => None,
+        }
+    }
+
     pub fn config(self, base_url: String, api_key_secret: Option<String>) -> ProviderConfig {
         let allow_insecure_http = base_url.starts_with("http://host.docker.internal");
         ProviderConfig {

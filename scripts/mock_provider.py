@@ -42,9 +42,7 @@ class Handler(BaseHTTPRequestHandler):
                     "id": "chatcmpl-smoke",
                     "object": "chat.completion.chunk",
                     "model": request["model"],
-                    "choices": [
-                        {"index": 0, "delta": {}, "finish_reason": "stop"}
-                    ],
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                 },
             ]
             body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)

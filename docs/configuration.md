@@ -22,6 +22,7 @@ Environment overrides are applied on every load and take precedence over TOML.
 | `MODEL_GATEWAY_LOG_FORMAT` | `text` | `text` or `json` |
 | `MODEL_GATEWAY_CATALOG_MAX_AGE_SECONDS` | `86400` | Catalog freshness window |
 | `MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS` | `604800` | Benchmark freshness window (7 days) |
+| `MODEL_GATEWAY_PRICING_MAX_AGE_SECONDS` | `604800` | Pricing freshness window (7 days) |
 | `MODEL_GATEWAY_AUTO_FRONTIER_ENABLED` | `true` | Enable/disable auto-frontier route |
 | `MODEL_GATEWAY_AUTO_FREE_ENABLED` | `true` | Enable/disable auto-free route |
 | `MODEL_GATEWAY_AUTO_EFFICIENT_ENABLED` | `true` | Enable/disable auto-efficient route |
@@ -68,6 +69,15 @@ All providers default to **free billing**. To enable paid/subscription models, u
 
 Provider names in the global var must match config keys (lowercase with hyphens). Unknown names produce a config error.
 
+## Pricing Resolution
+
+Run `model-gateway pricing refresh` explicitly to update public pricing from
+models.dev. A complete provider catalog price, including a temporary zero or
+discounted price, is preserved before creator or aggregate fallback data.
+Use `model-gateway pricing import` for exact provider/model overrides and
+`model-gateway pricing explain <provider> <model>` to inspect the selected
+source. Auto routes exclude targets without a complete effective price.
+
 ## Provider Overrides
 
 Use the normalized provider name as prefix, e.g., `MODEL_GATEWAY_OPENROUTER_BILLING_MODE=paid`.
@@ -89,6 +99,7 @@ Use the normalized provider name as prefix, e.g., `MODEL_GATEWAY_OPENROUTER_BILL
 | `STREAM_IDLE_TIMEOUT_SECONDS` | `300` | Stream idle timeout |
 | `EXTRA_HEADERS` | `X-Custom:value` | Additional request headers |
 | `MODEL_MAPPINGS` | `provider/model:canonical` | Model ID mappings |
+| `pricing_profile` (TOML) | `models.dev provider key` | Provider-scoped public pricing namespace |
 | `QUOTAS` | `cost_microusd:1000000:86400` | Quota windows (semicolon-separated) |
 
 Provider names used in overrides: `openrouter`, `google-gemini`, `groq`, `mistral`, `kilocode`, `opencode-zen`, `opencode-go`, `nous-portal`, `novita`, `nvidia-nim`, `ollama-cloud`, `orca-router`, `siliconflow`, `deepseek`, `fireworks`, `openai-api`, `z-ai`.

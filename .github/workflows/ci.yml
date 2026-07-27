@@ -5,42 +5,110 @@ on:
     branches: [main, staging]
   pull_request:
     branches: [staging]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+  TURBO_TEAM: ${{ vars.TURBO_TEAM }}
+  REPO_FOUNDRY_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || '' }}
+
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  quality:
-    name: Build, Format, Lint & Type Check
+  format:
+    name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v4
+      - name: Checkout
+        uses: actions/checkout@v7
         with:
-          cache: true
-      - name: Install Rust components
-        run: rustup component add rustfmt clippy
-      - name: Format check
-        run: cargo fmt --check
-      - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Type check
-        run: cargo check
-      - name: Build
-        run: cargo build
+          fetch-depth: 2
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/ci.sh should_run format >> "$GITHUB_OUTPUT"
+      - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
+        uses: ./.github/actions/setup
+        with:
+          install: true
+          install-python: false
+          install-rust: false
+          cache-build: false
+          cache-format: true
+          task: format
+      - name: Format
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/ci.sh format
 
-  test:
-    name: Test
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-    needs: quality
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v4
+      - name: Checkout
+        uses: actions/checkout@v7
         with:
-          cache: true
-      - name: Test
-        run: cargo test
+          fetch-depth: 2
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/ci.sh should_run lint >> "$GITHUB_OUTPUT"
+      - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
+        uses: ./.github/actions/setup
+        with:
+          install: true
+          install-python: false
+          cache-build: false
+          cache-lint: true
+          task: lint
+      - name: Lint
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/ci.sh lint
+
+  type-check:
+    name: Type-Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/ci.sh should_run type_check >> "$GITHUB_OUTPUT"
+      - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
+        uses: ./.github/actions/setup
+        with:
+          install: true
+          install-python: false
+          task: type_check
+      - name: Type-Check
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/ci.sh type_check
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/ci.sh should_run build >> "$GITHUB_OUTPUT"
+      - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
+        uses: ./.github/actions/setup
+        with:
+          install: true
+          install-python: false
+          task: build
+      - name: Build
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/ci.sh build

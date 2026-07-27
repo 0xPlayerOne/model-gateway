@@ -131,6 +131,10 @@ Or per-provider: `MODEL_GATEWAY_OPENAI_API_BILLING_MODE=paid`. See [docs/configu
 | `benchmarks status` | Inspect active benchmark snapshots |
 | `benchmarks import --file <path>` | Import benchmarks from a file |
 | `benchmarks delete <source>` | Delete stale snapshots |
+| `pricing refresh` | Fetch provider-scoped public pricing from models.dev |
+| `pricing import --file <path>` | Import exact provider/model pricing overrides |
+| `pricing status` | Inspect active pricing snapshots |
+| `pricing explain <provider> <model>` | Show the selected effective price source |
 | `healthcheck` | Verify the server is running |
 
 ## Development

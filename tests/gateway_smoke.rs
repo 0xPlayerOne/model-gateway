@@ -391,6 +391,184 @@ async fn free_models_quality_bar_filters_low_quality_models() {
 }
 
 #[tokio::test]
+async fn free_models_keep_a_high_quality_effort_variant() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "provider-a",
+            &[CatalogRecord {
+                model: "variant-model".to_owned(),
+                is_free: true,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: Some(0.0),
+                output_price_per_million: Some(0.0),
+            }],
+        )
+        .expect("catalog");
+    let low = BenchmarkModel::fixture("variant-model", 10.0, 10.0, 10.0, 0.0, 0.0);
+    let mut high = BenchmarkModel::fixture("variant-model", 80.0, 80.0, 80.0, 0.0, 0.0);
+    high.reasoning_effort = Some("high".to_owned());
+    store
+        .replace_benchmarks("fixture", "Fixture", &[low, high])
+        .expect("benchmarks");
+    drop(store);
+
+    let mut config = config_for(
+        BTreeMap::from([(
+            "provider-a".to_owned(),
+            provider("https://example.com/v1".to_owned()),
+        )]),
+        vec![TargetConfig {
+            provider: "provider-a".to_owned(),
+            model: "variant-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.free_models_quality.min_composite_quality = 50.0;
+    config.server.free_models_quality.max_age_months = 0;
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/free-models?provider=provider-a"))
+        .send()
+        .await
+        .expect("free models response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("free models body");
+    assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(body["data"][0]["model"]["name"], "variant-model");
+    assert_eq!(body["data"][0]["model"]["effort_level"], "high");
+}
+
+#[tokio::test]
+async fn auto_models_include_free_candidates_without_price_observations() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "free-provider",
+            &[CatalogRecord {
+                model: "free-model".to_owned(),
+                is_free: true,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: Some(0.0),
+                output_price_per_million: Some(0.0),
+            }],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "free-model",
+                80.0,
+                80.0,
+                80.0,
+                0.0,
+                0.0,
+            )],
+        )
+        .expect("benchmarks");
+    drop(store);
+
+    let mut config = config_for(
+        BTreeMap::from([(
+            "free-provider".to_owned(),
+            provider("https://example.com/v1".to_owned()),
+        )]),
+        vec![TargetConfig {
+            provider: "free-provider".to_owned(),
+            model: "free-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/auto-models"))
+        .send()
+        .await
+        .expect("auto models response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("auto models body");
+    assert_eq!(body["routes"]["free"]["primary"]["model"], "free-model");
+    assert_eq!(body["routes"]["free"]["primary"]["pricing_eligible"], true);
+    assert_eq!(
+        body["routes"]["free"]["primary"]["expected_cost_microusd"],
+        0
+    );
+}
+
+#[tokio::test]
+async fn auto_models_keep_base_and_pro_variants_in_separate_modes() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    let catalog = |model: &str, input, output| CatalogRecord {
+        model: model.to_owned(),
+        is_free: false,
+        context_length: Some(128_000),
+        supports_tools: Some(true),
+        supports_vision: Some(false),
+        supports_structured_output: Some(false),
+        input_price_per_million: Some(input),
+        output_price_per_million: Some(output),
+    };
+    store
+        .replace_catalog(
+            "paid-provider",
+            &[
+                catalog("mimo-v2.5", 0.14, 0.28),
+                catalog("mimo-v2.5-pro", 0.43, 0.87),
+            ],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[
+                BenchmarkModel::fixture("mimo-v2-5-0424", 37.2, 37.2, 37.2, 0.14, 0.28),
+                BenchmarkModel::fixture("mimo-v2-5-pro", 43.0, 43.0, 43.0, 0.43, 0.87),
+            ],
+        )
+        .expect("benchmarks");
+    drop(store);
+
+    let mut paid = provider("https://example.com/v1".to_owned());
+    paid.billing_mode = BillingMode::Paid;
+    let mut config = config_for(
+        BTreeMap::from([("paid-provider".to_owned(), paid)]),
+        vec![TargetConfig {
+            provider: "paid-provider".to_owned(),
+            model: "mimo-v2.5".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/auto-models"))
+        .send()
+        .await
+        .expect("auto models response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("auto models body");
+    assert_eq!(body["routes"]["efficient"]["primary"]["model"], "mimo-v2.5");
+    assert_eq!(
+        body["routes"]["balanced"]["primary"]["model"],
+        "mimo-v2.5-pro"
+    );
+}
+
+#[tokio::test]
 async fn providers_lists_available_secret_backed_providers_without_credentials() {
     unsafe {
         std::env::set_var("MODEL_GATEWAY_TEST_PROVIDER_KEY", "fixture-secret");

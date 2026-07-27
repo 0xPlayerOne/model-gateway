@@ -1,0 +1,200 @@
+name: Security
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [staging]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REPO_FOUNDRY_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  profile:
+    name: Profile
+    runs-on: ubuntu-slim
+    outputs:
+      javascript: ${{ steps.profile.outputs.javascript }}
+      rust: ${{ steps.profile.outputs.rust }}
+      python: ${{ steps.profile.outputs.python }}
+      python_requirements: ${{ steps.profile.outputs.python_requirements }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: |
+            .github
+            .mise.toml
+            mise.lock
+            .npmrc
+            .pnpmfile.cjs
+            .yarnrc*
+            **/package.json
+            **/bun.lock
+            **/bun.lockb
+            **/pnpm-lock.yaml
+            **/yarn.lock
+            **/package-lock.json
+            **/Cargo.toml
+            **/Cargo.lock
+            **/.cargo/**
+            **/pyproject.toml
+            **/requirements*.txt
+            **/setup.py
+            **/setup.cfg
+            **/Pipfile
+            **/Pipfile.lock
+            **/poetry.lock
+            **/uv.lock
+          sparse-checkout-cone-mode: false
+      - name: Detect
+        id: profile
+        run: bash .github/scripts/security.sh profile >> "$GITHUB_OUTPUT"
+
+  dependency-audit-javascript:
+    name: Dependency Audit (JavaScript)
+    runs-on: ubuntu-slim
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # JavaScript audits only need manifests, lockfiles, and audit config.
+          filter: blob:none
+          sparse-checkout: |
+            .github
+            .mise.toml
+            mise.lock
+            .npmrc
+            .pnpmfile.cjs
+            .yarnrc*
+            **/package.json
+            **/bun.lock
+            **/bun.lockb
+            **/pnpm-lock.yaml
+            **/yarn.lock
+            **/package-lock.json
+          sparse-checkout-cone-mode: false
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/security.sh should_run javascript >> "$GITHUB_OUTPUT"
+      - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
+        uses: ./.github/actions/setup
+        with:
+          mise-scope: javascript
+      - name: Audit dependencies
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/security.sh audit javascript
+
+  dependency-audit-rust:
+    name: Dependency Audit (Rust)
+    runs-on: ubuntu-slim
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Rust audits only need manifests, Cargo configuration, and audit config.
+          filter: blob:none
+          sparse-checkout: |
+            .github
+            .mise.toml
+            mise.lock
+            **/Cargo.toml
+            **/Cargo.lock
+            **/.cargo/**
+          sparse-checkout-cone-mode: false
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/security.sh should_run rust >> "$GITHUB_OUTPUT"
+      - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
+        uses: ./.github/actions/setup
+        with:
+          mise-scope: rust
+      - name: Install cargo-audit
+        if: steps.applicability.outputs.applicable == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit dependencies
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/security.sh audit rust
+
+  dependency-audit-python:
+    name: Dependency Audit (Python) / ${{ matrix.requirement }}
+    needs: profile
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        requirement: ${{ fromJSON(needs.profile.outputs.python_requirements) }}
+    runs-on: ubuntu-slim
+    env:
+      REPO_FOUNDRY_PYTHON_REQUIREMENT: ${{ matrix.requirement }}
+    steps:
+      - name: Checkout
+        if: matrix.requirement != 'none'
+        uses: actions/checkout@v7
+        with:
+          # Python audits only need manifests, lockfiles, and audit config.
+          filter: blob:none
+          sparse-checkout: |
+            .github
+            .mise.toml
+            mise.lock
+            **/pyproject.toml
+            **/requirements*.txt
+            **/setup.py
+            **/setup.cfg
+            **/Pipfile
+            **/Pipfile.lock
+            **/poetry.lock
+            **/uv.lock
+          sparse-checkout-cone-mode: false
+      - name: Detect
+        if: matrix.requirement != 'none'
+        id: applicability
+        run: bash .github/scripts/security.sh should_run python >> "$GITHUB_OUTPUT"
+      - name: Setup
+        if: matrix.requirement != 'none' && steps.applicability.outputs.applicable == 'true'
+        uses: ./.github/actions/setup
+        with:
+          mise-scope: python
+      - name: Audit dependencies
+        if: matrix.requirement != 'none' && steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/security.sh audit python
+      - name: Skip
+        if: matrix.requirement == 'none'
+        run: echo 'Skipping Python audit (no applicable Python dependencies)'
+
+  dependency-audit-python-status:
+    name: Dependency Audit (Python)
+    if: always()
+    needs: dependency-audit-python
+    runs-on: ubuntu-slim
+    steps:
+      - name: Check matrix result
+        env:
+          RESULT: ${{ needs.dependency-audit-python.result }}
+        run: test "$RESULT" = success
+
+  dependency-review:
+    name: Dependency Review
+    if: ${{ github.event_name == 'pull_request' && !github.event.repository.private }}
+    runs-on: ubuntu-slim
+    steps:
+      - name: Review
+        uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high
+          license-check: true

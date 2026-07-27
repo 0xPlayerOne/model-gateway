@@ -1,0 +1,164 @@
+name: Test
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [staging]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+  TURBO_TEAM: ${{ vars.TURBO_TEAM }}
+  REPO_FOUNDRY_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/ci.sh task_profile unit >> "$GITHUB_OUTPUT"
+      - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
+        uses: ./.github/actions/setup
+        with:
+          install: true
+          install-javascript: ${{ steps.applicability.outputs.javascript == 'true' }}
+          install-python: ${{ steps.applicability.outputs.python == 'true' }}
+          install-rust: ${{ steps.applicability.outputs.rust == 'true' }}
+          cache-build: false
+          cache-environment: false
+          task: unit
+          task-javascript: ${{ steps.applicability.outputs.javascript }}
+          task-python: ${{ steps.applicability.outputs.python }}
+          task-rust: ${{ steps.applicability.outputs.rust }}
+      - name: Unit
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/ci.sh unit
+      - name: Upload coverage
+        if: >-
+          always() &&
+          steps.applicability.outputs.applicable == 'true' &&
+          hashFiles('coverage/**', 'htmlcov/**', '.coverage*', 'target/llvm-cov/**') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-unit-${{ github.run_id }}
+          path: |
+            coverage/**
+            htmlcov/**
+            .coverage*
+            target/llvm-cov/**
+          compression-level: 1
+          if-no-files-found: ignore
+          retention-days: 14
+
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/ci.sh task_profile integration >> "$GITHUB_OUTPUT"
+      - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
+        uses: ./.github/actions/setup
+        with:
+          install: true
+          install-javascript: ${{ steps.applicability.outputs.javascript == 'true' }}
+          install-python: ${{ steps.applicability.outputs.python == 'true' }}
+          install-rust: ${{ steps.applicability.outputs.rust == 'true' }}
+          cache-build: false
+          cache-environment: false
+          task: integration
+          task-javascript: ${{ steps.applicability.outputs.javascript }}
+          task-python: ${{ steps.applicability.outputs.python }}
+          task-rust: ${{ steps.applicability.outputs.rust }}
+      - name: Integration
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/ci.sh integration
+
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/ci.sh task_profile e2e >> "$GITHUB_OUTPUT"
+      - name: Cache browser binaries
+        if: steps.applicability.outputs.applicable == 'true' && steps.applicability.outputs.browser == 'true'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/.cache/Cypress
+            ~/.cache/puppeteer
+          key: ${{ runner.os }}-e2e-browsers-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/playwright.config.*', '**/cypress.config.*') }}
+          restore-keys: |
+            ${{ runner.os }}-e2e-browsers-
+      - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
+        uses: ./.github/actions/setup
+        with:
+          install: true
+          install-javascript: ${{ steps.applicability.outputs.javascript == 'true' }}
+          install-python: ${{ steps.applicability.outputs.python == 'true' }}
+          install-rust: ${{ steps.applicability.outputs.rust == 'true' }}
+          cache-build: false
+          cache-environment: false
+          task: e2e
+          task-javascript: ${{ steps.applicability.outputs.javascript }}
+          task-python: ${{ steps.applicability.outputs.python }}
+          task-rust: ${{ steps.applicability.outputs.rust }}
+      - name: E2E
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/ci.sh e2e
+
+  smoke:
+    name: Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/ci.sh task_profile smoke >> "$GITHUB_OUTPUT"
+      - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
+        uses: ./.github/actions/setup
+        with:
+          install: true
+          install-javascript: ${{ steps.applicability.outputs.javascript == 'true' }}
+          install-python: ${{ steps.applicability.outputs.python == 'true' }}
+          install-rust: ${{ steps.applicability.outputs.rust == 'true' }}
+          cache-build: false
+          cache-environment: false
+          task: smoke
+          task-javascript: ${{ steps.applicability.outputs.javascript }}
+          task-python: ${{ steps.applicability.outputs.python }}
+          task-rust: ${{ steps.applicability.outputs.rust }}
+      - name: Smoke
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/ci.sh smoke

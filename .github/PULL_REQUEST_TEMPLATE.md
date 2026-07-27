@@ -1,25 +1,29 @@
-## Description
+## Summary
 
-<!-- Summarize the change. Link to any related issues. -->
+<!-- What changed, why was it needed, and which issue or requirement does it address? -->
 
-## CI Status (do not merge until all pass)
+## Validation
 
-- [ ] `Build, Format, Lint & Type Check` — `bun run lint && bun run type:check && bun run build`
-- [ ] `Test` — `bun run test`
-- [ ] Preview deployment passes (if applicable)
+<!-- List the commands, local checks, CI links, screenshots, or recordings used to validate this change. Required repository checks are enforced automatically. -->
 
-## Compliance Checklist
-12|
-13|- [ ] My commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`type(scope): message`)
-14|- [ ] I have run `bun run format:fix` before committing (or let lint-staged handle it)
-15|- [ ] New dependencies — used `bun --filter <workspace> add <pkg>`, not `npm`/`yarn`/`pnpm`
-16|- [ ] No `.env*.local`, `node_modules`, or lockfile churn from another package manager
-17|- [ ] No generated artifacts committed (cache output, build output, etc.)
-18|
-19|
-- [ ] No `.env*.local`, `node_modules`, or lockfile churn from another package manager
-- [ ] No generated artifacts committed (cache output, build output, etc.)
+- Commands run:
+- CI or deployment links:
+- Screenshots/recordings, when applicable:
 
-## Additional Context
+## Impact and rollout
 
-<!-- Anything reviewers should know: migration steps, env changes, breaking changes, related PRs. -->
+- [ ] No migration or rollout action is required
+- [ ] Migration or rollout steps are documented below
+- [ ] Environment or secret changes are documented below
+- [ ] Security, privacy, compatibility, or performance impact is documented below
+- [ ] Rollback or follow-up work is documented below
+
+<!-- Add the relevant details here. -->
+
+## Review notes
+
+<!-- Call out tradeoffs, known limitations, generated files, dependency changes, or areas that need focused review. -->
+
+## Related issue
+
+<!-- Use `Closes #123` when applicable. -->

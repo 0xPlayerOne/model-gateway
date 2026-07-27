@@ -1,384 +1,198 @@
-# Contributing to Model Gateway
+# Contributing
 
-Welcome! This document is the **single source of truth** for the contribution workflow across all Model Gateway repositories.  
-All agents (Hermes and other automation) must read and follow this document before working on any repo in the fleet.
+This guide is the operating contract for humans and automation contributing to this repository.
 
-- [Code of Conduct](./CODE_OF_CONDUCT.md)
-- [Security Policy](./SECURITY.md)
+It applies to TypeScript, Rust, Python, and mixed-language projects using this template.
 
----
+Quick links: [Code of Conduct](./CODE_OF_CONDUCT.md) · [Security Policy](./SECURITY.md) · [Pull Request Template](./PULL_REQUEST_TEMPLATE.md)
 
-## Table of Contents
+### Contents
 
-1. [Repository Overview](#1-repository-overview)
-2. [Branching Model](#2-branching-model)
-3. [Development Setup](#3-development-setup)
-4. [Contribution Workflow — Internal Contributors](#4-contribution-workflow--internal-contributors)
-5. [Contribution Workflow — External Contributors](#5-contribution-workflow--external-contributors)
-6. [CI & Testing Discipline](#6-ci--testing-discipline)
-7. [Pull Request Guidelines](#7-pull-request-guidelines)
-8. [Code Review Standards](#8-code-review-standards)
-9. [Merge Protocol](#9-merge-protocol)
-10. [Workflow Discipline](#10-workflow-discipline)
-11. [Emergency Procedures](#11-emergency-procedures)
+[Agent contract](#agent-operating-contract) · [Branches](#branching-model) · [Setup](#before-you-start) · [Validation](#local-validation) · [Internal](#internal-contribution-workflow) · [External](#external-contribution-workflow) · [Pull requests](#pull-request-standards) · [Reviews](#review-and-merge-protocol) · [Security](#security-and-emergencies)
 
----
+## Agent operating contract
 
-## 1. Repository Overview
+Agents must follow these rules before changing code:
 
-This is a **pure Rust** HTTP server using Axum, Tokio, and rusqlite. No JavaScript, no Python — just a single Rust crate.
+1. Read this file, `AGENTS.md`, and the relevant project documentation.
+2. Inspect the current branch, worktree, remotes, and existing changes before editing.
+3. Preserve user-owned changes. Never discard or overwrite unrelated work.
+4. Branch from `staging` and target pull requests at `staging`; do not work directly on `main`.
+5. Keep the change focused. Do not expand scope without documenting why.
+6. Run the applicable format, lint, type-check, build, unit, integration, E2E, smoke, and security checks.
+7. Report exact validation results, skipped checks, known limitations, and remaining risks.
+8. Never commit secrets, credentials, local environment files, generated artifacts, or machine-specific paths.
 
-### Source layout
+Agents must not:
 
-| Module | Role |
-|---|---|
-| `src/gateway.rs` | Axum routes, request handling, SSE streaming, fallback logic |
-| `src/config.rs` | TOML config parsing, validation, provider/model structures |
-| `src/routing.rs` | SQLite-backed routing store: catalogs, benchmarks, quotas, cooldowns |
-| `src/providers.rs` | Provider profiles, catalog fetching, request preparation |
-| `src/benchmarks.rs` | Benchmark import/parse, task classification, quality/cost selection |
-| `src/secrets.rs` | Secret resolution: keyring, file, or environment |
-| `src/storage.rs` | Private module: atomic file writes, SQLite helpers |
-| `src/main.rs` | CLI (clap): setup, serve, config, credentials, catalog, benchmarks, healthcheck |
+- Use destructive Git operations, force pushes, or history rewriting without explicit authorization.
+- Bypass hooks or required checks to hide a failure.
+- Change branch protections, secrets, deployments, or external systems unless that action is explicitly in scope.
+- Claim completion when tests, deployment checks, or required reviews are still pending.
 
-### Commands
+## Branching model
 
-| Command | What it does |
-|---|---|
-| `cargo build` | Build all targets (debug) |
-| `cargo build --release` | Build release binary |
-| `cargo test --all-features` | Run all unit + integration tests |
-| `cargo fmt --check` | Check formatting |
-| `cargo clippy --all-targets --all-features -- -D warnings` | Lint (deny warnings) |
-| `cargo +stable deny check` | Dependency policy audit (requires cargo-deny) |
-| `cargo doc --no-deps` | Generate documentation |
-
----
-
-## 2. Branching Model
-
-```
-main  ───────────────────────────────────── (protected, releases only)
-  ↑  staging→main PR (squash merge)
-staging ───────────────────────────────── (integration, CI must pass)
-  ↑  sub-branch → staging PR (squash merge)
-feat/foo  fix/bar  chore/baz  ...          (feature branches)
+```text
+                                      release PR
+                                   ┌──────────────┐
+                                   │              ▼
+feat/*  fix/*  chore/*  ──PR──▶  staging  ──PR──▶  main
+docs/*  test/*  refactor/*         │              │
+                                   │              └── protected release branch
+                                   └── integration branch
 ```
 
-### `main` — Protected Production Branch
+| Branch                                                         | Purpose                  | Contribution rule                                                         |
+| -------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------- |
+| `main`                                                         | Protected release branch | Merge through the `staging` → `main` release PR. No direct pushes.        |
+| `staging`                                                      | Integration branch       | Target normal pull requests here. Required checks must pass before merge. |
+| `feat/*`, `fix/*`, `chore/*`, `refactor/*`, `docs/*`, `test/*` | Focused work             | Branch from `staging`; keep changes small and reviewable.                 |
 
-- **No direct pushes.** Not by you, not by any agent, not by admin (0xPlayerOne). All pushes blocked by branch protection (`enforce_admins: true`).
-- **Only accepts merges from `staging`.** No other branch may merge into `main`.
-- **All CI must pass on `staging`** before a staging→main PR can merge.
-- **Linear history.** No merge commits — squash merge only. Every commit on `main` is a squashed summary of a staging batch.
-- **Force pushes are disabled** on `main`.
+Use squash merges unless the repository documents another strategy. Re-align `staging` with `main` after a release when needed.
 
-### `staging` — Integration Branch
+## Before you start
 
-- **Default workflow: branch → PR → merge.** Create a new branch for your work, open a PR into staging, and let CI verify it. This is the preferred path.
-- **PRs are created as drafts** automatically by CI when a feature branch is pushed. Once CI passes, the PR is marked ready for review/merge.
-- **Can push directly** for small fixes or urgent bugs (YOLO) when a branch+PR would be overkill.
-- **CI must pass** before merging into staging (enforced by required status checks on the PR).
-- **Force pushes allowed** — needed for rebasing sub-branches.
-- **No review required** — you can self-merge sub-branches into staging.
-- Merge failures into staging are acceptable. When a sub-branch CI fails, you may:
-  - Fix the issue on the sub-branch and re-merge, OR
-  - Merge anyway and fix directly on staging (this is intentionally flexible).
-  - The only hard rule: **before staging→main, CI must pass.**
-- **Rebase staging after main release.** After `staging` is merged into `main`, rebase `staging` on `main` to keep history aligned and prevent merge conflicts in future PRs.
+### Toolchain
 
-### Feature Branches — `feat/*`, `fix/*`, `chore/*`, `refactor/*`
+1. Install [mise](https://mise.jdx.dev/).
+2. Run `bash .github/scripts/bootstrap.sh` to install the pinned toolchain, enable hooks, and validate the checkout.
+3. Use `bash .github/scripts/doctor.sh` when setup, lockfiles, or hooks appear out of sync.
+4. Use the repository's existing package manager and lockfile. Do not introduce a second package manager.
+5. Copy `.env.example` to the appropriate local environment file when provided. Never commit the copy.
 
-- Branch from `staging`, not `main`.
-- Use conventional commit prefixes: `feat/`, `fix/`, `chore/`, `refactor/`, `docs/`, `test/`.
-- All pushes to the branch trigger **full CI**.
-- Open a PR into `staging` when ready.
-- If the PR CI fails, either fix on the branch or merge the failing branch and fix on staging.
+### Worktree and branch
 
----
-
-## 3. Development Setup
-
-### Prerequisites
-
-- Rust toolchain (pinned to **1.87.0** via `rust-toolchain.toml` — installed automatically by `rustup`)
-- `cargo-deny` for dependency auditing (install via `cargo +stable install cargo-deny --version 0.20.2 --locked`)
-
-### One-time setup
-
-```bash
-# Clone
-git clone git@github.com:0xPlayerOne/model-gateway.git
-cd model-gateway
-
-# Rust toolchain is auto-installed by rustup when you enter the repo
-# (reads rust-toolchain.toml)
-
-# Build (debug)
-cargo build
-
-# Run tests to verify everything is working
-cargo test --all-features
+```sh
+git status --short --branch
+git fetch origin
+git switch staging
+git pull --ff-only origin staging
+git switch -c feat/short-description
 ```
 
-### Before committing
+If the worktree is dirty, stop and understand the existing changes before switching branches or editing overlapping files.
 
-```bash
-cargo fmt --check          # Formatting
-cargo clippy --all-targets --all-features -- -D warnings  # Lint
-cargo test --all-features  # Run all tests
-cargo build --release      # Verify release builds cleanly
-cargo +stable deny check   # Dependency policy audit
+## Local validation
+
+The template scripts detect supported tools and skip checks that do not apply:
+
+```sh
+bash .github/scripts/ci.sh format
+bash .github/scripts/ci.sh lint
+bash .github/scripts/ci.sh type_check
+bash .github/scripts/ci.sh build
+bash .github/scripts/ci.sh unit
+bash .github/scripts/ci.sh integration
+bash .github/scripts/ci.sh e2e
+bash .github/scripts/ci.sh smoke
+bash .github/scripts/security.sh
 ```
 
-> **Note:** `cargo fmt` is run on all Rust source. Never bypass formatting or clippy warnings — fix the issue instead.
+Run the checks relevant to the change. For a release or security-sensitive change, run the complete set. Record the commands and results in the pull request.
 
----
+## Internal contribution workflow
 
-## 4. Contribution Workflow — Internal Contributors
+For maintainers, trusted contributors, and automation agents:
 
-For Model Gateway team members and automation agents.
+1. Start from an up-to-date `staging` branch.
+2. Create a focused branch with a descriptive prefix.
+3. Inspect the relevant code and tests before making changes.
+4. Implement the smallest complete change.
+5. Add or update tests, documentation, configuration, and migration notes as needed.
+6. Run local validation and inspect the final diff.
+7. Commit with a clear message, preferably using Conventional Commits:
 
-### 4.1 Start from staging
+   ```text
+   feat(auth): add passkey recovery
+   fix(api): handle expired session tokens
+   chore(ci): cache Rust dependencies
+   ```
 
-```bash
-git checkout staging
-git pull origin staging
-git checkout -b feat/my-feature
+8. Push the branch and open a pull request into `staging`.
+9. Address review feedback and failed checks on the same branch.
+10. Squash-merge only after required checks pass and the change is ready.
+
+### Internal agent handoff
+
+Every agent handoff should state:
+
+```text
+Summary: what changed and why
+Files: important files changed
+Validation: exact commands and pass/fail results
+Skipped: checks skipped and why
+Risks: known limitations or follow-up work
+Branch/PR: branch name and pull request link
 ```
 
-### 4.2 Make changes, commit, push
+## External contribution workflow
 
-Use [Conventional Commits](https://www.conventionalcommits.org):
+For contributors who do not have direct write access:
 
-```
-feat: add user profile page
-fix: resolve wallet disconnect race condition
-chore(deps): upgrade axios to v1.7
-refactor: extract auth middleware
-```
+1. Fork the repository on GitHub.
+2. Add the upstream repository as `upstream`.
+3. Branch from the upstream `staging` branch.
+4. Make a focused change and follow the local setup instructions.
+5. Add tests and documentation for behavior changes.
+6. Run all applicable checks locally.
+7. Push to the fork and open a pull request targeting `staging`.
+8. Explain the problem, proposed solution, validation, compatibility, and rollout impact.
+9. Address maintainer feedback without rewriting unrelated history or scope.
 
-```bash
-git add .
-git commit -m "feat: add user profile page"
-git push origin feat/my-feature
-```
+External contributors should never need repository secrets or production access to validate a normal change.
 
-### 4.3 Open a Pull Request
+## Pull request standards
 
-- **Target:** `staging` (always, never `main` directly).
-- **Title:** Match the branch name / commit summary format.
-- **Fill out the PR template** — include issue references, screenshots, and checklist.
-- If CI is still running, wait for it. If it fails, fix and push again — CI runs automatically on each push.
+Every pull request should make these questions easy to answer:
 
-### 4.4 Merge into staging
+- What changed?
+- Why was it needed?
+- How was it tested?
+- What could break?
+- Does it require migration, deployment, configuration, or rollback work?
+- Which files or areas deserve focused review?
 
-- Once CI passes, squash-merge into `staging` (no review required for sub-branch→staging).
-- Delete the feature branch after merge.
+Keep pull requests focused and reviewable. Include screenshots or recordings for user-facing changes. Link related issues and use `Closes #123` when appropriate. Complete the [pull request template](./PULL_REQUEST_TEMPLATE.md).
 
-### 4.5 Staging → Main (release)
+## Workflow and check behavior
 
-- **Only admins can merge into `main`.** The daily review agent may pick up PRs once they are approved by an admin on GitHub.
-- All CI must be green on staging before this PR opens.
-- Squash merge with a release summary message.
-- The `main` branch is then deployed to production by CI.
-- **After merge, rebase `staging` on `main`** to keep branch histories aligned and prevent future merge conflicts.
+| Event                            | Expected automation                      |
+| -------------------------------- | ---------------------------------------- |
+| Push to `main` or `staging`      | CI, Test, Security, and CodeQL workflows |
+| Pull request targeting `staging` | CI, Test, Security, and CodeQL workflows |
+| Push to a working branch         | Draft PR workflow                        |
+| Push to `staging`                | Release PR workflow                      |
+| Version tag such as `v1.2.3`     | Release workflow                         |
 
----
+The workflows use separate concurrency groups. A newer run for the same branch or pull request cancels its older run, while independent CI, test, security, and CodeQL workflows continue in parallel.
 
-## 5. Contribution Workflow — External Contributors
+Required checks are enforced by branch protection. Do not duplicate their checklists in the pull request description; document validation commands and results instead.
 
-For open-source contributors outside Model Gateway.
+### Release conventions
 
-### 5.1 Fork + Clone
+Use Conventional Commits so the release automation can determine the next version: `fix:` produces a patch release, `feat:` produces a minor release, and `!` or `BREAKING CHANGE:` produces a major release. Add `Release-As: x.y.z` only when a deliberate version override is needed. The release workflow maintains the changelog and GitHub release after changes land on `main`; npm publication is opt-in through `.github/template.yml`.
 
-1. Fork the repository via GitHub UI.
-2. Clone your fork:
+Security checks can be skipped when repository visibility or the GitHub plan does not support a feature. A skipped optional check must not be configured as a required status check.
 
-```bash
-git clone git@github.com:YOUR_USERNAME/model-gateway.git
-cd model-gateway
-```
+## Review and merge protocol
 
-### 5.2 Branch
+| Change            | Target    | Merge gate                                                |
+| ----------------- | --------- | --------------------------------------------------------- |
+| Working branch    | `staging` | All applicable required checks pass                       |
+| `staging` release | `main`    | Current staging checks, release review, and rollout notes |
 
-```bash
-git remote add upstream git@github.com:0xPlayerOne/model-gateway.git
-git fetch upstream
-git checkout -b feat/your-feature upstream/staging
-```
+Reviewers focus on correctness, security, maintainability, test coverage, operational impact, and compatibility. Authors remain responsible for responding to feedback and verifying the final commit.
 
-### 5.3 Commit & Push
+## Security and emergencies
 
-- Use [Conventional Commits](https://www.conventionalcommits.org).
-- Keep commits focused and atomic.
+Report vulnerabilities privately using [SECURITY.md](./SECURITY.md), never in a public issue or pull request.
 
-```bash
-git push origin feat/your-feature
-```
+For an urgent production or security issue:
 
-### 5.4 Open a Pull Request
+1. Create a focused branch from `staging`.
+2. Document the urgency and affected systems without exposing secrets.
+3. Open a pull request and run the narrowest complete validation available.
+4. Request the appropriate maintainer review.
+5. Record follow-up work, remediation, and rollback information.
 
-- **Target:** `staging` (not main).
-- **Title:** Conventional commit style.
-- **Description:** What does this change? Why? Any screenshots?
-- **Link to related issue** if applicable.
-- CI runs automatically. Waiting for it to pass is appreciated.
-
-### 5.5 After merge
-
-- Your commits will be squash-merged into `staging`.
-- You can delete your feature branch after merge.
-
----
-
-## 6. CI & Testing Discipline
-
-### What runs when
-
-| Event                                              | CI trigger                                | Reason                                                          |
-| -------------------------------------------------- | ----------------------------------------- | --------------------------------------------------------------- |
-| Push to `main` or `staging`                        | `push` trigger → **full CI runs**         | Covers direct pushes to staging, and staging→main merge commits |
-| PR opened/synchronized targeting `staging`         | `pull_request` trigger → **full CI runs** | Covers sub-branch→staging PRs                                   |
-| Push to a feature branch (`feat/*`, `fix/*`, etc.) | **No CI**                                 | CI only runs when a PR is opened into staging                   |
-| Direct push to `main`                              | **Blocked by branch protection**          | Only possible via staging→main merge                            |
-
-### Why no duplicates
-
-CI runs on `push` events (to main/staging) and `pull_request` events (targeting main/staging). These fire on **different refs**:
-
-- `push` trigger fires on commits pushed directly to `main` or `staging` branches
-- `pull_request` trigger fires on the **head commit** of a PR (which lives on a feature branch, not main/staging)
-
-Since a commit can never be simultaneously pushed to `main`/`staging` AND be a PR's head commit from a different branch, **no commit ever triggers CI twice**.
-
-| Scenario                            | Push trigger?                | PR trigger?      | Double? |
-| ----------------------------------- | ---------------------------- | ---------------- | ------- |
-| Push to sub-branch `feat/foo`       | No (wrong branch)            | No (no PR event) | ✅ No   |
-| Open PR `feat/foo` → `staging`      | No (commit is on sub-branch) | Yes              | ✅ No   |
-| Push to `staging` directly          | Yes                          | No               | ✅ No   |
-| Merge staging→main (push to `main`) | Yes                          | No               | ✅ No   |
-
-### CI jobs
-
-| Job | What it checks |
-|---|---|
-| `fmt` | `cargo fmt --check` — formatting compliance |
-| `clippy` | `cargo clippy --all-targets --all-features -- -D warnings` — lint |
-| `test` | `cargo test --all-features` — all unit + integration tests |
-| `build` | `cargo build --release` — release compilation |
-| `deny` | `cargo +stable deny check` — dependency/advisory audit |
-| `native-smoke` | `./scripts/native-smoke.sh` — native binary smoke test |
-| `docker-smoke` | `./scripts/docker-smoke.sh` — Docker image smoke test |
-| `hermes-smoke` | `./scripts/hermes-smoke.sh` — gateway integration smoke test |
-| `release-smoke` | `./scripts/release-smoke.sh <dir>` — release archive validation |
-
-### If CI fails
-
-- **On your feature branch:** Push a fix, CI re-runs automatically.
-- **On staging after merge:** Fix directly on staging (push a fix commit) or revert the failing change.
-- **Before staging→main:** CI must be **all green** on the staging branch's latest commit.
-
----
-
-## 7. Pull Request Guidelines
-
-Every PR must use the [pull request template](./PULL_REQUEST_TEMPLATE.md) — do not delete sections.
-
-The template covers:
-
-- **Description** — what changed and why
-- **CI Status** — checkbox for each required check
-- **Compliance Checklist** — locking, format, dep hygiene, no generated artifacts
-- **Additional Context** — breaking changes, migration steps, related PRs
-
-Since feature branches are already prefixed (`feat/`, `fix/`, `chore/`, etc.) and all PRs target `staging`, the template intentionally omits type-picker and target-branch fields — they are inferred from the branch and CI context.
-
-### Staging→main (release) PRs
-
-Release PRs follow the same template but add a release summary describing the batch.
-
-- Prefer small, focused PRs (under 400 lines changed when possible).
-- Large features should be broken into multiple PRs targeting staging.
-- If a PR exceeds 1000 lines, consider splitting it.
-
----
-
-## 8. Code Review Standards
-
-### Internal PRs (sub-branch → staging)
-
-- **No review required.** Self-merge is fine.
-- Peer reviews are encouraged but not mandatory.
-- If you want feedback, request a review explicitly.
-
-### Staging → Main PRs
-
-- **Only admins can merge into `main`.** The daily review agent picks up PRs once they are approved by an admin on GitHub (via review approval).
-- Focused on: does CI pass? Are there breaking changes? Is the release summary complete?
-- This is a release gate, not a code-level review (code review happened on sub-branch→staging).
-
-### External PRs (fork → staging)
-
-- **Review is required** from at least one maintainer.
-- Focus on: correctness, security, style alignment, test coverage.
-- External contributors should expect feedback and iteration.
-
----
-
-## 9. Merge Protocol
-
-| From                     | To        | Method       | Reviewer                          | Notes                                    |
-| ------------------------ | --------- | ------------ | --------------------------------- | ---------------------------------------- |
-| Sub-branch               | `staging` | Squash merge | Optional (self-merge OK)          | Delete branch after merge; auto-draft PR |
-| Direct push to `staging` | `staging` | Push         | N/A                               | For small fixes or urgent bugs           |
-| `staging`                | `main`    | Squash merge | Admin (0xPlayerOne) | Only when all CI passes on staging       |
-
-### Squash merge convention
-
-All merges use **squash merge** — every PR becomes a single commit on the target branch. This keeps history clean and linear.
-
-When squashing, the commit message should be:
-
-```
-<type>(<scope>): <summary>
-
-<optional body with details>
-```
-
----
-
-## 10. Workflow Discipline
-
-Branch protections are a safety net, not a workflow definition. The workflow defined in sections 2–9 is authoritative regardless of whether GitHub's API enforces every rule. Always follow the documented process — do not bypass quality gates even when technically possible.
-
----
-
-## 11. Emergency Procedures
-
-### Urgent hotfix (security / production outage)
-
-1. Create a branch off `staging`: `git checkout staging && git checkout -b hotfix/urgent-fix`
-2. Fix the issue, push, open a PR into `staging`.
-3. Self-merge once CI passes.
-4. Open a staging→main PR and flag as urgent.
-5. If staging→main merge is blocked by CI issues unrelated to your change, contact 0xPlayerOne.
-
-### Rollback
-
-If a staging→main merge introduces a production issue:
-
-1. Revert the merge commit on staging: `git revert -m 1 <merge-sha>`
-2. Push directly to staging: `git push origin staging`
-3. Open a new staging→main PR.
-4. Fix the root cause on a sub-branch and re-merge.
-
-### Skip-CI (rare emergencies only)
-
-In genuine emergencies where CI is blocked by infrastructure (not code), you may push with `[skip-ci]` in the commit message.  
-This must be followed by a CI-fixing follow-up commit within 24 hours. Abuse of skip-ci will result in access revocation.
-
----
-
-_Last updated: 2026-07-25_  
-_Maintainers: Model Gateway engineering team_
+CI bypasses are for documented infrastructure emergencies only and require a follow-up fix. Never use a bypass to hide a code or test failure.
