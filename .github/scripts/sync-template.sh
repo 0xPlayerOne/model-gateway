@@ -69,6 +69,7 @@ files=(
   .github/scripts/security.sh
   .github/scripts/sync-template.sh
   .github/scripts/init-repo.sh
+  .github/scripts/sync-protection.sh
   .github/workflows/ci.yml
   .github/workflows/codeql.yml
   .github/workflows/draft-pr.yml
