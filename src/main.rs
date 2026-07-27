@@ -2,20 +2,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand};
 use dialoguer::{Confirm, Input, Password, Select};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
-use model_gateway::benchmarks::{
-    BenchmarkImport, BenchmarkModel, PRICING_OVERRIDE_SOURCE, parse_artificial_analysis,
-};
+use model_gateway::benchmarks::{BenchmarkImport, parse_artificial_analysis};
 use model_gateway::config::{
     BillingMode, Config, ConfigError, Exposure, ModelConfig, QuotaBoundary, QuotaKind, QuotaLimit,
     TargetConfig,
 };
 use model_gateway::gateway::run_server;
+use model_gateway::pricing::{ManualPriceImport, PriceSourceKind, fetch_models_dev};
 use model_gateway::providers::{
     BuiltinProvider, ConnectionCheck, fetch_account_limit, fetch_catalog,
 };
@@ -55,6 +55,11 @@ enum Command {
         #[command(subcommand)]
         command: BenchmarkCommand,
     },
+    Pricing {
+        #[command(subcommand)]
+        command: PricingCommand,
+    },
+    Refresh,
     Healthcheck {
         #[arg(
             long,
@@ -106,13 +111,23 @@ enum BenchmarkCommand {
         #[arg(long, help = "Path to a validated benchmark JSON export")]
         file: PathBuf,
     },
-    ImportPrices {
-        #[arg(long, help = "Path to JSONL model pricing overrides")]
-        file: PathBuf,
-    },
     Status,
     Delete {
         source: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PricingCommand {
+    Refresh,
+    Import {
+        #[arg(long, help = "Path to JSONL provider-scoped pricing overrides")]
+        file: PathBuf,
+    },
+    Status,
+    Explain {
+        provider: String,
+        model: String,
     },
 }
 
@@ -130,6 +145,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::Credentials { command } => credentials(command)?,
         Command::Catalog { command } => catalog(command)?,
         Command::Benchmarks { command } => benchmarks(command)?,
+        Command::Pricing { command } => pricing(command)?,
+        Command::Refresh => refresh_all()?,
         Command::Healthcheck { endpoint } => healthcheck(&endpoint)?,
         Command::Serve => tokio::runtime::Runtime::new()?.block_on(serve())?,
     }
@@ -201,37 +218,6 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
             );
             println!("Attribution: {}", import.attribution);
         }
-        BenchmarkCommand::ImportPrices { file } => {
-            let models = std::fs::read_to_string(&file)?
-                .lines()
-                .enumerate()
-                .filter(|(_, line)| !line.trim().is_empty())
-                .map(|(line_number, line)| {
-                    serde_json::from_str::<BenchmarkModel>(line).map_err(|error| {
-                        format!(
-                            "{}:{}: invalid pricing override: {error}",
-                            file.display(),
-                            line_number + 1
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let import = BenchmarkImport {
-                source: PRICING_OVERRIDE_SOURCE.to_owned(),
-                attribution: "Explicit model pricing overrides from public provider pricing"
-                    .to_owned(),
-                models,
-            }
-            .normalize()?;
-            let snapshot =
-                store.replace_benchmarks(&import.source, &import.attribution, &import.models)?;
-            println!(
-                "Imported {}: {} pricing overrides, snapshot={snapshot}",
-                import.source,
-                import.models.len()
-            );
-            println!("Attribution: {}", import.attribution);
-        }
         BenchmarkCommand::Status => {
             let status = store.benchmark_status()?;
             if status.is_empty() {
@@ -249,6 +235,134 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
+    let resolver = SecretResolver::default();
+    let config = Config::load(Config::default_path(), &resolver)?;
+    let store = RoutingStore::open(config.server.state_path.as_deref())?;
+    match command {
+        PricingCommand::Refresh => {
+            let observations = fetch_models_dev()?;
+            let snapshot = store.replace_pricing(
+                "models.dev",
+                PriceSourceKind::ModelsDev,
+                "Models.dev (https://models.dev/)",
+                &observations,
+            )?;
+            println!(
+                "Refreshed models.dev: {} observations, snapshot={snapshot}",
+                observations.len()
+            );
+        }
+        PricingCommand::Import { file } => {
+            let fetched_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            let fetched_at = i64::try_from(fetched_at)?;
+            let observations = std::fs::read_to_string(&file)?
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| !line.trim().is_empty())
+                .map(|(line_number, line)| {
+                    serde_json::from_str::<ManualPriceImport>(line)
+                        .map(|record| record.observation(fetched_at))
+                        .map_err(|error| {
+                            format!(
+                                "{}:{}: invalid pricing override: {error}",
+                                file.display(),
+                                line_number + 1
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let snapshot = store.replace_pricing(
+                "manual-overrides",
+                PriceSourceKind::Manual,
+                "Explicit provider-scoped pricing overrides",
+                &observations,
+            )?;
+            println!(
+                "Imported manual-overrides: {} observations, snapshot={snapshot}",
+                observations.len()
+            );
+        }
+        PricingCommand::Status => {
+            let status = store.pricing_status()?;
+            if status.is_empty() {
+                println!("No active pricing snapshots");
+            }
+            for (source, kind, fetched_at, count, attribution) in status {
+                println!(
+                    "{source}: kind={kind}, {count} observations, fetched_at={fetched_at}, attribution={attribution}"
+                );
+            }
+        }
+        PricingCommand::Explain { provider, model } => {
+            let provider_config = config
+                .providers
+                .get(&provider)
+                .ok_or_else(|| format!("unknown provider '{provider}'"))?;
+            let profile_key = provider_config.pricing_profile.as_deref().or_else(|| {
+                provider_config
+                    .profile
+                    .and_then(BuiltinProvider::models_dev_key)
+            });
+            let canonical = provider_config
+                .model_mappings
+                .get(&model)
+                .map(String::as_str);
+            let price = store.effective_price(
+                &provider,
+                profile_key,
+                &model,
+                canonical,
+                config.server.pricing_max_age_seconds,
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&price.map(|price| {
+                    serde_json::json!({
+                        "provider": provider,
+                        "model": model,
+                        "input_price_per_million": price.input_price_per_million,
+                        "output_price_per_million": price.output_price_per_million,
+                        "source": price.source,
+                        "scope": price.scope.as_str(),
+                        "estimated": price.estimated,
+                        "fetched_at": price.fetched_at,
+                    })
+                }))?
+            );
+        }
+    }
+    Ok(())
+}
+
+fn refresh_all() -> Result<(), Box<dyn Error>> {
+    let resolver = SecretResolver::default();
+    Config::load(Config::default_path(), &resolver)?;
+    let mut failures = Vec::new();
+    if let Err(error) = pricing(PricingCommand::Refresh) {
+        println!("Pricing refresh failed: {error}");
+        failures.push(format!("pricing: {error}"));
+    }
+    if let Err(error) = catalog(CatalogCommand::Refresh { provider: None }) {
+        println!("Catalog refresh failed: {error}");
+        failures.push(format!("catalog: {error}"));
+    }
+    if resolver.get("ARTIFICIAL_ANALYSIS_API_KEY")?.is_some() {
+        if let Err(error) = benchmarks(BenchmarkCommand::Refresh) {
+            println!("Benchmark refresh failed: {error}");
+            failures.push(format!("benchmarks: {error}"));
+        }
+    } else {
+        println!("Skipped benchmark refresh: ARTIFICIAL_ANALYSIS_API_KEY is unavailable");
+    }
+    if failures.is_empty() {
+        println!("Unified refresh completed");
+        Ok(())
+    } else {
+        Err(format!("unified refresh had failures: {}", failures.join("; ")).into())
+    }
 }
 
 fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {

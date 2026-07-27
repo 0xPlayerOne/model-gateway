@@ -251,3 +251,57 @@ model = "fixture"
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("at least one model"));
 }
+
+#[test]
+fn pricing_import_and_explain_use_provider_scoped_overrides() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let config_path = directory.path().join("config.toml");
+    let state_path = directory.path().join("routing.sqlite3");
+    let pricing_path = directory.path().join("pricing.jsonl");
+    std::fs::write(
+        &config_path,
+        r#"
+[providers.fixture]
+adapter = "openai_chat"
+base_url = "http://localhost:8000/v1"
+billing_mode = "paid"
+"#,
+    )
+    .expect("write config");
+    std::fs::write(
+        &pricing_path,
+        r#"{"provider":"fixture","model":"mimo-v2-pro","input_price_per_million":1.2,"output_price_per_million":3.4}"#,
+    )
+    .expect("write pricing import");
+    let environment = |command: &mut Command| {
+        command
+            .env("MODEL_GATEWAY_CONFIG", &config_path)
+            .env("MODEL_GATEWAY_STATE_PATH", &state_path)
+            .env("MODEL_GATEWAY_SECRET_STORE", "environment");
+    };
+
+    let mut import = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    import.args([
+        "pricing",
+        "import",
+        "--file",
+        pricing_path.to_str().expect("path"),
+    ]);
+    environment(&mut import);
+    let output = import.output().expect("run pricing import");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut explain = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    explain.args(["pricing", "explain", "fixture", "mimo-v2-pro"]);
+    environment(&mut explain);
+    let output = explain.output().expect("run pricing explain");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains("1.2"));
+    assert!(stdout.contains("3.4"));
+    assert!(stdout.contains("manual-overrides"));
+}

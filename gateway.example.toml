@@ -8,6 +8,7 @@ admission_timeout_ms = 250
 shutdown_grace_seconds = 30
 catalog_max_age_seconds = 86400
 benchmark_max_age_seconds = 604800
+pricing_max_age_seconds = 604800
 auto_frontier_enabled = true
 auto_free_enabled = true
 auto_efficient_enabled = true

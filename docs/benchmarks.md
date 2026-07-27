@@ -208,25 +208,39 @@ The file must follow the `BenchmarkImport` format:
 - All scores are 0–100
 - Validated on import: empty IDs, out-of-range scores, and excessive attribution length are rejected
 
-### Import Pricing Overrides
+### Pricing Sources and Overrides
 
-When a provider and benchmark source both omit prices, import price-only records as JSONL:
+Pricing is resolved by serving-provider scope. A complete price pair from the
+provider catalog, including a temporary free or discounted price, is preserved
+and beats creator or aggregate pricing. Models.dev and benchmark prices fill
+gaps only when the serving provider has no complete pair. Prices are never
+matched fuzzily.
+
+Refresh the public provider-scoped pricing catalog:
 
 ```bash
-model-gateway benchmarks import-prices --file ./pricing-overrides.jsonl
+model-gateway pricing refresh
+model-gateway pricing status
+model-gateway pricing explain opencode-go mimo-v2-pro
 ```
 
-Each non-empty line is a `BenchmarkModel` JSON object. Only `id`,
-`input_price_per_million`, and `output_price_per_million` are required:
+When no provider price is available, import an exact provider-scoped override:
+
+```bash
+model-gateway pricing import --file ./pricing-overrides.jsonl
+```
+
+Each non-empty line requires the runtime provider and exact model ID:
 
 ```jsonl
-{"id":"example-model","input_price_per_million":1.25,"output_price_per_million":5.0}
+{"provider":"opencode-go","model":"mimo-v2-pro","input_price_per_million":1.0,"output_price_per_million":3.0}
 ```
 
-Pricing override records are merged with matching quality benchmark records by
-model ID and reasoning effort. They do not replace quality scores. Use prices
-from the provider's current public pricing documentation and refresh the
-provider catalog before importing overrides.
+Overrides are isolated from quality benchmarks and take precedence for that
+exact provider/model pair. Records must contain a complete standard input and
+output price pair. Models without a complete effective pair remain discoverable
+but are excluded from paid auto-route Pareto ranking rather than treated as
+free.
 
 Delete a snapshot:
 

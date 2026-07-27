@@ -8,9 +8,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::benchmarks::{BenchmarkModel, PRICING_OVERRIDE_SOURCE};
+use crate::benchmarks::BenchmarkModel;
 use crate::config::{
     BillingMode, ProviderConfig, ProviderProfileId, QuotaBoundary, QuotaKind, QuotaLimit,
+};
+use crate::pricing::{
+    EffectivePrice, PriceObservation, PriceScope, PriceSourceKind, normalize_price_id,
 };
 use crate::providers::{AccountLimit, is_specialty_model};
 
@@ -77,65 +80,7 @@ pub type AccountLimitStatus = (
     Option<f64>,
     Option<bool>,
 );
-
-fn merge_benchmark_sources(rows: Vec<(BenchmarkModel, String)>) -> Vec<BenchmarkModel> {
-    let mut merged = BTreeMap::<(String, String), BenchmarkModel>::new();
-
-    for (model, source) in rows {
-        let key = (
-            model.id.clone(),
-            model.reasoning_effort.clone().unwrap_or_default(),
-        );
-        let Some(existing) = merged.get_mut(&key) else {
-            merged.insert(key, model);
-            continue;
-        };
-
-        let override_pricing = source == PRICING_OVERRIDE_SOURCE;
-        if override_pricing {
-            if model.input_price_per_million.is_some() {
-                existing.input_price_per_million = model.input_price_per_million;
-            }
-            if model.output_price_per_million.is_some() {
-                existing.output_price_per_million = model.output_price_per_million;
-            }
-        } else {
-            if existing.input_price_per_million.is_none() {
-                existing.input_price_per_million = model.input_price_per_million;
-            }
-            if existing.output_price_per_million.is_none() {
-                existing.output_price_per_million = model.output_price_per_million;
-            }
-        }
-        if existing.creator.is_none() {
-            existing.creator = model.creator;
-        }
-        if existing.intelligence.is_none() {
-            existing.intelligence = model.intelligence;
-        }
-        if existing.coding_quality.is_none() {
-            existing.coding_quality = model.coding_quality;
-        }
-        if existing.agentic_quality.is_none() {
-            existing.agentic_quality = model.agentic_quality;
-        }
-        if existing.latency_seconds.is_none() {
-            existing.latency_seconds = model.latency_seconds;
-        }
-        if existing.output_tokens_per_task.is_none() {
-            existing.output_tokens_per_task = model.output_tokens_per_task;
-        }
-        if existing.as_of.is_none() {
-            existing.as_of = model.as_of;
-        }
-        if existing.release_date.is_none() {
-            existing.release_date = model.release_date;
-        }
-        existing.raw_metrics.extend(model.raw_metrics);
-    }
-
-    merged.into_values().collect()
-}
+pub type PricingSnapshotStatus = (String, String, i64, u64, String);
 
 pub const PROVIDER_LIMIT_REFERENCES: &[ProviderLimitReference] = &[
     limit(ProviderProfileId::Custom, "", "user_defined"),
@@ -296,7 +241,7 @@ impl RoutingStore {
         };
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 3 {
+        if version > 4 {
             return Err(RoutingError::UnsupportedSchema(version));
         }
         connection.execute_batch(
@@ -395,21 +340,350 @@ impl RoutingStore {
                    PRIMARY KEY (reservation_id, kind, window_seconds, window_start),
                    FOREIGN KEY (reservation_id) REFERENCES reservations(id) ON DELETE CASCADE
                );
-               CREATE TABLE IF NOT EXISTS provider_account_limits (
+              CREATE TABLE IF NOT EXISTS provider_account_limits (
                    provider TEXT PRIMARY KEY,
                    fetched_at INTEGER NOT NULL,
                    limit_value REAL,
                    usage REAL,
                    remaining REAL,
                    is_free_tier INTEGER
-               );",
+                );
+                CREATE TABLE IF NOT EXISTS pricing_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    fetched_at INTEGER NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 0,
+                    attribution TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS price_observations (
+                    snapshot_id INTEGER NOT NULL,
+                    scope TEXT NOT NULL,
+                    provider_key TEXT,
+                    model_id TEXT NOT NULL,
+                    input_price REAL,
+                    output_price REAL,
+                    cache_read_price REAL,
+                    cache_write_price REAL,
+                    reasoning_price REAL,
+                    input_audio_price REAL,
+                    output_audio_price REAL,
+                    request_price REAL,
+                    as_of TEXT,
+                    valid_from INTEGER,
+                    valid_until INTEGER,
+                    PRIMARY KEY (snapshot_id, scope, provider_key, model_id),
+                    FOREIGN KEY (snapshot_id) REFERENCES pricing_snapshots(id) ON DELETE CASCADE
+                );",
         )?;
         ensure_catalog_columns(&connection)?;
         ensure_benchmark_columns(&connection)?;
-        connection.pragma_update(None, "user_version", 3)?;
+        connection.execute(
+            "DELETE FROM benchmark_snapshots WHERE source = 'pricing-overrides'",
+            [],
+        )?;
+        connection.pragma_update(None, "user_version", 4)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
+    }
+
+    pub fn replace_pricing(
+        &self,
+        source: &str,
+        source_kind: PriceSourceKind,
+        attribution: &str,
+        observations: &[PriceObservation],
+    ) -> Result<i64, RoutingError> {
+        if source.trim().is_empty() || attribution.trim().is_empty() || observations.is_empty() {
+            return Err(RoutingError::Background(
+                "pricing snapshot requires source, attribution, and observations".to_owned(),
+            ));
+        }
+        for observation in observations {
+            observation.validate().map_err(RoutingError::Background)?;
+            if observation.source_kind != source_kind {
+                return Err(RoutingError::Background(format!(
+                    "pricing observation '{}' has source kind inconsistent with snapshot",
+                    observation.model_id
+                )));
+            }
+        }
+        let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE pricing_snapshots SET active = 0 WHERE source = ?1",
+            [source],
+        )?;
+        transaction.execute(
+            "INSERT INTO pricing_snapshots(source, source_kind, fetched_at, active, attribution)
+             VALUES (?1, ?2, ?3, 0, ?4)",
+            params![source, source_kind.as_str(), epoch_seconds(), attribution],
+        )?;
+        let snapshot_id = transaction.last_insert_rowid();
+        for observation in observations {
+            transaction.execute(
+                "INSERT INTO price_observations(
+                    snapshot_id, scope, provider_key, model_id, input_price, output_price,
+                    cache_read_price, cache_write_price, reasoning_price, input_audio_price,
+                    output_audio_price, request_price, as_of, valid_from, valid_until
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    snapshot_id,
+                    observation.scope.as_str(),
+                    observation.provider_key.as_deref(),
+                    observation.model_id.as_str(),
+                    observation.rates.input_price_per_million,
+                    observation.rates.output_price_per_million,
+                    observation.rates.cache_read_price_per_million,
+                    observation.rates.cache_write_price_per_million,
+                    observation.rates.reasoning_price_per_million,
+                    observation.rates.input_audio_price_per_million,
+                    observation.rates.output_audio_price_per_million,
+                    observation.rates.request_price,
+                    observation.as_of,
+                    observation.valid_from,
+                    observation.valid_until,
+                ],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE pricing_snapshots SET active = 1 WHERE id = ?1",
+            [snapshot_id],
+        )?;
+        transaction.commit()?;
+        Ok(snapshot_id)
+    }
+
+    pub fn pricing_status(&self) -> Result<Vec<PricingSnapshotStatus>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT s.source, s.source_kind, s.fetched_at, COUNT(o.model_id), s.attribution
+             FROM pricing_snapshots s
+             LEFT JOIN price_observations o ON o.snapshot_id = s.id
+             WHERE s.active = 1 GROUP BY s.id ORDER BY s.source",
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn effective_price(
+        &self,
+        runtime_provider: &str,
+        profile_key: Option<&str>,
+        model: &str,
+        canonical_model: Option<&str>,
+        max_age_seconds: u64,
+    ) -> Result<Option<EffectivePrice>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let now = epoch_seconds();
+        let cutoff = now.saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX));
+        let model_id = normalize_price_id(model);
+
+        let catalog = connection
+            .query_row(
+                "SELECT input_price_per_million, output_price_per_million, refreshed_at
+                 FROM catalog_models WHERE provider = ?1 AND lower(model) = ?2
+                   AND refreshed_at >= ?3",
+                params![runtime_provider, model_id, cutoff],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<f64>>(0)?,
+                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let mut observations = Vec::new();
+        let mut statement = connection.prepare(
+            "SELECT s.source, s.source_kind, o.scope, o.provider_key, o.model_id,
+                    o.input_price, o.output_price, o.cache_read_price, o.cache_write_price,
+                    o.reasoning_price, o.input_audio_price, o.output_audio_price, o.request_price,
+                    o.as_of, o.valid_from, o.valid_until, s.fetched_at
+             FROM price_observations o
+             JOIN pricing_snapshots s ON s.id = o.snapshot_id
+             WHERE s.active = 1 AND (s.source_kind = 'manual' OR s.fetched_at >= ?1)
+               AND lower(o.model_id) = ?2
+               AND (o.valid_from IS NULL OR o.valid_from <= ?3)
+               AND (o.valid_until IS NULL OR o.valid_until > ?3)",
+        )?;
+        let rows = statement.query_map(params![cutoff, model_id, now], |row| {
+            let source_kind = match row.get::<_, String>(1)?.as_str() {
+                "manual" => PriceSourceKind::Manual,
+                "provider_catalog" => PriceSourceKind::ProviderCatalog,
+                "official_api" => PriceSourceKind::OfficialApi,
+                "models_dev" => PriceSourceKind::ModelsDev,
+                "aggregate" => PriceSourceKind::Aggregate,
+                "benchmark" => PriceSourceKind::Benchmark,
+                other => return Err(rusqlite::Error::InvalidParameterName(other.to_owned())),
+            };
+            let scope = match row.get::<_, String>(2)?.as_str() {
+                "runtime_provider" => PriceScope::RuntimeProvider,
+                "provider_profile" => PriceScope::ProviderProfile,
+                "canonical" => PriceScope::Canonical,
+                other => return Err(rusqlite::Error::InvalidParameterName(other.to_owned())),
+            };
+            Ok(PriceObservation {
+                source: row.get(0)?,
+                source_kind,
+                scope,
+                provider_key: row.get(3)?,
+                model_id: row.get(4)?,
+                rates: crate::pricing::PriceRates {
+                    input_price_per_million: row.get(5)?,
+                    output_price_per_million: row.get(6)?,
+                    cache_read_price_per_million: row.get(7)?,
+                    cache_write_price_per_million: row.get(8)?,
+                    reasoning_price_per_million: row.get(9)?,
+                    input_audio_price_per_million: row.get(10)?,
+                    output_audio_price_per_million: row.get(11)?,
+                    request_price: row.get(12)?,
+                    modifiers: BTreeMap::new(),
+                },
+                fetched_at: row.get(16)?,
+                as_of: row.get(13)?,
+                valid_from: row.get(14)?,
+                valid_until: row.get(15)?,
+                attribution: None,
+            })
+        })?;
+        for row in rows {
+            observations.push(row?);
+        }
+
+        let mut target_candidates = observations
+            .into_iter()
+            .filter(|observation| {
+                (observation.scope == PriceScope::RuntimeProvider
+                    && observation
+                        .provider_key
+                        .as_deref()
+                        .is_some_and(|key| key.eq_ignore_ascii_case(runtime_provider)))
+                    || (observation.scope == PriceScope::ProviderProfile
+                        && profile_key.is_some_and(|key| {
+                            observation
+                                .provider_key
+                                .as_deref()
+                                .is_some_and(|value| value.eq_ignore_ascii_case(key))
+                        }))
+            })
+            .collect::<Vec<_>>();
+
+        if let Some((Some(input), Some(output), refreshed_at)) = catalog {
+            target_candidates.push(PriceObservation {
+                source: format!("catalog:{runtime_provider}"),
+                source_kind: PriceSourceKind::ProviderCatalog,
+                scope: PriceScope::RuntimeProvider,
+                provider_key: Some(runtime_provider.to_owned()),
+                model_id: model.to_owned(),
+                rates: crate::pricing::PriceRates {
+                    input_price_per_million: Some(input),
+                    output_price_per_million: Some(output),
+                    ..crate::pricing::PriceRates::default()
+                },
+                fetched_at: Some(refreshed_at),
+                as_of: None,
+                valid_from: None,
+                valid_until: None,
+                attribution: None,
+            });
+        }
+
+        target_candidates.retain(|observation| observation.rates.is_complete());
+        target_candidates.sort_by(|left, right| {
+            let left_target = u8::from(left.scope != PriceScope::RuntimeProvider);
+            let right_target = u8::from(right.scope != PriceScope::RuntimeProvider);
+            left_target
+                .cmp(&right_target)
+                .then_with(|| {
+                    left.source_kind
+                        .fallback_priority()
+                        .cmp(&right.source_kind.fallback_priority())
+                })
+                .then_with(|| right.fetched_at.cmp(&left.fetched_at))
+                .then_with(|| left.source.cmp(&right.source))
+        });
+        if let Some(observation) = target_candidates.first() {
+            return Ok(EffectivePrice::from_observation(observation, false));
+        }
+
+        let Some(canonical_model) = canonical_model else {
+            return Ok(None);
+        };
+        let Some((canonical_provider, canonical_id)) = canonical_model.split_once('/') else {
+            return Ok(None);
+        };
+        let canonical_id = normalize_price_id(canonical_id);
+        let mut canonical_candidates = statement
+            .query_map(params![cutoff, canonical_id, now], |row| {
+                let source_kind = match row.get::<_, String>(1)?.as_str() {
+                    "manual" => PriceSourceKind::Manual,
+                    "provider_catalog" => PriceSourceKind::ProviderCatalog,
+                    "official_api" => PriceSourceKind::OfficialApi,
+                    "models_dev" => PriceSourceKind::ModelsDev,
+                    "aggregate" => PriceSourceKind::Aggregate,
+                    "benchmark" => PriceSourceKind::Benchmark,
+                    other => return Err(rusqlite::Error::InvalidParameterName(other.to_owned())),
+                };
+                let scope = match row.get::<_, String>(2)?.as_str() {
+                    "runtime_provider" => PriceScope::RuntimeProvider,
+                    "provider_profile" => PriceScope::ProviderProfile,
+                    "canonical" => PriceScope::Canonical,
+                    other => return Err(rusqlite::Error::InvalidParameterName(other.to_owned())),
+                };
+                Ok(PriceObservation {
+                    source: row.get(0)?,
+                    source_kind,
+                    scope,
+                    provider_key: row.get(3)?,
+                    model_id: row.get(4)?,
+                    rates: crate::pricing::PriceRates {
+                        input_price_per_million: row.get(5)?,
+                        output_price_per_million: row.get(6)?,
+                        cache_read_price_per_million: row.get(7)?,
+                        cache_write_price_per_million: row.get(8)?,
+                        reasoning_price_per_million: row.get(9)?,
+                        input_audio_price_per_million: row.get(10)?,
+                        output_audio_price_per_million: row.get(11)?,
+                        request_price: row.get(12)?,
+                        modifiers: BTreeMap::new(),
+                    },
+                    fetched_at: row.get(16)?,
+                    as_of: row.get(13)?,
+                    valid_from: row.get(14)?,
+                    valid_until: row.get(15)?,
+                    attribution: None,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        canonical_candidates.retain(|observation| {
+            observation.rates.is_complete()
+                && observation
+                    .provider_key
+                    .as_deref()
+                    .is_some_and(|key| key.eq_ignore_ascii_case(canonical_provider))
+        });
+        canonical_candidates.sort_by(|left, right| {
+            left.source_kind
+                .fallback_priority()
+                .cmp(&right.source_kind.fallback_priority())
+                .then_with(|| right.fetched_at.cmp(&left.fetched_at))
+                .then_with(|| left.source.cmp(&right.source))
+        });
+        Ok(canonical_candidates
+            .first()
+            .and_then(|observation| EffectivePrice::from_observation(observation, true)))
     }
 
     pub fn replace_catalog(
@@ -644,10 +918,10 @@ impl RoutingStore {
         let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let mut statement = connection.prepare(
             "SELECT m.model_id, m.creator, m.general_quality, m.coding_quality,
-                    m.agentic_quality, m.input_price,
-                    m.output_price, m.latency_seconds, m.output_tokens_per_task,
+                     m.agentic_quality, m.input_price,
+                     m.output_price, m.latency_seconds, m.output_tokens_per_task,
                      NULLIF(m.reasoning_effort, ''), m.as_of,
-                     m.release_date, s.source
+                     m.release_date
              FROM benchmark_models m
              JOIN benchmark_snapshots s ON s.id = m.snapshot_id
              WHERE s.active = 1 AND s.fetched_at >= ?1
@@ -658,28 +932,25 @@ impl RoutingStore {
                 [epoch_seconds()
                     .saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX))],
                 |row| {
-                    Ok((
-                        BenchmarkModel {
-                            id: row.get(0)?,
-                            creator: row.get(1)?,
-                            intelligence: row.get(2)?,
-                            coding_quality: row.get(3)?,
-                            agentic_quality: row.get(4)?,
-                            input_price_per_million: row.get(5)?,
-                            output_price_per_million: row.get(6)?,
-                            latency_seconds: row.get(7)?,
-                            output_tokens_per_task: row.get(8)?,
-                            reasoning_effort: row.get(9)?,
-                            as_of: row.get(10)?,
-                            release_date: row.get(11)?,
-                            raw_metrics: BTreeMap::new(),
-                        },
-                        row.get(12)?,
-                    ))
+                    Ok(BenchmarkModel {
+                        id: row.get(0)?,
+                        creator: row.get(1)?,
+                        intelligence: row.get(2)?,
+                        coding_quality: row.get(3)?,
+                        agentic_quality: row.get(4)?,
+                        input_price_per_million: row.get(5)?,
+                        output_price_per_million: row.get(6)?,
+                        latency_seconds: row.get(7)?,
+                        output_tokens_per_task: row.get(8)?,
+                        reasoning_effort: row.get(9)?,
+                        as_of: row.get(10)?,
+                        release_date: row.get(11)?,
+                        raw_metrics: BTreeMap::new(),
+                    })
                 },
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(merge_benchmark_sources(rows))
+        Ok(rows)
     }
 
     pub fn benchmark_status(&self) -> Result<Vec<(String, i64, u64, String)>, RoutingError> {
@@ -1664,7 +1935,6 @@ fn set_unix_mode(path: &Path, mode: u32) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::fs;
     use std::sync::Arc;
 
@@ -1672,7 +1942,8 @@ mod tests {
         BillingMode, ProviderConfig, ProviderProfileId, QuotaBoundary, QuotaKind, QuotaLimit,
     };
 
-    use crate::benchmarks::{BenchmarkModel, PRICING_OVERRIDE_SOURCE};
+    use crate::benchmarks::BenchmarkModel;
+    use crate::pricing::{PriceObservation, PriceRates, PriceScope, PriceSourceKind};
     use crate::providers::AccountLimit;
 
     use super::{CatalogRecord, ReservationOutcome, RoutingStore};
@@ -1794,6 +2065,112 @@ mod tests {
         }
     }
 
+    fn profile_price(provider: &str, model: &str, input: f64, output: f64) -> PriceObservation {
+        PriceObservation {
+            source: "models.dev".to_owned(),
+            source_kind: PriceSourceKind::ModelsDev,
+            scope: PriceScope::ProviderProfile,
+            provider_key: Some(provider.to_owned()),
+            model_id: model.to_owned(),
+            rates: PriceRates {
+                input_price_per_million: Some(input),
+                output_price_per_million: Some(output),
+                ..PriceRates::default()
+            },
+            fetched_at: Some(1),
+            as_of: None,
+            valid_from: None,
+            valid_until: None,
+            attribution: None,
+        }
+    }
+
+    #[test]
+    fn target_catalog_price_beats_profile_fallback_including_zero() {
+        let store = RoutingStore::open(None).expect("store");
+        store
+            .replace_catalog(
+                "kilocode",
+                &[CatalogRecord {
+                    model: "mimo-v2-pro".to_owned(),
+                    is_free: false,
+                    context_length: None,
+                    supports_tools: None,
+                    supports_vision: None,
+                    supports_structured_output: None,
+                    input_price_per_million: Some(0.0),
+                    output_price_per_million: Some(0.0),
+                }],
+            )
+            .expect("catalog");
+        store
+            .replace_pricing(
+                "models.dev",
+                PriceSourceKind::ModelsDev,
+                "fixture",
+                &[profile_price("kilo", "mimo-v2-pro", 1.0, 3.0)],
+            )
+            .expect("pricing");
+        let catalog_price = store
+            .effective_price("kilocode", Some("kilo"), "mimo-v2-pro", None, 60)
+            .expect("resolve catalog")
+            .expect("catalog price");
+        assert_eq!(catalog_price.input_price_per_million, 0.0);
+        assert_eq!(catalog_price.output_price_per_million, 0.0);
+        assert_eq!(catalog_price.source, "catalog:kilocode");
+        store
+            .replace_pricing(
+                "manual-overrides",
+                PriceSourceKind::Manual,
+                "fixture",
+                &[PriceObservation {
+                    source: "manual-overrides".to_owned(),
+                    source_kind: PriceSourceKind::Manual,
+                    scope: PriceScope::RuntimeProvider,
+                    provider_key: Some("kilocode".to_owned()),
+                    model_id: "mimo-v2-pro".to_owned(),
+                    rates: PriceRates {
+                        input_price_per_million: Some(2.0),
+                        output_price_per_million: Some(4.0),
+                        ..PriceRates::default()
+                    },
+                    fetched_at: Some(1),
+                    as_of: None,
+                    valid_from: None,
+                    valid_until: None,
+                    attribution: None,
+                }],
+            )
+            .expect("manual pricing");
+        let price = store
+            .effective_price("kilocode", Some("kilo"), "mimo-v2-pro", None, 60)
+            .expect("resolve")
+            .expect("price");
+        assert_eq!(price.input_price_per_million, 2.0);
+        assert_eq!(price.output_price_per_million, 4.0);
+        assert_eq!(price.source, "manual-overrides");
+    }
+
+    #[test]
+    fn profile_price_fills_missing_target_catalog_price() {
+        let store = RoutingStore::open(None).expect("store");
+        store
+            .replace_pricing(
+                "models.dev",
+                PriceSourceKind::ModelsDev,
+                "fixture",
+                &[profile_price("opencode-go", "mimo-v2-pro", 1.0, 3.0)],
+            )
+            .expect("pricing");
+        let price = store
+            .effective_price("opencode-go", Some("opencode-go"), "mimo-v2-pro", None, 60)
+            .expect("resolve")
+            .expect("price");
+        assert_eq!(price.input_price_per_million, 1.0);
+        assert_eq!(price.output_price_per_million, 3.0);
+        assert!(!price.estimated);
+    }
+
     #[test]
     fn cooldown_prevents_a_new_reservation() {
         let store = RoutingStore::open(None).expect("store");
@@ -1904,49 +2281,6 @@ mod tests {
         let models = store.benchmark_models(60).expect("active snapshot");
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "valid");
-    }
-
-    #[test]
-    fn pricing_overrides_merge_into_quality_benchmarks() {
-        let store = RoutingStore::open(None).expect("store");
-        let quality = BenchmarkModel::fixture("mimo-v2-pro", 40.0, 40.0, 40.0, 0.0, 0.0);
-        store
-            .replace_benchmarks("artificial-analysis", "Artificial Analysis", &[quality])
-            .expect("quality snapshot");
-        let pricing = BenchmarkModel {
-            id: "mimo-v2-pro".to_owned(),
-            creator: None,
-            intelligence: None,
-            coding_quality: None,
-            agentic_quality: None,
-            input_price_per_million: Some(0.435),
-            output_price_per_million: Some(0.87),
-            latency_seconds: None,
-            output_tokens_per_task: None,
-            reasoning_effort: None,
-            as_of: None,
-            release_date: None,
-            raw_metrics: BTreeMap::new(),
-        };
-        store
-            .replace_benchmarks(PRICING_OVERRIDE_SOURCE, "Pricing overrides", &[pricing])
-            .expect("pricing snapshot");
-
-        let models = store.benchmark_models(60).expect("merged benchmarks");
-        let model = models
-            .iter()
-            .find(|model| model.id == "mimo-v2-pro")
-            .expect("merged model");
-        assert_eq!(model.intelligence, Some(40.0));
-        assert_eq!(model.input_price_per_million, Some(0.435));
-        assert_eq!(model.output_price_per_million, Some(0.87));
-        assert_eq!(
-            models
-                .iter()
-                .filter(|model| model.id == "mimo-v2-pro")
-                .count(),
-            1
-        );
     }
 
     #[test]

@@ -131,8 +131,6 @@ pub struct BenchmarkImport {
     pub models: Vec<BenchmarkModel>,
 }
 
-pub const PRICING_OVERRIDE_SOURCE: &str = "pricing-overrides";
-
 impl BenchmarkImport {
     pub fn normalize(mut self) -> Result<Self, String> {
         for model in &mut self.models {

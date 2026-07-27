@@ -68,6 +68,8 @@ pub struct ServerConfig {
     pub catalog_max_age_seconds: u64,
     #[serde(default = "default_benchmark_max_age_seconds")]
     pub benchmark_max_age_seconds: u64,
+    #[serde(default = "default_pricing_max_age_seconds")]
+    pub pricing_max_age_seconds: u64,
     #[serde(default = "default_true")]
     pub auto_frontier_enabled: bool,
     #[serde(default = "default_true")]
@@ -271,6 +273,8 @@ pub enum Exposure {
 pub struct ProviderConfig {
     #[serde(default)]
     pub profile: Option<ProviderProfileId>,
+    #[serde(default)]
+    pub pricing_profile: Option<String>,
     pub adapter: AdapterKind,
     pub base_url: String,
     #[serde(default)]
@@ -309,6 +313,7 @@ impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
             profile: None,
+            pricing_profile: None,
             adapter: AdapterKind::OpenaiChat,
             base_url: "http://localhost:8000/v1".to_owned(),
             api_key_secret: None,
@@ -429,6 +434,7 @@ impl Default for ServerConfig {
             state_path: None,
             catalog_max_age_seconds: default_catalog_max_age_seconds(),
             benchmark_max_age_seconds: default_benchmark_max_age_seconds(),
+            pricing_max_age_seconds: default_pricing_max_age_seconds(),
             auto_frontier_enabled: true,
             auto_free_enabled: true,
             auto_efficient_enabled: true,
@@ -530,6 +536,7 @@ impl Config {
             ));
         }
         if self.server.benchmark_max_age_seconds == 0
+            || self.server.pricing_max_age_seconds == 0
             || !valid_quality_floor(self.server.efficient_quality_floor)
             || !valid_quality_floor(self.server.balanced_quality_floor)
             || !valid_quality_floor(self.server.frontier_quality_floor_single)
@@ -892,6 +899,10 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
         "MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS",
         &mut server.benchmark_max_age_seconds,
     )?;
+    apply_env_u64(
+        "MODEL_GATEWAY_PRICING_MAX_AGE_SECONDS",
+        &mut server.pricing_max_age_seconds,
+    )?;
     apply_env_bool(
         "MODEL_GATEWAY_AUTO_FRONTIER_ENABLED",
         &mut server.auto_frontier_enabled,
@@ -1176,6 +1187,15 @@ fn validate_provider(
         }
     }
     if provider
+        .pricing_profile
+        .as_ref()
+        .is_some_and(|profile| profile.trim().is_empty() || profile.len() > 128)
+    {
+        return Err(ConfigError::Invalid(format!(
+            "provider '{name}' pricing profile must be 1-128 characters"
+        )));
+    }
+    if provider
         .account_scope
         .as_ref()
         .is_some_and(|scope| scope.trim().is_empty() || scope.len() > 128)
@@ -1311,6 +1331,10 @@ const fn default_benchmark_max_age_seconds() -> u64 {
     604_800
 }
 
+const fn default_pricing_max_age_seconds() -> u64 {
+    604_800
+}
+
 const fn default_free_quality_min_composite() -> f64 {
     30.0
 }
@@ -1376,6 +1400,7 @@ mod tests {
     fn provider(base_url: &str) -> ProviderConfig {
         ProviderConfig {
             profile: None,
+            pricing_profile: None,
             adapter: super::AdapterKind::OpenaiChat,
             base_url: base_url.to_owned(),
             api_key_secret: None,
