@@ -150,11 +150,12 @@ audit_python() {
       pip_audit() { python -m pip_audit "$@"; }
     fi
     if [ "${#requirement_files[@]}" -gt 0 ]; then
-      audit_args=()
+      pids=()
       for requirement_file in "${requirement_files[@]}"; do
-        audit_args+=( -r "$requirement_file" )
+        pip_audit -r "$requirement_file" &
+        pids+=( "$!" )
       done
-      pip_audit "${audit_args[@]}"
+      wait_for_parallel "${pids[@]}"
     else
       pip_audit
     fi
