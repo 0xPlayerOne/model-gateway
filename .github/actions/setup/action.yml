@@ -586,12 +586,11 @@ runs:
           target/debug/build
           target/debug/.fingerprint
           target/debug/*.d
-        key: ${{ runner.os }}-rust-build-v3-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', '.mise.toml', 'mise.lock') }}
-        # Cargo fingerprints validate restored artifacts. Share the exact
-        # dependency/build-script archive across CI and Test jobs; concurrent
-        # saves race safely and later runs reuse the same artifact.
+        key: ${{ runner.os }}-rust-build-v2-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', '.mise.toml', 'mise.lock') }}
+        # Cargo fingerprints validate restored artifacts; keep job-specific
+        # primary saves but reuse a prior workflow's dependency artifacts.
         restore-keys: |
-          ${{ runner.os }}-rust-build-v3-
+          ${{ runner.os }}-rust-build-v2-
     - name: Setup
       if: ${{ steps.profile.outputs.mise_required == 'true' }}
       uses: jdx/mise-action@v4
