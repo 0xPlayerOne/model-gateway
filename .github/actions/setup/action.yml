@@ -85,6 +85,16 @@ runs:
           awk '!/^\.github\// && /(^|\/)[^\/]+\.py$/ { found=1; exit } END { exit !found }' <<< "$tracked_files"
         }
 
+        has_package_script() {
+          [ -f package.json ] || return 1
+          node - "$1" <<'NODE'
+        const fs = require('node:fs');
+        const script = process.argv[2];
+        const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+        process.exit(packageJson.scripts?.[script] ? 0 : 1);
+        NODE
+        }
+
         uses_prettier() {
           [ -f package.json ] || return 0
           node <<'NODE'
@@ -225,6 +235,20 @@ runs:
           fi
         fi
         printf 'prettier=%s\n' "$prettier" >> "$GITHUB_OUTPUT"
+
+        # Repository-owned format/lint scripts are authoritative and commonly
+        # do not create the generic tool caches. Avoid recursive cache-path
+        # scans and post-job archive work unless the fallback runner is used.
+        prettier_fallback=false
+        if [ "$prettier" = true ] && ! has_package_script format:check; then
+          prettier_fallback=true
+        fi
+        eslint_fallback=false
+        if [ "$eslint" = true ] && ! has_package_script lint; then
+          eslint_fallback=true
+        fi
+        printf 'prettier_fallback=%s\n' "$prettier_fallback" >> "$GITHUB_OUTPUT"
+        printf 'eslint_fallback=%s\n' "$eslint_fallback" >> "$GITHUB_OUTPUT"
 
         build=false
         if has_tracked_regex '(^|/)(next\.config\.[^/]*|vite\.config\.[^/]*|tsconfig[^/]*\.json)$'; then
@@ -368,7 +392,7 @@ runs:
     - name: Cache JavaScript lint state
       # Fallback ESLint mode is valid without a dedicated config file; use the
       # manifest/lockfile as the cache identity in that case as well.
-      if: inputs.install == 'true' && inputs.cache-lint == 'true' && steps.profile.outputs.eslint == 'true' && hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.eslintrc*', '**/eslint.config.*') != ''
+      if: inputs.install == 'true' && inputs.cache-lint == 'true' && steps.profile.outputs.eslint_fallback == 'true' && hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.eslintrc*', '**/eslint.config.*') != ''
       uses: actions/cache@v5
       with:
         path: |
@@ -377,7 +401,7 @@ runs:
         restore-keys: |
           ${{ runner.os }}-javascript-lint-${{ github.workflow }}-${{ github.job }}-
     - name: Cache JavaScript format state
-      if: inputs.install == 'true' && inputs.cache-format == 'true' && steps.profile.outputs.prettier == 'true' && hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.prettierrc*', '**/prettier.config.*') != ''
+      if: inputs.install == 'true' && inputs.cache-format == 'true' && steps.profile.outputs.prettier_fallback == 'true' && hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.prettierrc*', '**/prettier.config.*') != ''
       uses: actions/cache@v5
       with:
         path: |
