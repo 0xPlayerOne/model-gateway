@@ -9,9 +9,13 @@ has_javascript_dependencies() {
     { [ -f package.json ] && node -e 'const p=require("./package.json"); const groups=[p.dependencies,p.devDependencies,p.optionalDependencies,p.peerDependencies]; process.exit(groups.some((g)=>g && Object.keys(g).length) ? 0 : 1)' 2>/dev/null; }
 }
 
+has_python_manifest() {
+  [ -f pyproject.toml ] || [ -f uv.lock ] ||
+    git ls-files | grep -Eq '(^|/)requirements[^/]*\.txt$'
+}
+
 has_dependency_manifest() {
-  has_javascript_dependencies || [ -f Cargo.toml ] || [ -f requirements.txt ] ||
-    [ -f requirements-dev.txt ] || [ -f pyproject.toml ]
+  has_javascript_dependencies || [ -f Cargo.toml ] || has_python_manifest
 }
 
 should_run() {
@@ -26,7 +30,7 @@ should_run() {
   case "${1:-all}" in
     javascript) has_javascript_dependencies || return 1 ;;
     rust) [ -f Cargo.toml ] || return 1 ;;
-    python) [ -f requirements.txt ] || [ -f requirements-dev.txt ] || [ -f pyproject.toml ] || return 1 ;;
+    python) has_python_manifest || return 1 ;;
     all) has_dependency_manifest || return 1 ;;
     *) echo "unknown ecosystem: ${1:-}" >&2; return 2 ;;
   esac

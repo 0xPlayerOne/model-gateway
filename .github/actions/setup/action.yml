@@ -288,8 +288,9 @@ runs:
         fi
 
         python_dependencies=false
-        if [ -f pyproject.toml ] || [ -f uv.lock ] || [ -f requirements.txt ] ||
-          [ -f requirements-dev.txt ] || [ -f Pipfile.lock ] || [ -f poetry.lock ]; then
+        if [ -f pyproject.toml ] || [ -f uv.lock ] ||
+          has_tracked_regex '(^|/)requirements[^/]*\.txt$' ||
+          [ -f Pipfile.lock ] || [ -f poetry.lock ]; then
           python_dependencies=true
           echo 'python_dependencies=true' >> "$GITHUB_OUTPUT"
         else
