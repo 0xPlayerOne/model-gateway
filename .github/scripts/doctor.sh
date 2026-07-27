@@ -3,6 +3,20 @@ set -euo pipefail
 
 errors=0
 
+configured_features="all"
+if [ -f .github/template.yml ]; then
+  configured_features="$(awk -F': ' '/^features:/ {print $2; exit}' .github/template.yml)"
+  [ -n "$configured_features" ] || configured_features="all"
+fi
+
+feature_enabled() {
+  [ "$configured_features" = all ] && return 0
+  case " $(printf '%s' "$configured_features" | tr ',' ' ') " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 error() {
   printf 'ERROR: %s\n' "$1" >&2
   errors=$((errors + 1))
@@ -27,7 +41,11 @@ if [ -f package.json ]; then
     if [ -f "$lockfile" ]; then lockfiles=$((lockfiles + 1)); fi
   done
   if [ "$lockfiles" -eq 0 ]; then
-    error "package.json exists but no supported lockfile was found"
+    if node -e 'const p=require("./package.json"); const groups=[p.dependencies,p.devDependencies,p.optionalDependencies,p.peerDependencies]; process.exit(groups.some((g)=>g && Object.keys(g).length) ? 0 : 1)' 2>/dev/null; then
+      error "package.json exists but no supported lockfile was found"
+    else
+      printf '%s\n' "INFO: package.json has no dependencies; a lockfile is optional"
+    fi
   elif [ "$lockfiles" -gt 1 ]; then
     error "multiple JavaScript lockfiles found; keep one package manager"
   fi
@@ -67,8 +85,10 @@ if [ -f pyproject.toml ] || [ -f requirements.txt ] || [ -f requirements-dev.txt
   fi
 fi
 
-for workflow in ci.yml codeql.yml security.yml test.yml draft-pr.yml release-pr.yml release.yml; do
-  [ -f ".github/workflows/$workflow" ] || error "missing standard workflow: $workflow"
+for workflow in ci codeql security test draft-pr release-pr release; do
+  if feature_enabled "$workflow"; then
+    [ -f ".github/workflows/$workflow.yml" ] || error "missing enabled workflow: $workflow.yml"
+  fi
 done
 
 for script in ci.sh codeql-languages.sh security.sh doctor.sh bootstrap.sh sync-template.sh init-repo.sh sync-protection.sh; do

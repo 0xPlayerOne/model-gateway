@@ -4,9 +4,34 @@ set -euo pipefail
 branch="main"
 repo=""
 mode="check"
+configured_features="all"
+configured_languages="auto"
+
+if [ -f .github/template.yml ]; then
+  configured_features="$(awk -F': ' '/^features:/ {print $2; exit}' .github/template.yml)"
+  configured_languages="$(awk -F': ' '/^languages:/ {print $2; exit}' .github/template.yml)"
+  [ -n "$configured_features" ] || configured_features="all"
+  [ -n "$configured_languages" ] || configured_languages="auto"
+fi
+
+feature_enabled() {
+  [ "$configured_features" = all ] && return 0
+  case " $(printf '%s' "$configured_features" | tr ',' ' ') " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+language_enabled() {
+  [ "$configured_languages" = auto ] || [ "$configured_languages" = all ] && return 0
+  case " $(printf '%s' "$configured_languages" | tr ',' ' ') " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 usage() {
-  printf '%s\n' 'Usage: sync-protection.sh --repo OWNER/REPO [--branch main] [--apply]'
+  printf '%s\n' 'Usage: sync-protection.sh --repo OWNER/REPO [--branch main] [--check] [--apply]'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -24,13 +49,17 @@ done
 command -v gh >/dev/null 2>&1 || { echo "gh is required" >&2; exit 1; }
 
 is_private="$(gh repo view "$repo" --json isPrivate --jq '.isPrivate')"
-contexts=(Format Lint Type-Check Build Unit Integration E2E Smoke 'Dependency Audit' Detect)
+contexts=()
+if feature_enabled ci; then contexts+=(Format Lint Type-Check Build); fi
+if feature_enabled test; then contexts+=(Unit Integration E2E Smoke); fi
+if feature_enabled security; then contexts+=('Dependency Audit'); fi
+if feature_enabled codeql; then contexts+=(Detect); fi
 
-if [ "$is_private" != true ]; then
+if [ "$is_private" != true ] && feature_enabled codeql; then
   contexts+=("Analyze (Actions)")
-  if git ls-files -- '*.ts' '*.tsx' '*.js' '*.jsx' package.json tsconfig\*.json | grep -q .; then contexts+=("Analyze (TypeScript)"); fi
-  if git ls-files -- '*.py' pyproject.toml requirements\*.txt setup.py ':!.github/**' | grep -q .; then contexts+=("Analyze (Python)"); fi
-  if git ls-files -- '*.rs' Cargo.toml Cargo.lock | grep -q .; then contexts+=("Analyze (Rust)"); fi
+  if language_enabled typescript && git ls-files -- '*.ts' '*.tsx' '*.js' '*.jsx' package.json tsconfig\*.json | grep -q .; then contexts+=("Analyze (TypeScript)"); fi
+  if language_enabled python && git ls-files -- '*.py' pyproject.toml requirements\*.txt setup.py ':!.github/**' | grep -q .; then contexts+=("Analyze (Python)"); fi
+  if language_enabled rust && git ls-files -- '*.rs' Cargo.toml Cargo.lock | grep -q .; then contexts+=("Analyze (Rust)"); fi
 fi
 
 protection="$(gh api "repos/$repo/branches/$branch/protection" 2>/dev/null || true)"
@@ -47,6 +76,7 @@ preserved=()
 while IFS= read -r context; do
   [ -n "$context" ] || continue
   case "$context" in
+    'Slither / Analyze') continue ;; # removed from the standard workflow set
     'CI / '*|'Test / '*|'Security / '*|'CodeQL / '*) ;;
     *) preserved+=("$context") ;;
   esac

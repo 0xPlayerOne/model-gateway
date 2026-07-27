@@ -10,7 +10,7 @@ They complement `CONTRIBUTING.md`. More specific instructions in nested `AGENTS.
 - Prefer the versions pinned in `.mise.toml`.
 - Do not commit secrets, generated credentials, local environment files, or machine-specific paths.
 - Add tests for behavior changes and keep coverage thresholds explicit in the project configuration.
-  Make the smallest complete, well-tested change that solves the requested problem without disturbing unrelated work.
+- Make the smallest complete, well-tested change that solves the requested problem without disturbing unrelated work.
 
 This repository may contain TypeScript, Rust, Python, or any combination of them. Detect the active stack from the files present; do not assume every check applies.
 

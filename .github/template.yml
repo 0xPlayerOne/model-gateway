@@ -1,0 +1,4 @@
+version: 1
+languages: rust,python
+features: ci,codeql,security,test,draft-pr,release-pr,dependabot
+package_manager: auto
