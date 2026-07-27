@@ -444,11 +444,7 @@ runs:
       if: >-
         inputs.install == 'true' &&
         inputs.cache-build == 'true' &&
-        steps.profile.outputs.build == 'true' &&
-        hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb',
-        '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json',
-        '**/next.config.*', '**/vite.config.*', '**/tsconfig*.json',
-        '.mise.toml', 'mise.lock') != ''
+        steps.profile.outputs.build == 'true'
       uses: actions/cache@v5
       with:
         path: |
