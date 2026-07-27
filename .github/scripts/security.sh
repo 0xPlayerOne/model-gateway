@@ -136,7 +136,11 @@ audit_rust() {
 }
 
 audit_python() {
-  if [ -f requirements.txt ] || [ -f requirements-dev.txt ] || [ -f pyproject.toml ]; then
+  requirement_files=()
+  while IFS= read -r requirement_file; do
+    [ -n "$requirement_file" ] && requirement_files+=( "$requirement_file" )
+  done < <(git ls-files '*requirements*.txt')
+  if [ "${#requirement_files[@]}" -gt 0 ] || [ -f pyproject.toml ]; then
     audits=$((audits + 1))
     if command -v uv >/dev/null 2>&1; then
       local uv_audit_cache="${REPO_FOUNDRY_UV_AUDIT_CACHE:-$HOME/.cache/uv-audit}"
@@ -145,13 +149,15 @@ audit_python() {
       python -m pip install --disable-pip-version-check --quiet pip-audit
       pip_audit() { python -m pip_audit "$@"; }
     fi
-    pids=()
-    if [ -f requirements.txt ]; then pip_audit -r requirements.txt & pids+=("$!"); fi
-    if [ -f requirements-dev.txt ]; then pip_audit -r requirements-dev.txt & pids+=("$!"); fi
-    if [ -f pyproject.toml ] && [ ! -f requirements.txt ] && [ ! -f requirements-dev.txt ]; then
-      pip_audit & pids+=("$!")
+    if [ "${#requirement_files[@]}" -gt 0 ]; then
+      audit_args=()
+      for requirement_file in "${requirement_files[@]}"; do
+        audit_args+=( -r "$requirement_file" )
+      done
+      pip_audit "${audit_args[@]}"
+    else
+      pip_audit
     fi
-    wait_for_parallel "${pids[@]}"
   else
     echo "Skipping Python audit (Python dependency manifest not found)"
   fi
