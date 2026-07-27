@@ -13,7 +13,7 @@ has_javascript() {
 
 has_python() {
   [ -f pyproject.toml ] || [ -f requirements.txt ] || [ -f requirements-dev.txt ] || \
-    git ls-files -- '*.py' | grep -q .
+    git ls-files -- '*.py' ':!.github/**' | grep -q .
 }
 
 package_manager() {
