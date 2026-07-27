@@ -146,6 +146,11 @@ jobs:
             **/poetry.lock
             **/uv.lock
           sparse-checkout-cone-mode: false
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          version: 0.11.32
+          enable-cache: false
       - name: Setup
         uses: ./.github/actions/setup
         with:
