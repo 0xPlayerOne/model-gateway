@@ -1,23 +1,215 @@
 name: Release
 
 on:
+  pull_request:
   push:
-    tags: ['v*.*.*']
-  workflow_dispatch:
+    tags:
+      - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: Publish
+  validate:
+    name: Validate release
     runs-on: ubuntu-latest
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}
-      cancel-in-progress: false
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - name: Create GitHub release
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.87.0
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-features
+      - run: cargo build --locked --release
+
+  package:
+    name: Package ${{ matrix.target }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.87.0
+          targets: ${{ matrix.target }}
+      - name: Install ARM64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install --yes gcc-aarch64-linux-gnu
+      - name: Validate release tag
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          test "${GITHUB_REF_NAME#v}" = "$version"
+      - name: Build release binary
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" --generate-notes --verify-tag
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Smoke native binary
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: |
+          target/${{ matrix.target }}/release/model-gateway --version
+          target/${{ matrix.target }}/release/model-gateway --help >/dev/null
+      - name: Inspect ARM64 binary
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: file target/${{ matrix.target }}/release/model-gateway | grep -E 'ARM aarch64|aarch64'
+      - name: Create archive
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          package="model-gateway-${version}-${{ matrix.target }}"
+          mkdir -p dist/package
+          cp "target/${{ matrix.target }}/release/model-gateway" dist/model-gateway
+          cp README.md LICENSE-MIT LICENSE-APACHE gateway.example.toml gateway.core.example.toml gateway.secondary.example.toml gateway.optional.example.toml dist/
+          tar -czf "dist/package/${package}.tar.gz" -C dist model-gateway README.md LICENSE-MIT LICENSE-APACHE gateway.example.toml gateway.core.example.toml gateway.secondary.example.toml gateway.optional.example.toml
+          rm -f dist/model-gateway dist/README.md dist/LICENSE-MIT dist/LICENSE-APACHE dist/gateway.example.toml dist/gateway.core.example.toml dist/gateway.secondary.example.toml dist/gateway.optional.example.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.target }}
+          path: dist/package/*.tar.gz
+          if-no-files-found: error
+
+  artifact-smoke:
+    name: Smoke native release artifacts
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: dist
+          merge-multiple: true
+      - run: RELEASE_SMOKE_EXECUTE_ARCHIVES=0 ./scripts/release-smoke.sh dist
+
+  container:
+    name: Container release dry-run/publish
+    needs: [validate, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build container dry-run
+        if: github.event_name == 'pull_request'
+        run: docker build --platform linux/amd64 -t model-gateway:release-dry-run .
+      - name: Smoke container dry-run
+        if: github.event_name == 'pull_request'
+        run: ./scripts/release-smoke.sh /tmp model-gateway:release-dry-run
+      - uses: docker/setup-buildx-action@v3
+        if: github.event_name == 'push'
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v6
+        if: github.event_name == 'push'
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/model-gateway
+          tags: type=ref,event=tag
+      - name: Set lowercase image name
+        if: github.event_name == 'push'
+        shell: bash
+        run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/model-gateway" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          pattern: native-*
+          path: dist
+          merge-multiple: true
+      - name: Prepare native runtime contexts
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p image-context/amd64/runtime image-context/arm64/runtime
+          tar -xOf "dist/model-gateway-${version}-x86_64-unknown-linux-gnu.tar.gz" model-gateway > image-context/amd64/runtime/model-gateway
+          tar -xOf "dist/model-gateway-${version}-aarch64-unknown-linux-gnu.tar.gz" model-gateway > image-context/arm64/runtime/model-gateway
+          for arch in amd64 arm64; do
+            cp Dockerfile.release-runtime gateway.example.toml gateway.core.example.toml gateway.secondary.example.toml gateway.optional.example.toml "image-context/${arch}/"
+          done
+      - name: Publish AMD64 runtime image
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v7
+        with:
+          context: image-context/amd64
+          file: image-context/amd64/Dockerfile.release-runtime
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}-amd64
+          sbom: true
+          provenance: mode=max
+      - name: Publish ARM64 runtime image
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v7
+        with:
+          context: image-context/arm64
+          file: image-context/arm64/Dockerfile.release-runtime
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}-arm64
+          sbom: true
+          provenance: mode=max
+      - name: Publish multi-architecture manifest
+        if: github.event_name == 'push'
+        run: docker buildx imagetools create --tag "$IMAGE:${GITHUB_REF_NAME}" "$IMAGE:${GITHUB_REF_NAME}-amd64" "$IMAGE:${GITHUB_REF_NAME}-arm64"
+
+  publish:
+    name: Publish release assets
+    if: github.event_name == 'push'
+    needs: [package, artifact-smoke, container]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > SHA256SUMS
+      - uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/model-gateway-source.spdx.json
+          upload-artifact: false
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
