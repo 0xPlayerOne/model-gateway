@@ -48,6 +48,11 @@ if [ "${1:-audit}" = should_run ]; then
 fi
 
 if [ "${1:-}" = profile ]; then
+  python_requirements="$(
+    git ls-files -z '*requirements*.txt' |
+      node -e 'let data=""; process.stdin.on("data", (chunk) => { data += chunk; }).on("end", () => process.stdout.write(JSON.stringify(data.split("\\0").filter(Boolean))));'
+  )"
+  [ "$python_requirements" = "[]" ] && python_requirements='[""]'
   for ecosystem in javascript rust python; do
     if should_run "$ecosystem"; then
       printf '%s=true\n' "$ecosystem"
@@ -57,6 +62,7 @@ if [ "${1:-}" = profile ]; then
       exit "$status"
     fi
   done
+  printf 'python_requirements=%s\n' "$python_requirements"
   exit 0
 fi
 
@@ -141,9 +147,17 @@ audit_rust() {
 
 audit_python() {
   requirement_files=()
-  while IFS= read -r requirement_file; do
-    [ -n "$requirement_file" ] && requirement_files+=( "$requirement_file" )
-  done < <(git ls-files '*requirements*.txt')
+  if [ -n "${REPO_FOUNDRY_PYTHON_REQUIREMENT:-}" ]; then
+    if ! git ls-files --error-unmatch -- "${REPO_FOUNDRY_PYTHON_REQUIREMENT}" >/dev/null 2>&1; then
+      echo "Python requirement file is not tracked: ${REPO_FOUNDRY_PYTHON_REQUIREMENT}" >&2
+      return 1
+    fi
+    requirement_files+=( "$REPO_FOUNDRY_PYTHON_REQUIREMENT" )
+  else
+    while IFS= read -r requirement_file; do
+      [ -n "$requirement_file" ] && requirement_files+=( "$requirement_file" )
+    done < <(git ls-files '*requirements*.txt')
+  fi
   if [ "${#requirement_files[@]}" -gt 0 ] || [ -f pyproject.toml ]; then
     audits=$((audits + 1))
     if command -v uv >/dev/null 2>&1; then

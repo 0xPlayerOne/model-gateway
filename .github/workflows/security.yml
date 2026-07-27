@@ -25,6 +25,7 @@ jobs:
       javascript: ${{ steps.profile.outputs.javascript }}
       rust: ${{ steps.profile.outputs.rust }}
       python: ${{ steps.profile.outputs.python }}
+      python_requirements: ${{ steps.profile.outputs.python_requirements }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -130,8 +131,17 @@ jobs:
         run: bash .github/scripts/security.sh audit rust
 
   dependency-audit-python:
-    name: Dependency Audit (Python)
+    name: Dependency Audit (Python) / ${{ matrix.requirement }}
+    needs: profile
+    if: needs.profile.outputs.python == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        requirement: ${{ fromJSON(needs.profile.outputs.python_requirements) }}
     runs-on: ubuntu-slim
+    env:
+      REPO_FOUNDRY_PYTHON_REQUIREMENT: ${{ matrix.requirement }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
