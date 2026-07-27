@@ -67,6 +67,7 @@ files=(
   .github/scripts/codeql-languages.sh
   .github/scripts/doctor.sh
   .github/scripts/security.sh
+  .github/scripts/sitecustomize.py
   .github/scripts/sync-template.sh
   .github/scripts/init-repo.sh
   .github/scripts/sync-protection.sh
