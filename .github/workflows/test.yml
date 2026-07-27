@@ -1,4 +1,4 @@
-name: CI
+name: Test
 
 on:
   push:
@@ -19,8 +19,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  format:
-    name: Format
+  unit:
+    name: Unit
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -30,11 +30,23 @@ jobs:
         with: { cache: true }
       - name: Install
         run: bash .github/scripts/ci.sh install
-      - name: Format
-        run: bash .github/scripts/ci.sh format
+      - name: Unit
+        run: bash .github/scripts/ci.sh unit
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-unit-${{ github.run_id }}
+          path: |
+            coverage/**
+            htmlcov/**
+            .coverage*
+            target/llvm-cov/**
+          if-no-files-found: ignore
+          retention-days: 14
 
-  lint:
-    name: Lint
+  integration:
+    name: Integration
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -44,11 +56,11 @@ jobs:
         with: { cache: true }
       - name: Install
         run: bash .github/scripts/ci.sh install
-      - name: Lint
-        run: bash .github/scripts/ci.sh lint
+      - name: Integration
+        run: bash .github/scripts/ci.sh integration
 
-  type-check:
-    name: Type-Check
+  e2e:
+    name: E2E
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -58,11 +70,11 @@ jobs:
         with: { cache: true }
       - name: Install
         run: bash .github/scripts/ci.sh install
-      - name: Type-Check
-        run: bash .github/scripts/ci.sh type_check
+      - name: E2E
+        run: bash .github/scripts/ci.sh e2e
 
-  build:
-    name: Build
+  smoke:
+    name: Smoke
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -72,5 +84,5 @@ jobs:
         with: { cache: true }
       - name: Install
         run: bash .github/scripts/ci.sh install
-      - name: Build
-        run: bash .github/scripts/ci.sh build
+      - name: Smoke
+        run: bash .github/scripts/ci.sh smoke

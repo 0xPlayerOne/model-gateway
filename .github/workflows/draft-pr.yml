@@ -1,4 +1,4 @@
-name: Draft PR Workflow
+name: Draft PR
 
 on:
   push:
@@ -15,23 +15,29 @@ permissions:
   contents: read
   pull-requests: write
 
+env:
+  GH_TOKEN: ${{ github.token }}
+
 jobs:
   create-draft-pr:
-    name: Create Draft PR into staging
+    name: Create
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Check if PR already exists
+      - name: Check
         id: check-pr
         run: |
           BRANCH="${{ github.ref_name }}"
-          EXISTING=$(gh pr list --base staging --head "$BRANCH" --state all --json number,title 2>/dev/null | jq 'length')
+          EXISTING=$(gh pr list --base staging --head "$BRANCH" --state open --json number,title 2>/dev/null | jq 'length')
           echo "existing=$EXISTING" >> "$GITHUB_OUTPUT"
 
-      - name: Create draft PR
+      - name: Create
         if: steps.check-pr.outputs.existing == '0'
         run: |
           BRANCH="${{ github.ref_name }}"
@@ -46,11 +52,11 @@ jobs:
 
             **CI Status:** Pending — this workflow triggered on push to \`$BRANCH\`."
 
-      - name: Mark PR ready when CI passes
+      - name: Mark ready
         if: steps.check-pr.outputs.existing == '0'
         run: |
           BRANCH="${{ github.ref_name }}"
-          PR_NUMBER=$(gh pr list --base staging --head "$BRANCH" --state all --json number 2>/dev/null | jq '.[0].number')
+          PR_NUMBER=$(gh pr list --base staging --head "$BRANCH" --state open --json number 2>/dev/null | jq '.[0].number')
           if [ -n "$PR_NUMBER" ]; then
             gh pr ready "$PR_NUMBER"
           fi

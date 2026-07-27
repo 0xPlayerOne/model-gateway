@@ -2,48 +2,40 @@
 
 ## Our Pledge
 
-We as members, contributors, and leaders pledge to make participation in our
-community a harassment-free experience for everyone, regardless of age, body
-size, visible or invisible disability, ethnicity, sex characteristics, gender
-identity and expression, level of experience, education, socio-economic status,
-nationality, personal appearance, race, caste, color, religion, or sexual
-identity and orientation.
+We as members, contributors, and leaders pledge to make participation in our community a harassment-free experience for everyone, regardless of age, body size, visible or invisible disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, caste, color, religion, or sexual identity and orientation.
 
-We pledge to act and interact in ways that contribute to an open, welcoming,
-diverse, inclusive, and healthy community.
+We pledge to act and interact in ways that contribute to an open, welcoming, diverse, inclusive, and healthy community.
 
 ## Our Standards
 
 Examples of behavior that contributes to a positive environment:
 
 - Demonstrating empathy and kindness toward other people
-- Being respectful of differing opinions, viewpoints, and experiences
+- Respecting differing opinions, viewpoints, and experiences
 - Giving and gracefully accepting constructive feedback
-- Accepting responsibility and apologizing to those affected by our mistakes
+- Accepting responsibility and apologizing to those affected by mistakes
 - Focusing on what is best for the overall community
 
 Examples of unacceptable behavior:
 
-- The use of sexualized language or imagery, and sexual attention or advances
+- Sexualized language or imagery, and sexual attention or advances
 - Trolling, insulting or derogatory comments, and personal or political attacks
 - Public or private harassment
-- Publishing others' private information without explicit permission
-- Other conduct which could reasonably be considered inappropriate in a professional setting
+- Publishing another person's private information without explicit permission
+- Other conduct that could reasonably be considered inappropriate in a professional setting
 
 ## Enforcement Responsibilities
 
-Project maintainers (Nifty League engineering team) are responsible for clarifying and enforcing our standards. They have the right to remove, edit, or reject comments, commits, code, wiki edits, issues, and other contributions that do not align with this Code of Conduct.
+Project maintainers are responsible for clarifying and enforcing these standards. They may remove, edit, or reject comments, commits, code, issues, and other contributions that do not align with this Code of Conduct.
 
 ## Scope
 
-This Code of Conduct applies within all community spaces, and also applies when an individual is officially representing the community in public spaces.
+This Code of Conduct applies within all community spaces and also applies when an individual is officially representing the project in public spaces.
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project maintainers via Discord (DM `0xPlayerOne`) or email.
-
-All complaints will be reviewed and investigated promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported privately to the project maintainers using the contact method documented in [SECURITY.md](SECURITY.md). Reports will be reviewed and investigated promptly and fairly.
 
 ## Attribution
 
-This Code of Conduct is adapted from the [Contributor Covenant](https://www.contributor-covenant.org), version 2.1, available at https://www.contributor-covenant.org/version/2/1/code_of_conduct.html.
+This Code of Conduct is adapted from the [Contributor Covenant](https://www.contributor-covenant.org), version 2.1.

@@ -1,82 +1,152 @@
-# AGENTS.md — model-gateway
+# Agent Instructions
 
-## Stack
-- Rust 2024 edition, toolchain pinned to **1.87.0** via `rust-toolchain.toml`
-- Single crate: lib (`src/lib.rs`) + bin (`src/main.rs`)
-- Axum HTTP server, Tokio async runtime, rusqlite state, reqwest HTTP client
+These instructions are the repository-level operating contract for coding agents, including Hermes, OpenCode, and other automation.
 
-## Commands
+They complement `CONTRIBUTING.md`. More specific instructions in nested `AGENTS.md` files and project documentation take precedence for their directory.
 
-```bash
-# Core validation (what CI runs on every push/PR):
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
-cargo build --release
+## Mission
 
-# Dependency policy (requires cargo-deny on +stable, NOT pinned 1.87.0):
-cargo +stable install cargo-deny --version 0.20.2 --locked
-cargo +stable deny check
+- Keep formatting, linting, type checking, builds, tests, and coverage reproducible locally and in CI.
+- Prefer the versions pinned in `.mise.toml`.
+- Do not commit secrets, generated credentials, local environment files, or machine-specific paths.
+- Add tests for behavior changes and keep coverage thresholds explicit in the project configuration.
+  Make the smallest complete, well-tested change that solves the requested problem without disturbing unrelated work.
 
-# Smoke tests (require release binary already built):
-./scripts/native-smoke.sh
-./scripts/docker-smoke.sh           # needs Docker
-./scripts/hermes-smoke.sh           # needs uv/uvx + Python
-./scripts/release-smoke.sh <dir>    # validates release archives
+This repository may contain TypeScript, Rust, Python, or any combination of them. Detect the active stack from the files present; do not assume every check applies.
 
-# Provider connectivity check (needs .env.local sourced):
-./scripts/core-provider-check.sh
+## Read before acting
+
+Before editing:
+
+1. Read this file and `.github/CONTRIBUTING.md`.
+2. Find and read any nested `AGENTS.md` that covers the files you will touch.
+3. Read the nearest README, package manifest, build configuration, and relevant tests.
+4. Inspect the current branch, worktree, remotes, and recent history:
+
+   ```sh
+   git status --short --branch
+   git remote -v
+   git log -5 --oneline
+   ```
+
+5. Identify the repository's package manager, lockfile, runtime versions, test commands, deployment assumptions, and generated files.
+
+If the worktree is dirty, preserve existing changes and avoid overlapping edits until their ownership is clear.
+
+## Priorities
+
+When instructions conflict, use this order:
+
+1. System and user instructions
+2. This repository's instructions and explicit task scope
+3. Nested directory instructions
+4. Existing project conventions
+5. General best practices
+
+Ask for clarification when a missing decision would materially change the implementation. Otherwise make the smallest reasonable assumption and document it.
+
+## Safety boundaries
+
+- Do not discard, reset, overwrite, or rewrite user-owned changes.
+- Do not expose or commit secrets, credentials, tokens, private keys, local environment files, or personal machine paths.
+- Do not modify production resources, repository settings, branch protections, secrets, deployments, or external systems unless explicitly requested.
+- Do not add organization- or product-specific details to this reusable baseline.
+- Do not change dependency managers or lockfiles unnecessarily.
+- Do not bypass hooks, tests, review requirements, or required checks to hide a failure.
+- Do not claim completion while required validation, review, deployment, or user decisions remain pending.
+- Publishing, committing, or opening a pull request requires explicit task scope or user authorization.
+
+## Standard workflow
+
+1. Restate the desired outcome and identify the files or systems in scope.
+2. Inspect before editing; preserve unrelated work.
+3. Plan the smallest coherent change.
+4. Implement with existing project patterns.
+5. Run focused checks while iterating.
+6. Inspect the final diff for accidental changes, secrets, formatting, and generated files.
+7. Run the broadest applicable validation available.
+8. Report what changed, exact checks and results, skipped checks with reasons, risks, and remaining work.
+
+For normal feature work, branch from `staging` and target pull requests at `staging`. Treat `main` as the protected release branch. Follow `.github/CONTRIBUTING.md` for the complete internal and external contribution flow.
+
+## Toolchain and dependencies
+
+- Use the versions pinned in `.mise.toml`; run `mise install` when needed.
+- Use the package manager indicated by the existing lockfile:
+  - `bun.lock` or `bun.lockb` → Bun
+  - `pnpm-lock.yaml` → pnpm
+  - `yarn.lock` → Yarn
+  - `package-lock.json` → npm
+- Use the existing Python environment and dependency manifest. Prefer a project-managed virtual environment.
+- Use Cargo commands and the committed Cargo lockfile for Rust projects.
+- Do not mix package managers or regenerate lockfiles as a side effect.
+- Keep dependency additions narrowly scoped and explain security, licensing, and runtime impact.
+
+## Validation
+
+Use the shared scripts when present. They detect supported tools and skip inapplicable checks:
+
+```sh
+bash .github/scripts/ci.sh format
+bash .github/scripts/ci.sh lint
+bash .github/scripts/ci.sh type_check
+bash .github/scripts/ci.sh build
+bash .github/scripts/ci.sh unit
+bash .github/scripts/ci.sh integration
+bash .github/scripts/ci.sh e2e
+bash .github/scripts/ci.sh smoke
+bash .github/scripts/security.sh
 ```
 
-## Source layout
+Run focused tests first, then the complete applicable set for release, security, workflow, dependency, and configuration changes.
 
-| Module | Role |
-|---|---|
-| `src/gateway.rs` | Axum routes, request handling, SSE streaming, fallback logic (~2500 lines) |
-| `src/config.rs` | TOML config parsing, validation, provider/model structures |
-| `src/routing.rs` | SQLite-backed routing store: catalogs, benchmarks, quotas, cooldowns |
-| `src/providers.rs` | Provider profiles (`BuiltinProvider`), catalog fetching, request preparation |
-| `src/benchmarks.rs` | Benchmark import/parse, task classification, quality/cost selection |
-| `src/secrets.rs` | Secret resolution: keyring, file, or environment |
-| `src/storage.rs` | Private module: atomic file writes, SQLite helpers |
-| `src/main.rs` | CLI (clap): `setup`, `serve`, `config`, `credentials`, `catalog`, `benchmarks`, `healthcheck` |
+At minimum:
 
-## Architecture notes
+- TypeScript/JavaScript: Prettier formatting, ESLint linting, type-check, build, unit tests, and relevant browser/integration tests
+- Rust: default rustfmt, Clippy with warnings treated as errors, check, unit/integration tests, and dependency audit
+- Python: Ruff formatting and linting, compile or type checks, pytest, coverage, and dependency audit
+- Mixed projects: validate each active ecosystem and its integration boundaries
 
-- Built-in routes `local`, `auto-free`, `auto-efficient`, `auto-frontier` exist alongside user-defined model aliases. `auto-frontier` can be disabled via `server.auto_frontier_enabled = false`.
-- Gateway binds `127.0.0.1:8008` by default. No caller authentication exists; do not broaden the bind without designing auth first.
-- Config file default path: `~/.config/model-gateway/config.toml`. Override with `MODEL_GATEWAY_CONFIG`.
-- The gateway **never** loads `.env` files automatically. For `MODEL_GATEWAY_SECRET_STORE=environment`, export vars before running.
-- Secrets are never logged. Config diffs, request logs, and error responses never contain credential values.
-- Provider catalogs and benchmarks are refreshed explicitly (`catalog refresh`, `benchmarks refresh`); serving never makes outbound catalog requests.
-- Routing state (catalogs, quotas, cooldowns, session pins) lives in SQLite at `MODEL_GATEWAY_STATE_PATH` (default `~/.config/model-gateway/routing.sqlite3`). Prompts and responses are never stored.
+If a check cannot run, state the exact reason. A skipped check is not a passing check.
 
-## Testing
+## Tests and coverage
 
-- **Unit tests**: inline `#[cfg(test)]` modules in each source file.
-- **CLI integration tests** (`tests/cli.rs`): spawn the real binary with isolated temp dirs and `MODEL_GATEWAY_SECRET_STORE=environment`.
-- **Gateway integration tests** (`tests/gateway_smoke.rs`, ~1400 lines): spin up ephemeral Axum mock providers on random ports, then exercise routing, fallback, streaming, rate-limit cooldown, catalog capability filtering, benchmark-driven selection, and frontier constraints. Uses `tempfile::tempdir()` for state isolation.
-- All tests are hermetic — no network calls, no real credentials, no shared state.
-- CI also runs `./scripts/native-smoke.sh` (macOS) and `./scripts/docker-smoke.sh` + `./scripts/hermes-smoke.sh` (Linux).
+- Add or update tests for behavior changes and regressions.
+- Keep unit, integration, E2E, and smoke coverage in the suite where each applies.
+- Preserve project-specific coverage thresholds; do not lower them to make CI green.
+- Keep test data deterministic and remove secrets from logs and fixtures.
+- Use the narrowest test command while iterating, then run the affected package or workspace suite.
 
-## Docker
+## GitHub workflows and configuration
 
-- `Dockerfile`: multi-stage build from `rust:1.87-bookworm`, runs as non-root `model-gateway` user.
-- `Dockerfile.release-runtime`: copies pre-built native binary (no Rust compilation). Used by release CI for multi-arch images.
-- `docker-compose.yml`: `gateway` service (always) + `setup` service (profile `setup`). Mounts `.model-gateway/` as read-only config.
-- Host port fixed to `127.0.0.1:8008`. The setup container needs `MODEL_GATEWAY_UID`/`MODEL_GATEWAY_GID` exported.
-- Docker smoke tests verify: non-root UID, dropped capabilities, read-only filesystem, secret mount permissions (700/600), and that `local_container` mode refuses to start without the container marker.
+- Keep workflows concise, independently runnable, and safe to re-run.
+- Use `push` for `main, staging` and `pull_request` for `staging` unless a workflow has a documented event-specific reason.
+- Give workflows clear names and jobs concise names; avoid repeating the workflow name in the job name.
+- Use per-workflow concurrency groups that cancel superseded runs while allowing independent workflows to run in parallel.
+- Use least-privilege permissions and pin action versions consistently with the template.
+- Keep CI, Test, Security, CodeQL, Draft PR, Release PR, and Release concerns separated.
+- Security and CodeQL may skip when repository visibility or GitHub plan support does not permit them. Do not make an unavailable check required.
+- Optional Turborepo Remote Caching uses `TURBO_TOKEN` and `TURBO_TEAM`; do not add Vercel deployment behavior just to enable caching.
+- Update branch protection when adding or renaming required job checks; verify the actual GitHub status context.
 
-## Release
+## Documentation and generated files
 
-- Tag-gated: pushing `v*` triggers publish. The release workflow validates `Cargo.toml` version matches the git tag.
-- Packages native archives for x86_64-linux, aarch64-linux, x86_64-macos, aarch64-macos, plus multi-arch GHCR container.
-- `cargo install --locked --path .` for local install from source.
+- Update documentation when behavior, setup, configuration, commands, or operational procedures change.
+- Keep `.env.example` limited to variable names and safe placeholders.
+- Do not commit build output, caches, coverage output, dependency directories, generated credentials, or temporary files.
+- Preserve formatting and line-ending conventions from `.editorconfig` and `.gitattributes`.
 
-## Conventions
+## Completion report
 
-- `Cargo.lock` is committed (binary crate convention).
-- `.env.local` contains real API keys for manual testing; it is gitignored (`.env.*` pattern). Never reference it in code or CI.
-- `gateway.*.example.toml` files are tiered: `core` (recommended), `secondary` (useful), `optional` (untested). The `gateway.example.toml` is the full reference.
-- Provider profiles are defined in `BuiltinProvider` enum in `src/providers.rs`. Adding a provider requires a new variant there plus entry in the example configs.
-- Error responses always use OpenAI-shaped JSON: `{"error": {"message": "...", "type": "...", "code": "..."}}`.
+End every agent task with:
+
+```text
+Summary:
+Files changed:
+Validation:
+Skipped checks:
+Risks or follow-up:
+Branch/PR:
+```
+
+Use exact command names and outcomes. Mention external changes separately from local changes, and distinguish completed work from recommendations.
