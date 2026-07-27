@@ -177,6 +177,17 @@ jobs:
         if: matrix.requirement == 'none'
         run: echo 'Skipping Python audit (no applicable Python dependencies)'
 
+  dependency-audit-python-status:
+    name: Dependency Audit (Python)
+    if: always()
+    needs: dependency-audit-python
+    runs-on: ubuntu-slim
+    steps:
+      - name: Check matrix result
+        env:
+          RESULT: ${{ needs.dependency-audit-python.result }}
+        run: test "$RESULT" = success
+
   dependency-review:
     name: Dependency Review
     if: ${{ github.event_name == 'pull_request' && !github.event.repository.private }}
