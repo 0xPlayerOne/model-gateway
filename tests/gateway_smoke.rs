@@ -236,7 +236,7 @@ async fn free_models_can_be_filtered_by_provider() {
         .replace_catalog(
             "alpha",
             &[CatalogRecord {
-                model: "alpha-free".to_owned(),
+                model: "shared-free".to_owned(),
                 is_free: true,
                 context_length: None,
                 supports_tools: None,
@@ -251,7 +251,7 @@ async fn free_models_can_be_filtered_by_provider() {
         .replace_catalog(
             "beta",
             &[CatalogRecord {
-                model: "beta-free".to_owned(),
+                model: "shared-free".to_owned(),
                 is_free: true,
                 context_length: None,
                 supports_tools: None,
@@ -388,6 +388,66 @@ async fn free_models_quality_bar_filters_low_quality_models() {
         !models.contains(&"weak-model"),
         "low-quality model should be excluded: {models:?}"
     );
+}
+
+#[tokio::test]
+async fn free_model_listing_task_changes_ranking_not_identity() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    let catalog = |model: &str| CatalogRecord {
+        model: model.to_owned(),
+        is_free: true,
+        context_length: Some(128_000),
+        supports_tools: Some(true),
+        supports_vision: Some(false),
+        supports_structured_output: Some(false),
+        input_price_per_million: Some(0.0),
+        output_price_per_million: Some(0.0),
+    };
+    store
+        .replace_catalog(
+            "provider-a",
+            &[catalog("general-model"), catalog("coding-model")],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[
+                BenchmarkModel::fixture("general-model", 90.0, 20.0, 50.0, 0.0, 0.0),
+                BenchmarkModel::fixture("coding-model", 60.0, 95.0, 50.0, 0.0, 0.0),
+            ],
+        )
+        .expect("benchmarks");
+    drop(store);
+
+    let mut config = config_for(
+        BTreeMap::from([(
+            "provider-a".to_owned(),
+            provider("https://example.com/v1".to_owned()),
+        )]),
+        vec![TargetConfig {
+            provider: "provider-a".to_owned(),
+            model: "general-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.free_models_quality.min_composite_quality = 0.0;
+    config.server.free_models_quality.max_age_months = 0;
+    let gateway = spawn_gateway(config).await;
+
+    for (task, expected) in [("general", "general-model"), ("coding", "coding-model")] {
+        let response = reqwest::Client::new()
+            .get(format!("{gateway}/v1/free-models?task={task}"))
+            .send()
+            .await
+            .expect("free models response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = response.json().await.expect("free models body");
+        assert_eq!(body["data"][0]["model"]["name"], expected);
+    }
 }
 
 #[tokio::test]
@@ -2200,7 +2260,7 @@ async fn auto_efficient_uses_canonical_mapping_and_reasoning_effort() {
             }],
         )
         .expect("catalog");
-    let mut low = BenchmarkModel::fixture("canonical-model", 80.0, 80.0, 80.0, 1.0, 1.0);
+    let mut low = BenchmarkModel::fixture("canonical-model-low", 80.0, 80.0, 80.0, 1.0, 1.0);
     low.reasoning_effort = Some("low".to_owned());
     let mut high = BenchmarkModel::fixture("canonical-model", 95.0, 95.0, 95.0, 2.0, 2.0);
     high.reasoning_effort = Some("high".to_owned());

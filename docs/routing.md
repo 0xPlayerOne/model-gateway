@@ -8,7 +8,7 @@ This gateway is designed to **eliminate cache misses**:
 
 1. **One model per mode** — each mode (auto-free, auto-efficient, auto-balanced, auto-frontier) picks ONE model from the Pareto frontier. No task-specific routing, no complexity tiers.
 2. **Session pinning** — the first successful request pins the session to `(provider, model)`. All subsequent requests use the same model. Pin survives transient rate limits (429). Only permanent auth failures (401/403) destroy the pin.
-3. **Composite quality score** — `0.5*intelligence + 0.3*coding + 0.2*agentic` gives a well-rounded model for any task. No re-routing based on task type.
+3. **Composite quality score** — `0.8*intelligence + 0.1*coding + 0.1*agentic` gives a well-rounded model for any task. No re-routing based on task type.
 4. **Pareto frontier handles reasoning effort** — for models with multiple variants (e.g., GPT 5.6 Luna/Sol/Sol Max), the Pareto frontier picks the most efficient one. Sol Max is dominated by Sol (higher cost, marginal quality gain).
 
 **The result**: pick a mode, stay on the same model for the entire session. Cache is entirely in your hands — as long as you don't switch modes mid-session, you won't miss.
@@ -33,7 +33,7 @@ All routes filter candidates by:
 All paid routes use **composite quality** instead of task-specific scores:
 
 ```
-composite_quality = 0.5 * intelligence + 0.3 * coding_quality + 0.2 * agentic_quality
+composite_quality = 0.8 * intelligence + 0.1 * coding_quality + 0.1 * agentic_quality
 ```
 
 Fallbacks: if `coding_quality` or `agentic_quality` is None, the weight redistributes to `intelligence`. This naturally filters out models with super low coding or agentic scores.

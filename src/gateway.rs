@@ -212,113 +212,129 @@ struct ProvidersQuery {
 fn find_benchmark<'a>(
     benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
     model: &str,
-    task: TaskKind,
 ) -> Option<&'a BenchmarkModel> {
-    // Try original model first
-    if let Some(result) = find_benchmark_raw(benchmarks, model, task) {
-        return Some(result);
-    }
-    // Fall back to noise-stripped model (strip quantization, date codes, -latest)
-    let stripped = strip_model_noise(model);
-    if stripped != normalize_identifier(model) {
-        find_benchmark_raw(benchmarks, &stripped, task)
-    } else {
-        None
-    }
-}
-
-fn find_benchmark_raw<'a>(
-    benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
-    model: &str,
-    task: TaskKind,
-) -> Option<&'a BenchmarkModel> {
-    let mut best_exact: Option<(&BenchmarkModel, f64, usize)> = None;
-    let mut best_fallback: Option<(&BenchmarkModel, f64, usize)> = None;
-
-    for (benchmark_id, models) in benchmarks {
-        let is_exact = is_exact_benchmark_match(model, benchmark_id);
-        let matches = is_exact || benchmark_ids_match(model, benchmark_id);
-        if !matches {
-            continue;
-        }
-
-        for benchmark in models {
-            let Some(score) = quality_for(benchmark, task) else {
-                continue;
-            };
-
-            let mut effective_score = score;
-            let non_null_count = [
-                benchmark.intelligence,
-                benchmark.coding_quality,
-                benchmark.agentic_quality,
-            ]
-            .iter()
-            .flatten()
-            .count();
-
-            if !is_exact {
-                effective_score -= variant_prefix_penalty(model, benchmark_id);
-            }
-
-            let target = if is_exact {
-                &mut best_exact
-            } else {
-                &mut best_fallback
-            };
-
-            let should_update = match target {
-                None => true,
-                Some((_, best_score, best_count)) => {
-                    effective_score > *best_score
-                        || (effective_score == *best_score && non_null_count > *best_count)
-                }
-            };
-            if should_update {
-                *target = Some((benchmark, effective_score, non_null_count));
-            }
-        }
-    }
-
-    best_exact.or(best_fallback).map(|(b, _, _)| b)
+    find_all_matching_benchmarks(benchmarks, model)
+        .into_iter()
+        .filter_map(|benchmark| Some((benchmark, composite_quality(benchmark)?)))
+        .max_by(|(left, left_quality), (right, right_quality)| {
+            left_quality
+                .total_cmp(right_quality)
+                .then_with(|| right.id.cmp(&left.id))
+        })
+        .map(|(benchmark, _)| benchmark)
 }
 
 fn find_all_matching_benchmarks<'a>(
     benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
     model: &str,
 ) -> Vec<&'a BenchmarkModel> {
-    let mut exact: Vec<&'a BenchmarkModel> = Vec::new();
-    let mut fuzzy: Vec<&'a BenchmarkModel> = Vec::new();
-    for (benchmark_id, models) in benchmarks {
-        if is_exact_benchmark_match(model, benchmark_id) {
-            exact.extend(models);
-        } else if benchmark_ids_match(model, benchmark_id) {
-            fuzzy.extend(models);
-        }
-    }
-    if !exact.is_empty() {
-        return exact;
-    }
-    if !fuzzy.is_empty() {
-        return fuzzy;
-    }
+    let normalized = normalize_identifier(model);
     let stripped = strip_model_noise(model);
-    if stripped != normalize_identifier(model) {
+    let mut lookups = vec![model.to_owned()];
+    if normalize_identifier(&stripped) != normalized {
+        lookups.push(stripped);
+    }
+
+    if has_explicit_effort_suffix(model) {
+        let mut exact = Vec::new();
         for (benchmark_id, models) in benchmarks {
-            if is_exact_benchmark_match(&stripped, benchmark_id) {
+            if is_exact_benchmark_match(model, benchmark_id) {
                 exact.extend(models);
-            } else if benchmark_ids_match(&stripped, benchmark_id) {
-                fuzzy.extend(models);
             }
         }
         if !exact.is_empty() {
             return exact;
         }
-        if !fuzzy.is_empty() {
-            return fuzzy;
+    }
+
+    for lookup in &lookups {
+        let mut exact = Vec::new();
+        for models in benchmarks.values() {
+            for benchmark in models {
+                if is_exact_benchmark_match(lookup, &benchmark_identity_id(benchmark)) {
+                    exact.push(benchmark);
+                }
+            }
+        }
+        if !exact.is_empty() {
+            return exact;
+        }
+    }
+
+    if has_dynamic_or_release_suffix(model) {
+        return Vec::new();
+    }
+
+    for lookup in &lookups {
+        let mut groups = BTreeMap::<String, Vec<&BenchmarkModel>>::new();
+        for models in benchmarks.values() {
+            for benchmark in models {
+                let identity = benchmark_identity_id(benchmark);
+                if benchmark_ids_match(lookup, &identity) {
+                    groups
+                        .entry(normalize_identifier(&identity))
+                        .or_default()
+                        .push(benchmark);
+                }
+            }
+        }
+        if groups.len() == 1 {
+            return groups.into_values().next().unwrap_or_default();
+        }
+        if groups.len() > 1 {
+            return Vec::new();
         }
     }
     Vec::new()
+}
+
+fn benchmarks_for_effort<'a>(
+    benchmarks: Vec<&'a BenchmarkModel>,
+    requested_effort: Option<&str>,
+) -> Vec<&'a BenchmarkModel> {
+    let Some(requested_effort) = requested_effort else {
+        return benchmarks;
+    };
+    if !benchmarks
+        .iter()
+        .any(|benchmark| benchmark.reasoning_effort.is_some())
+    {
+        return benchmarks;
+    }
+    benchmarks
+        .into_iter()
+        .filter(|benchmark| benchmark.reasoning_effort.as_deref() == Some(requested_effort))
+        .collect()
+}
+
+const REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+fn has_explicit_effort_suffix(model: &str) -> bool {
+    let normalized = normalize_identifier(model);
+    REASONING_EFFORTS.iter().any(|effort| {
+        normalized.ends_with(&format!("-{effort}"))
+            || normalized.ends_with(&format!("-{effort}-effort"))
+    })
+}
+
+fn benchmark_identity_id(benchmark: &BenchmarkModel) -> String {
+    let normalized = normalize_identifier(&benchmark.id);
+    let Some(effort) = benchmark.reasoning_effort.as_deref() else {
+        return normalized;
+    };
+    normalized
+        .strip_suffix(&format!("-{effort}-effort"))
+        .or_else(|| normalized.strip_suffix(&format!("-{effort}")))
+        .unwrap_or(&normalized)
+        .to_owned()
+}
+
+fn has_dynamic_or_release_suffix(model: &str) -> bool {
+    let normalized = normalize_identifier(model);
+    normalized.ends_with("-latest")
+        || normalized.split('-').next_back().is_some_and(|token| {
+            token.len() == 4 && token.chars().all(|character| character.is_ascii_digit())
+        })
 }
 
 fn is_exact_benchmark_match(catalog_id: &str, benchmark_id: &str) -> bool {
@@ -334,41 +350,33 @@ fn is_exact_benchmark_match(catalog_id: &str, benchmark_id: &str) -> bool {
     false
 }
 
-const VARIANT_KEYWORDS: &[&str] = &[
-    "free",
-    "pro",
-    "flash",
-    "lite",
-    "reasoning",
-    "non-reasoning",
-    "preview",
-    "medium",
-    "thinking",
-    "deep-think",
-    "max",
-    "mini",
-    "highspeed",
-    "omni",
-];
-
 const IDENTITY_VARIANT_TOKENS: &[&str] = &[
-    "pro",
+    "chat",
+    "coder",
+    "distill",
     "flash",
-    "lite",
-    "reasoning",
-    "non",
-    "preview",
-    "medium",
-    "thinking",
-    "max",
-    "mini",
     "highspeed",
+    "instruct",
+    "lite",
+    "max",
+    "medium",
+    "mini",
+    "nano",
+    "non",
     "omni",
+    "plus",
+    "preview",
+    "pro",
+    "reasoning",
+    "super",
+    "thinking",
+    "turbo",
+    "ultra",
+    "vision",
+    "vl",
 ];
 
-const NOISE_TOKENS: &[&str] = &[
-    "fp8", "fp16", "bf16", "int4", "int8", "latest", "thinking", "free",
-];
+const NOISE_TOKENS: &[&str] = &["fp8", "fp16", "bf16", "int4", "int8", "free"];
 
 fn strip_model_noise(model: &str) -> String {
     let segments: Vec<&str> = model.split(['/', ':']).collect();
@@ -378,43 +386,13 @@ fn strip_model_noise(model: &str) -> String {
             let normalized = normalize_identifier(segment);
             let mut tokens: Vec<&str> = normalized.split('-').collect();
 
-            // Remove known quantization/version tokens
+            // Remove transport/billing decorations, never semantic variants.
             tokens.retain(|t| !NOISE_TOKENS.contains(t));
-
-            // Remove trailing date codes (4 consecutive digits, e.g. 2512, 2407)
-            // Only from the LAST segment of a multi-segment ID
-            while let Some(last) = tokens.last() {
-                if last.len() == 4 && last.chars().all(|c| c.is_ascii_digit()) {
-                    tokens.pop();
-                } else {
-                    break;
-                }
-            }
 
             tokens.join("-")
         })
         .collect();
     stripped.join("/")
-}
-
-fn variant_prefix_penalty(catalog_id: &str, benchmark_id: &str) -> f64 {
-    let catalog_normalized = normalize_identifier(catalog_id);
-    let benchmark_normalized = normalize_identifier(benchmark_id);
-    let catalog_tokens = catalog_normalized
-        .split('-')
-        .collect::<std::collections::BTreeSet<_>>();
-    let benchmark_tokens = benchmark_normalized
-        .split('-')
-        .collect::<std::collections::BTreeSet<_>>();
-
-    let additional: Vec<_> = benchmark_tokens.difference(&catalog_tokens).collect();
-    let mut penalty = 0.0;
-    for token in additional {
-        if VARIANT_KEYWORDS.contains(token) {
-            penalty += 100.0;
-        }
-    }
-    penalty
 }
 
 fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
@@ -445,10 +423,8 @@ fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
         }
     }
 
-    // Token-level suffix prefix matching: when provider prefix differs
-    // between catalog and AA (e.g. "nemotron-3-ultra" vs
-    // "nvidia-nemotron-3-ultra-550b-a55b"). Uses prefix-only to avoid
-    // false exact matches on shared generic suffixes.
+    // Permit one creator/provider prefix, but never scan arbitrary suffixes:
+    // that can cross families such as Nemotron and Qwen Omni.
     for catalog in &catalog_variants {
         let cat_tokens: Vec<&str> = catalog.split('-').collect();
         for benchmark in &benchmark_variants {
@@ -456,31 +432,25 @@ fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
                 continue;
             }
             let bench_tokens: Vec<&str> = benchmark.split('-').collect();
-            for cat_start in 0..cat_tokens.len() {
-                let cat_suffix = cat_tokens[cat_start..].join("-");
-                let cat_suffix_len = cat_tokens.len() - cat_start;
-                for bench_start in 0..bench_tokens.len() {
-                    let bench_suffix = bench_tokens[bench_start..].join("-");
-                    let bench_suffix_len = bench_tokens.len() - bench_start;
-                    if cat_suffix == bench_suffix {
-                        continue;
-                    }
-                    // Require at least 3 tokens in the shorter suffix
-                    // to avoid false matches on short generic suffixes
-                    if cat_suffix_len.min(bench_suffix_len) < 3 {
-                        continue;
-                    }
-                    if cat_suffix.starts_with(&format!("{bench_suffix}-"))
-                        || bench_suffix.starts_with(&format!("{cat_suffix}-"))
-                    {
-                        return true;
-                    }
-                }
+            if provider_aligned_prefix(&cat_tokens, &bench_tokens)
+                || provider_aligned_prefix(&bench_tokens, &cat_tokens)
+            {
+                return true;
             }
         }
     }
 
     false
+}
+
+fn provider_aligned_prefix(longer: &[&str], shorter: &[&str]) -> bool {
+    if longer.len() <= shorter.len() || shorter.len() < 3 {
+        return false;
+    }
+    let Some(aligned) = longer.get(1..) else {
+        return false;
+    };
+    aligned.starts_with(shorter)
 }
 
 fn identity_variant_tokens(identifier: &str) -> BTreeSet<&str> {
@@ -1544,21 +1514,16 @@ async fn list_free_models(
         });
 
         data.push((
-            candidate.quality,
+            candidate
+                .benchmark
+                .as_ref()
+                .and_then(|benchmark| quality_for(benchmark, task)),
             candidate.benchmark.clone(),
             candidate.offering.clone(),
             limit_kind,
             source_url,
         ));
     }
-
-    // Deduplicate: if two offerings have the same normalized canonical ID,
-    // keep the one with higher quality (or the first if equal).
-    let mut seen = std::collections::HashSet::new();
-    data.retain(|(_, _, offering, _, _)| {
-        let normalized = normalize_identifier(&offering.model);
-        seen.insert(normalized)
-    });
 
     // Auto-route models (kilo-auto/free, openrouter/free, orcarouter/free, etc.)
     // can't be benchmarked individually. Assign them the best quality of any
@@ -1613,6 +1578,16 @@ async fn list_free_models(
                 .then_with(|| left_o.model.cmp(&right_o.model))
         },
     );
+
+    // Keep the highest-ranked benchmark variant per provider offering while
+    // preserving alternatives from providers with different limits.
+    let mut seen = std::collections::HashSet::new();
+    data.retain(|(_, _, offering, _, _)| {
+        seen.insert((
+            offering.provider.clone(),
+            normalize_identifier(&offering.model),
+        ))
+    });
 
     let ranked = data
         .into_iter()
@@ -1764,18 +1739,15 @@ async fn list_paid_models(
             });
 
         data.push((
-            candidate.quality,
+            candidate
+                .benchmark
+                .as_ref()
+                .and_then(|benchmark| quality_for(benchmark, task)),
             candidate.benchmark.clone(),
             candidate.price.clone(),
             candidate.offering.clone(),
         ));
     }
-
-    let mut seen = std::collections::HashSet::new();
-    data.retain(|(_, _, _, offering)| {
-        let normalized = normalize_identifier(&offering.model);
-        seen.insert(normalized)
-    });
 
     data.sort_by(|left, right| {
         let (left_quality, _, _, left_offering) = left;
@@ -1788,6 +1760,14 @@ async fn list_paid_models(
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => left_offering.model.cmp(&right_offering.model),
         }
+    });
+
+    let mut seen = std::collections::HashSet::new();
+    data.retain(|(_, _, _, offering)| {
+        seen.insert((
+            offering.provider.clone(),
+            normalize_identifier(&offering.model),
+        ))
     });
 
     let ranked = data
@@ -2623,7 +2603,7 @@ async fn resolve_auto_free_targets(
                 .get(&offering.model)
                 .cloned()
                 .unwrap_or_else(|| offering.model.clone());
-            let benchmark = find_benchmark(&benchmark_map, &canonical, classification.task);
+            let benchmark = find_benchmark(&benchmark_map, &canonical);
             let quality = benchmark.and_then(composite_quality);
             let effective_input = offering
                 .input_price_per_million
@@ -2889,7 +2869,10 @@ async fn resolve_benchmark_targets(
         let canonical = canonical_mapping
             .map(String::as_str)
             .unwrap_or(&offering.model);
-        let model_benchmarks = find_all_matching_benchmarks(&benchmark_by_model, canonical);
+        let model_benchmarks = benchmarks_for_effort(
+            find_all_matching_benchmarks(&benchmark_by_model, canonical),
+            requested_effort,
+        );
         if model_benchmarks.is_empty() {
             continue;
         }
@@ -2923,21 +2906,7 @@ async fn resolve_benchmark_targets(
             )
             .ok()
             .flatten();
-        let has_effort_variants = model_benchmarks
-            .iter()
-            .any(|benchmark| benchmark.reasoning_effort.is_some());
-        let requested_effort_supported = requested_effort.is_some_and(|effort| {
-            model_benchmarks
-                .iter()
-                .any(|benchmark| benchmark.reasoning_effort.as_deref() == Some(effort))
-        });
         for benchmark in model_benchmarks {
-            if requested_effort_supported
-                && has_effort_variants
-                && benchmark.reasoning_effort.as_deref() != requested_effort
-            {
-                continue;
-            }
             let Some(raw_quality) = composite_quality(benchmark) else {
                 continue;
             };
@@ -4348,12 +4317,13 @@ mod tests {
 
     use super::{
         ModelMetadata, RequestRequirements, SelectionMetadata, StreamChoice, add_model_headers,
-        benchmark_ids_match, copy_safe_headers, decorate_json_response, estimate_request_tokens,
-        expected_cost_microusd, find_benchmark, find_benchmark_raw, footer_sse_event, header_value,
-        is_fallback_status, is_model_denied, is_provider_auto_route, is_reasoning_effort,
-        log_request, malformed_sse_event, parse_json_usage, parse_sse_usage, parse_usage_value,
-        rank_benchmark_models, rate_limit_reset_delay, request_id, request_id_from_response,
-        session_material, sse_model, strip_model_noise, take_sse_event, transform_sse_event,
+        benchmark_ids_match, benchmarks_for_effort, copy_safe_headers, decorate_json_response,
+        estimate_request_tokens, expected_cost_microusd, find_all_matching_benchmarks,
+        find_benchmark, footer_sse_event, header_value, is_fallback_status, is_model_denied,
+        is_provider_auto_route, is_reasoning_effort, log_request, malformed_sse_event,
+        parse_json_usage, parse_sse_usage, parse_usage_value, rank_benchmark_models,
+        rate_limit_reset_delay, request_id, request_id_from_response, session_material, sse_model,
+        strip_model_noise, take_sse_event, transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -4425,7 +4395,7 @@ mod tests {
             "claude-4-5-sonnet"
         ));
         assert_eq!(
-            find_benchmark(&benchmarks, "models/gemini-2.5-flash", TaskKind::General)
+            find_benchmark(&benchmarks, "models/gemini-2.5-flash")
                 .expect("Gemini benchmark")
                 .intelligence,
             Some(80.0)
@@ -4433,7 +4403,7 @@ mod tests {
     }
 
     #[test]
-    fn find_benchmark_prefers_exact_over_prefix_and_penalizes_variant_keywords() {
+    fn find_benchmark_prefers_exact_and_rejects_other_variants() {
         let mut benchmarks = BTreeMap::new();
         // Exact match: mimo-v2-flash → mimo-v2-flash (G=24.7), NOT mimo-v2-flash-reasoning (G=31.2)
         benchmarks.insert(
@@ -4458,8 +4428,8 @@ mod tests {
                 1.0,
             )],
         );
-        let result = find_benchmark(&benchmarks, "xiaomimimo/mimo-v2-flash", TaskKind::General)
-            .expect("mimo-v2-flash");
+        let result =
+            find_benchmark(&benchmarks, "xiaomimimo/mimo-v2-flash").expect("mimo-v2-flash");
         assert_eq!(result.intelligence, Some(24.7));
         assert_eq!(result.coding_quality, Some(49.8));
 
@@ -4499,8 +4469,7 @@ mod tests {
                 1.0,
             )],
         );
-        let result = find_benchmark(&benchmarks, "xiaomimimo/mimo-v2.5", TaskKind::General)
-            .expect("mimo-v2.5");
+        let result = find_benchmark(&benchmarks, "xiaomimimo/mimo-v2.5").expect("mimo-v2.5");
         assert_eq!(result.intelligence, Some(37.2));
         assert_eq!(
             result.id, "mimo-v2-5-0424",
@@ -4531,7 +4500,7 @@ mod tests {
                 1.0,
             )],
         );
-        assert!(find_benchmark(&benchmarks, "xiaomimimo/mimo-v2.5", TaskKind::General).is_none());
+        assert!(find_benchmark(&benchmarks, "xiaomimimo/mimo-v2.5").is_none());
         assert!(!benchmark_ids_match("mimo-v2.5", "mimo-v2-5-pro"));
         assert!(!benchmark_ids_match("mimo-v2.5-pro", "mimo-v2-5-0424"));
         assert!(!benchmark_ids_match("deepseek-v4-flash", "deepseek-v4-pro"));
@@ -4539,6 +4508,62 @@ mod tests {
             "stepfun/step-3.7-flash:free",
             "step-3-7-flash"
         ));
+    }
+
+    #[test]
+    fn matcher_rejects_cross_family_suffixes_and_ambiguous_groups() {
+        assert!(!benchmark_ids_match(
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+            "qwen3-omni-30b-a3b-reasoning"
+        ));
+        assert!(!benchmark_ids_match(
+            "qwen/qwen3-30b-a3b-instruct",
+            "qwen3-coder-30b-a3b-instruct"
+        ));
+        assert!(!benchmark_ids_match(
+            "qwen/qwen3-30b-a3b-instruct",
+            "qwen3-vl-30b-a3b-instruct"
+        ));
+
+        let mut benchmarks = BTreeMap::new();
+        for id in ["devstral-2", "devstral-small-2"] {
+            benchmarks.insert(
+                id.to_owned(),
+                vec![BenchmarkModel::fixture(id, 40.0, 40.0, 40.0, 1.0, 1.0)],
+            );
+        }
+        assert!(find_all_matching_benchmarks(&benchmarks, "devstral").is_empty());
+    }
+
+    #[test]
+    fn matcher_groups_real_effort_suffixed_benchmarks() {
+        let mut maximum = BenchmarkModel::fixture("gpt-5-6-sol", 60.0, 60.0, 60.0, 1.0, 1.0);
+        maximum.reasoning_effort = Some("max".to_owned());
+        let mut low = BenchmarkModel::fixture("gpt-5-6-sol-low", 45.0, 45.0, 45.0, 1.0, 1.0);
+        low.reasoning_effort = Some("low".to_owned());
+        let benchmarks = BTreeMap::from([
+            (maximum.id.clone(), vec![maximum]),
+            (low.id.clone(), vec![low]),
+        ]);
+
+        let grouped = find_all_matching_benchmarks(&benchmarks, "gpt-5.6-sol");
+        assert_eq!(grouped.len(), 2);
+        assert!(
+            grouped
+                .iter()
+                .any(|model| model.reasoning_effort.as_deref() == Some("low"))
+        );
+        assert!(
+            grouped
+                .iter()
+                .any(|model| model.reasoning_effort.as_deref() == Some("max"))
+        );
+        assert_eq!(benchmarks_for_effort(grouped.clone(), Some("low")).len(), 1);
+        assert!(benchmarks_for_effort(grouped, Some("medium")).is_empty());
+
+        let explicit = find_all_matching_benchmarks(&benchmarks, "gpt-5.6-sol-low");
+        assert_eq!(explicit.len(), 1);
+        assert_eq!(explicit[0].reasoning_effort.as_deref(), Some("low"));
     }
 
     #[test]
@@ -4732,35 +4757,43 @@ mod tests {
     }
 
     #[test]
-    fn strip_model_noise_removes_thinking_suffix() {
+    fn strip_model_noise_preserves_thinking_and_release_identity() {
         assert_eq!(
             strip_model_noise("qwen/qwen3-235b-a22b-thinking-2507"),
-            "qwen/qwen3-235b-a22b"
+            "qwen/qwen3-235b-a22b-thinking-2507"
         );
         assert_eq!(
             strip_model_noise("qwen/qwen3-omni-30b-a3b-thinking"),
-            "qwen/qwen3-omni-30b-a3b"
+            "qwen/qwen3-omni-30b-a3b-thinking"
         );
         assert_eq!(
             strip_model_noise("qwen/qwen3-vl-235b-a22b-thinking"),
-            "qwen/qwen3-vl-235b-a22b"
+            "qwen/qwen3-vl-235b-a22b-thinking"
         );
     }
 
     #[test]
-    fn strip_model_noise_removes_latest_suffix() {
-        // "latest" is a noise token removed from any segment
-        assert_eq!(strip_model_noise("mistral-tiny-latest"), "mistral-tiny");
-        assert_eq!(strip_model_noise("ministral-14b-latest"), "ministral-14b");
+    fn strip_model_noise_preserves_dynamic_aliases() {
+        assert_eq!(
+            strip_model_noise("mistral-tiny-latest"),
+            "mistral-tiny-latest"
+        );
+        assert_eq!(
+            strip_model_noise("ministral-14b-latest"),
+            "ministral-14b-latest"
+        );
     }
 
     #[test]
-    fn strip_model_noise_removes_date_codes() {
-        assert_eq!(strip_model_noise("ministral-14b-2512"), "ministral-14b");
-        assert_eq!(strip_model_noise("mistral-tiny-2407"), "mistral-tiny");
+    fn strip_model_noise_preserves_release_codes() {
+        assert_eq!(
+            strip_model_noise("ministral-14b-2512"),
+            "ministral-14b-2512"
+        );
+        assert_eq!(strip_model_noise("mistral-tiny-2407"), "mistral-tiny-2407");
         assert_eq!(
             strip_model_noise("qwen/qwen3-30b-a3b-2507"),
-            "qwen/qwen3-30b-a3b"
+            "qwen/qwen3-30b-a3b-2507"
         );
     }
 
@@ -4785,9 +4818,9 @@ mod tests {
         let mut benchmarks = std::collections::BTreeMap::new();
         // AA benchmark without quantization suffix
         benchmarks.insert(
-            "qwen3-30b-a3b-instruct".to_owned(),
+            "qwen3-30b-a3b".to_owned(),
             vec![BenchmarkModel::fixture(
-                "qwen3-30b-a3b-instruct",
+                "qwen3-30b-a3b",
                 6.8,
                 10.2,
                 8.5,
@@ -4796,16 +4829,16 @@ mod tests {
             )],
         );
         // Catalog has -fp8 suffix that should be stripped
-        let result = find_benchmark(&benchmarks, "qwen/qwen3-30b-a3b-fp8", TaskKind::General)
-            .expect("noise-stripped match");
+        let result =
+            find_benchmark(&benchmarks, "qwen/qwen3-30b-a3b-fp8").expect("noise-stripped match");
         assert_eq!(result.intelligence, Some(6.8));
-        assert_eq!(result.id, "qwen3-30b-a3b-instruct");
+        assert_eq!(result.id, "qwen3-30b-a3b");
     }
 
     #[test]
     fn noise_stripped_matching_uses_original_model_when_match_exists() {
         let mut benchmarks = std::collections::BTreeMap::new();
-        // Benchmark for the original (unstoned) model ID
+        // Exact identity after removing the quantization decoration wins.
         benchmarks.insert(
             "qwen3-30b-a3b".to_owned(),
             vec![BenchmarkModel::fixture(
@@ -4817,7 +4850,7 @@ mod tests {
                 1.0,
             )],
         );
-        // Benchmark for the noise-stripped version
+        // A semantically different instruct variant must not be considered.
         benchmarks.insert(
             "qwen3-30b-a3b-instruct".to_owned(),
             vec![BenchmarkModel::fixture(
@@ -4829,16 +4862,13 @@ mod tests {
                 1.0,
             )],
         );
-        // Should prefer the original match (stripped = "qwen-qwen3-30b-a3b" matches "qwen3-30b-a3b")
-        let result = find_benchmark(&benchmarks, "qwen/qwen3-30b-a3b-fp8", TaskKind::General)
-            .expect("noise-stripped match");
-        // The noise-stripped model "qwen-qwen3-30b-a3b" has an exact match
-        // with the benchmark "qwen3-30b-a3b", which has higher score (10.0 vs 6.8)
+        let result =
+            find_benchmark(&benchmarks, "qwen/qwen3-30b-a3b-fp8").expect("noise-stripped match");
         assert_eq!(result.intelligence, Some(10.0));
     }
 
     #[test]
-    fn find_benchmark_raw_still_works_without_noise() {
+    fn find_benchmark_still_works_without_noise() {
         let mut benchmarks = std::collections::BTreeMap::new();
         benchmarks.insert(
             "gemini-2-5-flash".to_owned(),
@@ -4851,9 +4881,8 @@ mod tests {
                 1.0,
             )],
         );
-        // find_benchmark_raw should still match correctly
-        let result = find_benchmark_raw(&benchmarks, "models/gemini-2.5-flash", TaskKind::General)
-            .expect("raw match");
+        let result =
+            find_benchmark(&benchmarks, "models/gemini-2.5-flash").expect("benchmark match");
         assert_eq!(result.intelligence, Some(80.0));
     }
 
