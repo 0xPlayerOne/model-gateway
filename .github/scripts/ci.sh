@@ -98,6 +98,8 @@ type_check() {
 build() { run_script build; }
 
 unit() {
+  # Bun repositories should expose test scripts backed by Bun's native runner.
+  # Specialized repositories may keep their native runner (for example Matchstick or Hardhat).
   if has_script test:unit; then
     run_script test:unit
   elif has_script test:coverage; then

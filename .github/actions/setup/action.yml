@@ -1,0 +1,20 @@
+name: Repository Setup
+description: Install the pinned mise toolchain and optionally project dependencies.
+
+inputs:
+  install:
+    description: Install dependencies for the detected project ecosystems.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup
+      uses: jdx/mise-action@v4
+      with:
+        cache: true
+    - name: Install
+      if: inputs.install == 'true'
+      shell: bash
+      run: bash .github/scripts/ci.sh install

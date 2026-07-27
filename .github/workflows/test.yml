@@ -26,10 +26,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Setup
-        uses: jdx/mise-action@v4
-        with: { cache: true }
-      - name: Install
-        run: bash .github/scripts/ci.sh install
+        uses: ./.github/actions/setup
+        with:
+          install: true
       - name: Unit
         run: bash .github/scripts/ci.sh unit
       - name: Upload coverage
@@ -52,10 +51,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Setup
-        uses: jdx/mise-action@v4
-        with: { cache: true }
-      - name: Install
-        run: bash .github/scripts/ci.sh install
+        uses: ./.github/actions/setup
+        with:
+          install: true
       - name: Integration
         run: bash .github/scripts/ci.sh integration
 
@@ -66,10 +64,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Setup
-        uses: jdx/mise-action@v4
-        with: { cache: true }
-      - name: Install
-        run: bash .github/scripts/ci.sh install
+        uses: ./.github/actions/setup
+        with:
+          install: true
       - name: E2E
         run: bash .github/scripts/ci.sh e2e
 
@@ -80,9 +77,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Setup
-        uses: jdx/mise-action@v4
-        with: { cache: true }
-      - name: Install
-        run: bash .github/scripts/ci.sh install
+        uses: ./.github/actions/setup
+        with:
+          install: true
       - name: Smoke
         run: bash .github/scripts/ci.sh smoke

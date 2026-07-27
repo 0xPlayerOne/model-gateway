@@ -55,13 +55,8 @@ Use squash merges unless the repository documents another strategy. Re-align `st
 ### Toolchain
 
 1. Install [mise](https://mise.jdx.dev/).
-2. Run `mise install` to use the versions pinned in `.mise.toml`.
-3. Enable hooks once per checkout:
-
-   ```sh
-   git config core.hooksPath .githooks
-   ```
-
+2. Run `bash .github/scripts/bootstrap.sh` to install the pinned toolchain, enable hooks, and validate the checkout.
+3. Use `bash .github/scripts/doctor.sh` when setup, lockfiles, or hooks appear out of sync.
 4. Use the repository's existing package manager and lockfile. Do not introduce a second package manager.
 5. Copy `.env.example` to the appropriate local environment file when provided. Never commit the copy.
 

@@ -20,10 +20,7 @@ class Handler(BaseHTTPRequestHandler):
         request = json.loads(self.rfile.read(length))
         self.record_request(request)
         required_key = os.environ.get("MOCK_PROVIDER_API_KEY")
-        if (
-            required_key
-            and self.headers.get("Authorization") != f"Bearer {required_key}"
-        ):
+        if required_key and self.headers.get("Authorization") != f"Bearer {required_key}":
             self.send_json({"error": {"message": "unauthorized"}}, status=401)
             return
         content = "smoke-ok" if request.get("tools") else "missing-tools"
