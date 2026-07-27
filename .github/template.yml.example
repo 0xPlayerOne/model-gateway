@@ -4,3 +4,5 @@ template: repo-foundry@latest
 languages: auto
 features: all
 package_manager: auto
+release_type: auto
+npm_publish: false

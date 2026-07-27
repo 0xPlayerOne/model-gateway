@@ -91,7 +91,7 @@ for workflow in ci codeql security test draft-pr release-pr release; do
   fi
 done
 
-for script in ci.sh codeql-languages.sh security.sh doctor.sh bootstrap.sh sync-template.sh init-repo.sh sync-protection.sh; do
+for script in ci.sh codeql-languages.sh security.sh doctor.sh bootstrap.sh sync-template.sh init-repo.sh sync-protection.sh sync-codeowners.sh; do
   [ -x ".github/scripts/$script" ] || error "missing executable script: .github/scripts/$script"
 done
 

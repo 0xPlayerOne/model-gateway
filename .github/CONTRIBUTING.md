@@ -168,6 +168,10 @@ The workflows use separate concurrency groups. A newer run for the same branch o
 
 Required checks are enforced by branch protection. Do not duplicate their checklists in the pull request description; document validation commands and results instead.
 
+### Release conventions
+
+Use Conventional Commits so the release automation can determine the next version: `fix:` produces a patch release, `feat:` produces a minor release, and `!` or `BREAKING CHANGE:` produces a major release. Add `Release-As: x.y.z` only when a deliberate version override is needed. The release workflow maintains the changelog and GitHub release after changes land on `main`; npm publication is opt-in through `.github/template.yml`.
+
 Security checks can be skipped when repository visibility or the GitHub plan does not support a feature. A skipped optional check must not be configured as a required status check.
 
 ## Review and merge protocol

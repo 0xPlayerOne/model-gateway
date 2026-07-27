@@ -14,19 +14,15 @@ env:
 jobs:
   create-release-pr:
     name: Create
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
       - name: Check
         id: check-pr
         run: |
-          EXISTING=$(gh pr list --base main --head staging --state open --json number 2>/dev/null | jq 'length')
+          EXISTING=$(gh pr list --limit 1 --base main --head staging --state open --json number 2>/dev/null | jq 'length')
           echo "existing=$EXISTING" >> "$GITHUB_OUTPUT"
 
       - name: Create
@@ -34,7 +30,15 @@ jobs:
         run: |
           DATE=$(date +%Y-%m-%d)
           BODY_FILE="$RUNNER_TEMP/release-pr.md"
-          COMMITS=$(git log --no-merges --pretty=format:'- %s (%h)' origin/main..HEAD)
+          COMPARE_URL="repos/${GITHUB_REPOSITORY}/compare/main...staging"
+          COMPARE_FILE="$RUNNER_TEMP/release-compare.json"
+          gh api "$COMPARE_URL?per_page=100" > "$COMPARE_FILE"
+          TOTAL_COMMITS=$(jq -r '.total_commits // 0' "$COMPARE_FILE")
+          if [ "$TOTAL_COMMITS" -gt 100 ]; then
+            LAST_PAGE=$(( (TOTAL_COMMITS + 99) / 100 ))
+            gh api "$COMPARE_URL?per_page=100&page=$LAST_PAGE" > "$COMPARE_FILE"
+          fi
+          COMMITS=$(jq -r '.commits[] | "- \(.commit.message | split("\\n")[0]) (\(.sha[0:7]))"' "$COMPARE_FILE")
           if [ -z "$COMMITS" ]; then
             COMMITS='- No commits found since main.'
           fi

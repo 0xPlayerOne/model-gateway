@@ -13,6 +13,7 @@ permissions:
 env:
   TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
   TURBO_TEAM: ${{ vars.TURBO_TEAM }}
+  REPO_FOUNDRY_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || '' }}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
@@ -25,11 +26,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/ci.sh should_run format >> "$GITHUB_OUTPUT"
       - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
         uses: ./.github/actions/setup
         with:
           install: true
+          install-python: false
+          install-rust: false
+          cache-build: false
+          cache-format: true
       - name: Format
+        if: steps.applicability.outputs.applicable == 'true'
         run: bash .github/scripts/ci.sh format
 
   lint:
@@ -38,11 +50,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/ci.sh should_run lint >> "$GITHUB_OUTPUT"
       - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
         uses: ./.github/actions/setup
         with:
           install: true
+          install-python: false
+          cache-build: false
+          cache-lint: true
       - name: Lint
+        if: steps.applicability.outputs.applicable == 'true'
         run: bash .github/scripts/ci.sh lint
 
   type-check:
@@ -51,11 +73,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/ci.sh should_run type_check >> "$GITHUB_OUTPUT"
       - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
         uses: ./.github/actions/setup
         with:
           install: true
+          install-python: false
       - name: Type-Check
+        if: steps.applicability.outputs.applicable == 'true'
         run: bash .github/scripts/ci.sh type_check
 
   build:
@@ -64,9 +94,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Detect
+        id: applicability
+        run: bash .github/scripts/ci.sh should_run build >> "$GITHUB_OUTPUT"
       - name: Setup
+        if: steps.applicability.outputs.applicable == 'true'
         uses: ./.github/actions/setup
         with:
           install: true
+          install-python: false
       - name: Build
+        if: steps.applicability.outputs.applicable == 'true'
         run: bash .github/scripts/ci.sh build

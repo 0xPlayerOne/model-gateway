@@ -52,7 +52,9 @@ is_private="$(gh repo view "$repo" --json isPrivate --jq '.isPrivate')"
 contexts=()
 if feature_enabled ci; then contexts+=(Format Lint Type-Check Build); fi
 if feature_enabled test; then contexts+=(Unit Integration E2E Smoke); fi
-if feature_enabled security; then contexts+=('Dependency Audit'); fi
+if feature_enabled security; then
+  contexts+=(Profile 'Dependency Audit (JavaScript)' 'Dependency Audit (Rust)' 'Dependency Audit (Python)')
+fi
 if feature_enabled codeql; then contexts+=(Detect); fi
 
 if [ "$is_private" != true ] && feature_enabled codeql; then
@@ -77,7 +79,7 @@ while IFS= read -r context; do
   [ -n "$context" ] || continue
   case "$context" in
     'Slither / Analyze') continue ;; # removed from the standard workflow set
-    'CI / '*|'Test / '*|'Security / '*|'CodeQL / '*) ;;
+    'Dependency Audit'|'Dependency Audit ('*|'Test Profile'|'CI / '*|'Test / '*|'Security / '*|'CodeQL / '*) ;;
     *) preserved+=("$context") ;;
   esac
 done <<< "$existing"

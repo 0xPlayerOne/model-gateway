@@ -38,13 +38,28 @@ if printf '%s\n' "$changed" | grep -Eq '\.rs$|(^|/)Cargo\.toml$'; then
   cargo clippy --all-targets -- -D warnings
 fi
 
-if printf '%s\n' "$changed" | grep -Eq '\.py$|(^|/)(pyproject\.toml|requirements(-dev)?\.txt)$'; then
+python_files=()
+python_config=false
+while IFS= read -r file; do
+  case "$file" in
+    *.py)
+      [ -f "$file" ] && python_files+=("$file")
+      ;;
+    pyproject.toml|requirements.txt|requirements-dev.txt)
+      python_config=true
+      ;;
+  esac
+done <<< "$changed"
+
+if [ "$python_config" = true ] || [ "${#python_files[@]}" -gt 0 ]; then
+  ruff_targets=(.)
+  [ "$python_config" = true ] || ruff_targets=("${python_files[@]}")
   if [ -x .venv/bin/ruff ]; then
-    .venv/bin/ruff format --check .
-    .venv/bin/ruff check .
+    .venv/bin/ruff format --check "${ruff_targets[@]}"
+    .venv/bin/ruff check "${ruff_targets[@]}"
   elif command -v ruff >/dev/null 2>&1; then
-    ruff format --check .
-    ruff check .
+    ruff format --check "${ruff_targets[@]}"
+    ruff check "${ruff_targets[@]}"
   else
     echo "Python files changed but Ruff is not installed; run the template setup first." >&2
     exit 1

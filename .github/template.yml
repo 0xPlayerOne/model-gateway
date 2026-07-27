@@ -3,3 +3,5 @@ template: repo-foundry@0.1.4
 languages: rust,python
 features: ci,codeql,security,test,draft-pr,release-pr,dependabot
 package_manager: auto
+release_type: auto
+npm_publish: false

@@ -22,21 +22,30 @@ concurrency:
 jobs:
   detect:
     name: Detect
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     outputs:
       languages: ${{ steps.languages.outputs.languages }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          # Detection only reads Git trees, paths, and small profile files;
+          # defer source blob transfer until the analyzer jobs.
+          filter: blob:none
       - id: languages
         name: Detect languages
+        env:
+          CODEQL_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: bash .github/scripts/codeql-languages.sh
 
   analyze:
     name: Analyze (${{ matrix.name }})
     needs: detect
     if: ${{ !github.event.repository.private }}
-    runs-on: ubuntu-latest
+    # Unchanged matrix entries only complete skipped steps; reserve a full
+    # runner for analyzers that actually initialize and scan source.
+    runs-on: ${{ matrix.changed && 'ubuntu-latest' || 'ubuntu-slim' }}
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -44,13 +53,24 @@ jobs:
         include: ${{ fromJSON(needs.detect.outputs.languages) }}
     steps:
       - name: Checkout
+        if: matrix.changed
         uses: actions/checkout@v7
       - name: Initialize
+        if: matrix.changed
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
       - name: Analyze
+        if: matrix.changed
         uses: github/codeql-action/analyze@v4
         with:
           category: /language:${{ matrix.language }}
+          # SARIF results remain uploaded for code scanning; the database
+          # archive is not needed by this reusable baseline and adds upload
+          # overhead.
+          upload-database: false
+          # The upload acknowledgment is sufficient for the required workflow
+          # check; let GitHub process the SARIF asynchronously to remove the
+          # post-upload wait from the critical path.
+          wait-for-processing: false

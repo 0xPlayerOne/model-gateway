@@ -6,15 +6,525 @@ inputs:
     description: Install dependencies for the detected project ecosystems.
     required: false
     default: 'false'
+  install-javascript:
+    description: Install JavaScript/TypeScript package dependencies when install is enabled.
+    required: false
+    default: 'true'
+  install-python:
+    description: Install Python project dependencies when install is enabled.
+    required: false
+    default: 'true'
+  install-rust:
+    description: Fetch Rust project dependencies when install is enabled.
+    required: false
+    default: 'true'
+  mise-scope:
+    description: Limit mise installation and language package caches to auto, all, javascript, python, or rust.
+    required: false
+    default: auto
+  cache-build:
+    description: Restore JavaScript framework, Rust dependency, and incremental compiler caches.
+    required: false
+    default: 'true'
+  cache-environment:
+    description: Restore materialized Python virtual environments; disable for parallel test jobs with large environments.
+    required: false
+    default: 'true'
+  cache-installed:
+    description: Cache materialized JavaScript dependencies; auto skips large Bun node_modules trees and keeps compact link-based installs.
+    required: false
+    default: auto
+  cache-lint:
+    description: Restore the JavaScript/TypeScript lint cache.
+    required: false
+    default: 'false'
+  cache-format:
+    description: Restore the Prettier format cache.
+    required: false
+    default: 'false'
+  cache-turbo:
+    description: Cache local Turborepo artifacts; auto skips duplicate archives when TURBO_TOKEN enables remote caching.
+    required: false
+    default: auto
+  task:
+    description: Optional CI task used to scope test dependency installation.
+    required: false
+    default: ''
+  task-javascript:
+    description: Whether the selected task has a JavaScript suite; auto preserves default detection.
+    required: false
+    default: auto
+  task-python:
+    description: Whether the selected task has a Python suite; auto preserves default detection.
+    required: false
+    default: auto
+  task-rust:
+    description: Whether the selected task has a Rust suite; auto preserves default detection.
+    required: false
+    default: auto
 
 runs:
   using: composite
   steps:
+    - name: Disable framework telemetry
+      shell: bash
+      run: |
+        echo 'TURBO_TELEMETRY_DISABLED=1' >> "$GITHUB_ENV"
+        echo 'NEXT_TELEMETRY_DISABLED=1' >> "$GITHUB_ENV"
+    - name: Detect project profile
+      id: profile
+      shell: bash
+      run: |
+        tracked_files="$(git ls-files)"
+
+        has_tracked_regex() {
+          printf '%s\n' "$tracked_files" | grep -Eq "$1"
+        }
+
+        has_python_source() {
+          awk '!/^\.github\// && /(^|\/)[^\/]+\.py$/ { found=1; exit } END { exit !found }' <<< "$tracked_files"
+        }
+
+        uses_prettier() {
+          [ -f package.json ] || return 0
+          node <<'NODE'
+        const fs = require('node:fs');
+        const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+        const scripts = p.scripts || {};
+        const dependencies = {
+          ...p.dependencies,
+          ...p.devDependencies,
+          ...p.optionalDependencies,
+          ...p.peerDependencies,
+        };
+        const usesPrettier = Boolean(dependencies.prettier) || Object.values(scripts).some((value) => /\bprettier\b/.test(value));
+        const hasFormatScript = Boolean(scripts['format:check'] || scripts.format || scripts.fmt);
+        process.exit(usesPrettier || !hasFormatScript ? 0 : 1);
+        NODE
+        }
+
+        uses_eslint() {
+          [ -f package.json ] || return 1
+          node <<'NODE'
+        const fs = require('node:fs');
+        const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+        const scripts = p.scripts || {};
+        const dependencies = {
+          ...p.dependencies,
+          ...p.devDependencies,
+          ...p.optionalDependencies,
+          ...p.peerDependencies,
+        };
+        const usesEslint = Boolean(dependencies.eslint) || Object.values(scripts).some((value) => /\beslint\b/.test(value));
+        process.exit(usesEslint ? 0 : 1);
+        NODE
+        }
+
+        javascript=false
+        if [ -f package.json ] || [ -f bun.lock ] || [ -f bun.lockb ] ||
+          [ -f pnpm-lock.yaml ] || [ -f yarn.lock ] || [ -f package-lock.json ] ||
+          has_tracked_regex '(^|/)[^/]+\.(js|jsx|mjs|cjs|ts|tsx|mts|cts)$'; then
+          javascript=true
+          echo 'javascript=true' >> "$GITHUB_OUTPUT"
+        else
+          echo 'javascript=false' >> "$GITHUB_OUTPUT"
+        fi
+
+        if [ -f bun.lock ] || [ -f bun.lockb ] || [ -f pnpm-lock.yaml ] ||
+          [ -f yarn.lock ] || [ -f package-lock.json ]; then
+          javascript_dependencies=true
+          echo 'javascript_dependencies=true' >> "$GITHUB_OUTPUT"
+        elif [ -f package.json ] && REPO_FOUNDRY_PACKAGE_FILES="$tracked_files" node <<'NODE'
+        const fs = require('node:fs');
+
+        const files = (process.env.REPO_FOUNDRY_PACKAGE_FILES || '')
+          .trim()
+          .split('\n')
+          .filter((file) => /(^|\/)package\.json$/.test(file));
+        const groups = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
+        const hasDependencies = files.some((file) => {
+          try {
+            const packageJson = JSON.parse(fs.readFileSync(file, 'utf8'));
+            return groups.some((group) => packageJson[group] && Object.keys(packageJson[group]).length > 0) ||
+              Array.isArray(packageJson.workspaces) ||
+              (packageJson.workspaces && typeof packageJson.workspaces === 'object');
+          } catch {
+            return true;
+          }
+        });
+        process.exit(hasDependencies ? 0 : 1);
+        NODE
+        then
+          javascript_dependencies=true
+          echo 'javascript_dependencies=true' >> "$GITHUB_OUTPUT"
+        else
+          javascript_dependencies=false
+          echo 'javascript_dependencies=false' >> "$GITHUB_OUTPUT"
+        fi
+
+        javascript_package_manager=none
+        configured_package_manager=""
+        if [ -f .github/template.yml ]; then
+          configured_package_manager="$(awk -F': ' '/^package_manager:/ {print $2; exit}' .github/template.yml)"
+        fi
+        case "$configured_package_manager" in
+          bun|pnpm|yarn|npm) javascript_package_manager="$configured_package_manager" ;;
+          *)
+            if [ -f bun.lock ] || [ -f bun.lockb ]; then javascript_package_manager=bun
+            elif [ -f pnpm-lock.yaml ]; then javascript_package_manager=pnpm
+            elif [ -f yarn.lock ]; then javascript_package_manager=yarn
+            elif [ -f package-lock.json ]; then javascript_package_manager=npm
+            elif [ "$javascript_dependencies" = true ]; then javascript_package_manager=bun
+            fi
+            ;;
+        esac
+        printf 'javascript_package_manager=%s\n' "$javascript_package_manager" >> "$GITHUB_OUTPUT"
+
+        python=false
+        if has_python_source || [ -f pyproject.toml ] ||
+          [ -f requirements.txt ] || [ -f requirements-dev.txt ]; then
+          python=true
+          echo 'python=true' >> "$GITHUB_OUTPUT"
+        else
+          echo 'python=false' >> "$GITHUB_OUTPUT"
+        fi
+
+        rust=false
+        if [ -f Cargo.toml ] || [ -f Cargo.lock ]; then
+          rust=true
+          echo 'rust=true' >> "$GITHUB_OUTPUT"
+        else
+          echo 'rust=false' >> "$GITHUB_OUTPUT"
+        fi
+
+        turbo=false
+        if [ -f turbo.json ] || [ -f turbo.jsonc ] || has_tracked_regex '(^|/)turbo\.jsonc?$'; then
+          turbo=true
+          echo 'turbo=true' >> "$GITHUB_OUTPUT"
+        else
+          echo 'turbo=false' >> "$GITHUB_OUTPUT"
+        fi
+
+        eslint=false
+        if [ -f .eslintrc ] || [ -f .eslintrc.js ] || [ -f .eslintrc.cjs ] ||
+          [ -f .eslintrc.json ] || has_tracked_regex '(^|/)(\.eslintrc[^/]*|eslint\.config\.[^/]*)$' ||
+          uses_eslint; then
+          eslint=true
+          echo 'eslint=true' >> "$GITHUB_OUTPUT"
+        else
+          echo 'eslint=false' >> "$GITHUB_OUTPUT"
+        fi
+
+        prettier=false
+        if [ "$javascript" = true ]; then
+          # Cache the fallback formatter for projects without a dedicated
+          # config, but avoid probing an empty cache when a repository-owned
+          # format script does not use Prettier.
+          if uses_prettier; then
+            prettier=true
+          fi
+        fi
+        printf 'prettier=%s\n' "$prettier" >> "$GITHUB_OUTPUT"
+
+        build=false
+        if has_tracked_regex '(^|/)(next\.config\.[^/]*|vite\.config\.[^/]*|tsconfig[^/]*\.json)$'; then
+          build=true
+          echo 'build=true' >> "$GITHUB_OUTPUT"
+        else
+          echo 'build=false' >> "$GITHUB_OUTPUT"
+        fi
+
+        python_dependencies=false
+        if [ -f pyproject.toml ] || [ -f uv.lock ] || [ -f requirements.txt ] ||
+          [ -f requirements-dev.txt ] || [ -f Pipfile.lock ] || [ -f poetry.lock ]; then
+          python_dependencies=true
+          echo 'python_dependencies=true' >> "$GITHUB_OUTPUT"
+        else
+          echo 'python_dependencies=false' >> "$GITHUB_OUTPUT"
+        fi
+
+        configured_tool() {
+          [ -f .mise.toml ] && grep -Eq "^$1[[:space:]]*=" .mise.toml
+        }
+
+        ruff=false
+        if [ "$python" = true ] &&
+          { [ -f ruff.toml ] || configured_tool ruff ||
+            { [ -f pyproject.toml ] && grep -Eiq 'ruff|\[tool\.ruff' pyproject.toml; } ||
+            { [ -f requirements.txt ] && grep -Eiq '(^|[-_.])ruff([<>=[:space:]]|$)' requirements.txt; } ||
+            { [ -f requirements-dev.txt ] && grep -Eiq '(^|[-_.])ruff([<>=[:space:]]|$)' requirements-dev.txt; }; }; then
+          ruff=true
+        fi
+        printf 'ruff=%s\n' "$ruff" >> "$GITHUB_OUTPUT"
+
+        mise_tools=()
+        add_configured_tool() {
+          configured_tool "$1" && mise_tools+=("$1")
+        }
+
+        case "$REPO_FOUNDRY_MISE_SCOPE" in
+          all)
+            for tool in node bun python uv ruff rust; do add_configured_tool "$tool"; done
+            ;;
+          auto)
+            task_language_needed() {
+              local language="$1" flag
+              case "$language" in
+                javascript) flag="$REPO_FOUNDRY_TASK_JAVASCRIPT" ;;
+                python) flag="$REPO_FOUNDRY_TASK_PYTHON" ;;
+                rust) flag="$REPO_FOUNDRY_TASK_RUST" ;;
+                *) return 0 ;;
+              esac
+              [ -z "$REPO_FOUNDRY_TASK" ] || [ "$flag" = auto ] || [ "$flag" = true ]
+            }
+            if [ "$javascript" = true ] && task_language_needed javascript; then
+              add_configured_tool node
+              if { [ -f bun.lock ] || [ -f bun.lockb ] ||
+                awk -F': ' '/^package_manager:/ {print $2; exit}' .github/template.yml 2>/dev/null | grep -qx bun; }; then
+                add_configured_tool bun
+              fi
+            fi
+            if [ "$python" = true ] && task_language_needed python; then
+              add_configured_tool python
+              add_configured_tool uv
+              add_configured_tool ruff
+            fi
+            if [ "$rust" = true ] && task_language_needed rust; then add_configured_tool rust; fi
+            ;;
+          javascript)
+            configured_tool node && mise_tools+=(node)
+            if { [ -f bun.lock ] || [ -f bun.lockb ] ||
+              awk -F': ' '/^package_manager:/ {print $2; exit}' .github/template.yml 2>/dev/null | grep -qx bun; } && configured_tool bun; then
+              mise_tools+=(bun)
+            fi
+            ;;
+          python)
+            configured_tool python && mise_tools+=(python)
+            configured_tool uv && mise_tools+=(uv)
+            configured_tool ruff && mise_tools+=(ruff)
+            ;;
+          rust) configured_tool rust && mise_tools+=(rust) ;;
+          *) echo "Unsupported mise-scope: $REPO_FOUNDRY_MISE_SCOPE" >&2; exit 2 ;;
+        esac
+        printf 'mise_tools=%s\n' "${mise_tools[*]}" >> "$GITHUB_OUTPUT"
+        if [ "${#mise_tools[@]}" -gt 0 ]; then
+          printf 'mise_required=true\n' >> "$GITHUB_OUTPUT"
+        else
+          printf 'mise_required=false\n' >> "$GITHUB_OUTPUT"
+        fi
+      env:
+        REPO_FOUNDRY_MISE_SCOPE: ${{ inputs.mise-scope }}
+        REPO_FOUNDRY_TASK: ${{ inputs.task }}
+        REPO_FOUNDRY_TASK_JAVASCRIPT: ${{ inputs.task-javascript }}
+        REPO_FOUNDRY_TASK_PYTHON: ${{ inputs.task-python }}
+        REPO_FOUNDRY_TASK_RUST: ${{ inputs.task-rust }}
+
+    - name: Cache installed JavaScript dependencies
+      id: javascript-dependencies
+      if: >-
+        inputs.install == 'true' &&
+        inputs.install-javascript == 'true' &&
+        inputs.cache-installed != 'false' &&
+        steps.profile.outputs.javascript_dependencies == 'true' &&
+        steps.profile.outputs.javascript_package_manager != 'npm' &&
+        (inputs.cache-installed == 'true' ||
+        steps.profile.outputs.javascript_package_manager == 'pnpm' ||
+        steps.profile.outputs.javascript_package_manager == 'yarn') &&
+        hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.npmrc', '**/.yarnrc*', '**/.pnpmfile.cjs', '.github/template.yml', '.mise.toml', 'mise.lock') != ''
+      uses: actions/cache@v5
+      with:
+        path: |
+          **/node_modules
+        key: ${{ runner.os }}-javascript-installed-v3-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.npmrc', '**/.yarnrc*', '**/.pnpmfile.cjs', '.github/template.yml', '.mise.toml', 'mise.lock') }}
+    - name: Cache Corepack managers
+      if: (inputs.mise-scope == 'javascript' || steps.javascript-dependencies.outputs.cache-hit == 'true') && inputs.install-javascript == 'true' && steps.profile.outputs.javascript == 'true' && hashFiles('**/pnpm-lock.yaml', '**/yarn.lock') != ''
+      uses: actions/cache@v5
+      with:
+        path: ~/.cache/node/corepack
+        # Corepack shims are independent of the project toolchain; keep this
+        # cache warm when Node, Bun, or other mise-managed tools change.
+        key: ${{ runner.os }}-corepack-${{ hashFiles('**/package.json', '**/pnpm-lock.yaml', '**/yarn.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-corepack-
+    - name: Cache JavaScript packages
+      if: inputs.install == 'true' && inputs.install-javascript == 'true' && steps.profile.outputs.javascript == 'true' && hashFiles('**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json') != '' && steps.javascript-dependencies.outputs.cache-hit != 'true'
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.bun/install/cache
+          ~/.cache/node/corepack
+          ~/.npm
+          ~/.cache/yarn
+          ~/.local/share/pnpm/store
+        key: ${{ runner.os }}-javascript-${{ hashFiles('**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-javascript-
+    - name: Cache JavaScript lint state
+      # Fallback ESLint mode is valid without a dedicated config file; use the
+      # manifest/lockfile as the cache identity in that case as well.
+      if: inputs.install == 'true' && inputs.cache-lint == 'true' && steps.profile.outputs.eslint == 'true' && hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.eslintrc*', '**/eslint.config.*') != ''
+      uses: actions/cache@v5
+      with:
+        path: |
+          **/.eslintcache
+        key: ${{ runner.os }}-javascript-lint-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.eslintrc*', '**/eslint.config.*') }}
+        restore-keys: |
+          ${{ runner.os }}-javascript-lint-${{ github.workflow }}-${{ github.job }}-
+    - name: Cache JavaScript format state
+      if: inputs.install == 'true' && inputs.cache-format == 'true' && steps.profile.outputs.prettier == 'true' && hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.prettierrc*', '**/prettier.config.*') != ''
+      uses: actions/cache@v5
+      with:
+        path: |
+          **/node_modules/.cache/prettier
+        key: ${{ runner.os }}-javascript-format-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.prettierrc*', '**/prettier.config.*') }}
+        # Keep primary saves isolated so parallel jobs cannot race. A cache
+        # from another workflow job is still a valid warm fallback.
+        restore-keys: |
+          ${{ runner.os }}-javascript-format-
+    - name: Cache JavaScript build state
+      if: inputs.install == 'true' && inputs.cache-build == 'true' && steps.profile.outputs.build == 'true' && hashFiles('**/next.config.*', '**/vite.config.*', '**/tsconfig*.json') != ''
+      uses: actions/cache@v5
+      with:
+        path: |
+          **/.next/cache
+          **/node_modules/.vite
+          **/*.tsbuildinfo
+        key: ${{ runner.os }}-javascript-build-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/next.config.*', '**/vite.config.*', '**/tsconfig*.json', '.mise.toml', 'mise.lock') }}
+        # Keep primary saves isolated so parallel jobs cannot race. A cache
+        # from another workflow job is still a valid warm fallback.
+        restore-keys: |
+          ${{ runner.os }}-javascript-build-
+    - name: Cache Python environment
+      id: python-environment
+      if: inputs.install == 'true' && inputs.install-python == 'true' && inputs.cache-environment == 'true' && steps.profile.outputs.python == 'true' && hashFiles('**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock', '.mise.toml', 'mise.lock') != ''
+      uses: actions/cache@v5
+      with:
+        path: |
+          .venv
+          **/.venv
+        key: ${{ runner.os }}-python-environment-${{ hashFiles('**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock', '.mise.toml', 'mise.lock') }}
+    - name: Cache Python packages
+      if: (inputs.mise-scope == 'auto' || inputs.mise-scope == 'all' || inputs.mise-scope == 'python') && inputs.install-python == 'true' && steps.profile.outputs.python_dependencies == 'true' && hashFiles('**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock') != '' && steps.python-environment.outputs.cache-hit != 'true'
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.cache/uv
+        key: ${{ runner.os }}-python-${{ hashFiles('**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-python-
+    - name: Cache Python audit tools
+      if: inputs.install == 'false' && (inputs.mise-scope == 'auto' || inputs.mise-scope == 'all' || inputs.mise-scope == 'python') && inputs.install-python == 'true' && steps.profile.outputs.python_dependencies == 'true' && hashFiles('**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock') != ''
+      uses: actions/cache@v5
+      with:
+        path: ~/.cache/uv-audit
+        # pip-audit is independent of application requirements; keep its uv
+        # tool environment warm across dependency lockfile changes.
+        key: ${{ runner.os }}-python-audit-${{ hashFiles('.github/scripts/security.sh') }}
+        restore-keys: |
+          ${{ runner.os }}-python-audit-
+    - name: Cache Python lint state
+      if: inputs.install == 'true' && steps.profile.outputs.ruff == 'true' && hashFiles('**/pyproject.toml', '**/ruff.toml', '.mise.toml', 'mise.lock') != ''
+      uses: actions/cache@v5
+      with:
+        path: |
+          **/.ruff_cache
+        key: ${{ runner.os }}-python-lint-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('**/pyproject.toml', '**/ruff.toml', '.mise.toml', 'mise.lock') }}
+        # Primary saves remain job-specific; another job's Ruff cache is a
+        # useful warm fallback because Ruff validates entries by file state.
+        restore-keys: |
+          ${{ runner.os }}-python-lint-${{ github.workflow }}-
+    - name: Cache Turborepo
+      if: >-
+        inputs.install == 'true' &&
+        inputs.install-javascript == 'true' &&
+        inputs.cache-turbo != 'false' &&
+        steps.profile.outputs.turbo == 'true' &&
+        hashFiles('**/turbo.json', '**/turbo.jsonc') != '' &&
+        (inputs.cache-turbo == 'true' || env.TURBO_TOKEN == '' || env.TURBO_TEAM == '')
+      uses: actions/cache@v5
+      with:
+        path: |
+          .turbo/cache
+          **/.turbo/cache
+        key: ${{ runner.os }}-turbo-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/turbo.json', '**/turbo.jsonc', '.mise.toml', 'mise.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-turbo-
+    - name: Configure remote Turbo
+      if: >-
+        inputs.install == 'true' &&
+        inputs.cache-turbo != 'true' &&
+        env.TURBO_TOKEN != '' &&
+        env.TURBO_TEAM != '' &&
+        steps.profile.outputs.turbo == 'true'
+      shell: bash
+      run: echo 'REPO_FOUNDRY_TURBO_REMOTE_ONLY=true' >> "$GITHUB_ENV"
+    - name: Cache Rust packages
+      id: rust-packages
+      if: (inputs.mise-scope == 'auto' || inputs.mise-scope == 'all' || inputs.mise-scope == 'rust') && inputs.install-rust == 'true' && steps.profile.outputs.rust == 'true' && hashFiles('**/Cargo.toml', '**/Cargo.lock') != ''
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: ${{ runner.os }}-rust-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-rust-
+    - name: Cache Rust advisory database
+      if: inputs.install == 'false' && (inputs.mise-scope == 'auto' || inputs.mise-scope == 'all' || inputs.mise-scope == 'rust') && inputs.install-rust == 'true' && steps.profile.outputs.rust == 'true' && hashFiles('**/Cargo.toml', '**/Cargo.lock') != ''
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/advisory-db
+        # The advisory database is independent of project dependencies. Keep
+        # it warm for Security without invalidating it on every lockfile edit.
+        key: ${{ runner.os }}-rust-advisory-${{ hashFiles('.github/scripts/security.sh') }}
+        restore-keys: |
+          ${{ runner.os }}-rust-advisory-
+    - name: Cache Rust tools
+      if: inputs.install != 'true' && (inputs.mise-scope == 'auto' || inputs.mise-scope == 'all' || inputs.mise-scope == 'rust') && steps.profile.outputs.rust == 'true' && hashFiles('**/Cargo.toml', '**/Cargo.lock') != ''
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/bin
+        key: ${{ runner.os }}-rust-tools-${{ hashFiles('.mise.toml', 'mise.lock', '.github/scripts/security.sh') }}
+        restore-keys: |
+          ${{ runner.os }}-rust-tools-
+    - name: Cache Rust builds
+      if: inputs.install == 'true' && inputs.install-rust == 'true' && inputs.cache-build == 'true' && steps.profile.outputs.rust == 'true' && hashFiles('**/Cargo.toml', '**/Cargo.lock') != ''
+      uses: actions/cache@v5
+      with:
+        # Keep reusable dependency/build-script artifacts for the Build job;
+        # exclude target/incremental and release output, which are large and
+        # provide little value on a fresh hosted runner.
+        path: |
+          target/.rustc_info.json
+          target/debug/deps
+          target/debug/build
+          target/debug/.fingerprint
+          target/debug/*.d
+        key: ${{ runner.os }}-rust-build-v2-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', '.mise.toml', 'mise.lock') }}
+        # Cargo fingerprints validate restored artifacts; keep job-specific
+        # primary saves but reuse a prior workflow's dependency artifacts.
+        restore-keys: |
+          ${{ runner.os }}-rust-build-v2-
     - name: Setup
+      if: ${{ steps.profile.outputs.mise_required == 'true' }}
       uses: jdx/mise-action@v4
       with:
         cache: true
+        install_args: ${{ steps.profile.outputs.mise_tools }}
+    - name: Use offline Cargo cache
+      if: inputs.install == 'true' && inputs.install-rust == 'true' && steps.rust-packages.outputs.cache-hit == 'true' && hashFiles('**/Cargo.lock') != ''
+      shell: bash
+      run: echo 'CARGO_NET_OFFLINE=true' >> "$GITHUB_ENV"
     - name: Install
       if: inputs.install == 'true'
       shell: bash
+      env:
+        REPO_FOUNDRY_JAVASCRIPT_CACHE_HIT: ${{ steps.javascript-dependencies.outputs.cache-hit }}
+        REPO_FOUNDRY_PYTHON_CACHE_HIT: ${{ steps.python-environment.outputs.cache-hit }}
+        REPO_FOUNDRY_RUST_CACHE_HIT: ${{ steps.rust-packages.outputs.cache-hit }}
+        REPO_FOUNDRY_INSTALL_JAVASCRIPT: ${{ inputs.install-javascript }}
+        REPO_FOUNDRY_INSTALL_PYTHON: ${{ inputs.install-python }}
+        REPO_FOUNDRY_INSTALL_RUST: ${{ inputs.install-rust }}
+        REPO_FOUNDRY_TASK: ${{ inputs.task }}
       run: bash .github/scripts/ci.sh install
