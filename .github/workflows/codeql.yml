@@ -23,6 +23,7 @@ jobs:
   detect:
     name: Detect
     runs-on: ubuntu-slim
+    timeout-minutes: 10
     outputs:
       languages: ${{ steps.languages.outputs.languages }}
       code_security: ${{ steps.security.outputs.status }}
@@ -59,6 +60,7 @@ jobs:
     # Unchanged matrix entries only complete skipped steps; reserve a full
     # runner for analyzers that actually initialize and scan source.
     runs-on: ${{ matrix.changed && 'ubuntu-latest' || 'ubuntu-slim' }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       max-parallel: 4

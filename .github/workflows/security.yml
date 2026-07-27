@@ -21,6 +21,7 @@ jobs:
   profile:
     name: Profile
     runs-on: ubuntu-slim
+    timeout-minutes: 10
     outputs:
       javascript: ${{ steps.profile.outputs.javascript }}
       rust: ${{ steps.profile.outputs.rust }}
@@ -64,6 +65,7 @@ jobs:
   dependency-audit-javascript:
     name: Dependency Audit (JavaScript)
     runs-on: ubuntu-slim
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -99,6 +101,7 @@ jobs:
   dependency-audit-rust:
     name: Dependency Audit (Rust)
     runs-on: ubuntu-slim
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -139,6 +142,7 @@ jobs:
       matrix:
         requirement: ${{ fromJSON(needs.profile.outputs.python_requirements) }}
     runs-on: ubuntu-slim
+    timeout-minutes: 20
     env:
       REPO_FOUNDRY_PYTHON_REQUIREMENT: ${{ matrix.requirement }}
     steps:
@@ -182,6 +186,7 @@ jobs:
     if: always()
     needs: dependency-audit-python
     runs-on: ubuntu-slim
+    timeout-minutes: 20
     steps:
       - name: Check matrix result
         env:
@@ -192,6 +197,7 @@ jobs:
     name: Dependency Review
     if: ${{ github.event_name == 'pull_request' && !github.event.repository.private }}
     runs-on: ubuntu-slim
+    timeout-minutes: 10
     steps:
       - name: Review
         uses: actions/dependency-review-action@v5
