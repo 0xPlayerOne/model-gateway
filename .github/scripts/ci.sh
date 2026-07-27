@@ -7,6 +7,10 @@ has_script() {
   [ -f package.json ] && node -e 'const p=require("./package.json"); process.exit(p.scripts?.[process.argv[1]] ? 0 : 1)' "$1"
 }
 
+has_bun_native_coverage() {
+  [ -f package.json ] && node -e 'const p=require("./package.json"); process.exit(p.scripts?.["test:coverage"]?.includes("bun test") ? 0 : 1)'
+}
+
 has_javascript() {
   git ls-files -- '*.js' '*.jsx' '*.ts' '*.tsx' | grep -q .
 }
@@ -151,7 +155,11 @@ unit() {
   if has_script test:unit; then
     run_script test:unit
   elif has_script test:coverage; then
-    if [ "$(package_manager)" = bun ]; then run_bun_coverage; else run_script test:coverage; fi
+    if [ "$(package_manager)" = bun ] && has_bun_native_coverage; then
+      run_bun_coverage
+    else
+      run_script test:coverage
+    fi
   elif has_script test && ! has_script test:integration; then
     run_script test
   else
