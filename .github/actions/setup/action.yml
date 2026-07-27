@@ -512,7 +512,7 @@ runs:
           **/.venv
         key: ${{ runner.os }}-python-environment-${{ hashFiles('**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock', '.mise.toml', 'mise.lock') }}
     - name: Cache Python packages
-      if: (inputs.mise-scope == 'auto' || inputs.mise-scope == 'all' || inputs.mise-scope == 'python') && inputs.install-python == 'true' && steps.profile.outputs.python_dependencies == 'true' && hashFiles('**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock') != '' && steps.python-environment.outputs.cache-hit != 'true'
+      if: inputs.install == 'true' && (inputs.mise-scope == 'auto' || inputs.mise-scope == 'all' || inputs.mise-scope == 'python') && inputs.install-python == 'true' && steps.profile.outputs.python_dependencies == 'true' && hashFiles('**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock') != '' && steps.python-environment.outputs.cache-hit != 'true'
       uses: actions/cache@v5
       with:
         path: |
