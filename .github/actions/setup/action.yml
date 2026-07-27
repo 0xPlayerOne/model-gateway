@@ -441,7 +441,14 @@ runs:
         restore-keys: |
           ${{ runner.os }}-javascript-format-
     - name: Cache JavaScript build state
-      if: inputs.install == 'true' && inputs.cache-build == 'true' && steps.profile.outputs.build == 'true' && hashFiles('**/next.config.*', '**/vite.config.*', '**/tsconfig*.json') != ''
+      if: >-
+        inputs.install == 'true' &&
+        inputs.cache-build == 'true' &&
+        steps.profile.outputs.build == 'true' &&
+        hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb',
+        '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json',
+        '**/next.config.*', '**/vite.config.*', '**/tsconfig*.json',
+        '.mise.toml', 'mise.lock') != ''
       uses: actions/cache@v5
       with:
         path: |
