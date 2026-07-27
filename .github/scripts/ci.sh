@@ -70,6 +70,19 @@ run_bun_coverage() {
   rm -f "$log_file"
 }
 
+python_coverage_args() {
+  if [ -f pyproject.toml ]; then
+    python - <<'PY'
+import tomllib
+from pathlib import Path
+
+config = tomllib.loads(Path("pyproject.toml").read_text())
+for source in config.get("tool", {}).get("coverage", {}).get("run", {}).get("source", []):
+    print(f"--cov={source}")
+PY
+  fi
+}
+
 install() {
   if [ -f package.json ]; then
     case "$(package_manager)" in
@@ -150,9 +163,13 @@ unit() {
     else echo "Skipping Rust unit tests (no library or binary target)"; fi
   fi
   if [ -d tests/unit ] && python -c 'import importlib.util; raise SystemExit(importlib.util.find_spec("pytest") is None)' 2>/dev/null; then
-    env -u MISE_GITHUB_TOKEN -u MISE_TRUSTED_CONFIG_PATHS -u MISE_YES -u MISE_LOG_LEVEL -u PYTHONHOME -u PYTHONPATH python -m pytest -q tests/unit --cov --cov-report=term-missing --cov-fail-under="${PYTHON_COVERAGE_MIN:-80}"
+    mapfile -t coverage_args < <(python_coverage_args)
+    [ "${#coverage_args[@]}" -gt 0 ] || coverage_args=(--cov)
+    env -u MISE_GITHUB_TOKEN -u MISE_TRUSTED_CONFIG_PATHS -u MISE_YES -u MISE_LOG_LEVEL -u PYTHONHOME -u PYTHONPATH python -m pytest -q tests/unit "${coverage_args[@]}" --cov-report=term-missing --cov-fail-under="${PYTHON_COVERAGE_MIN:-80}"
   elif [ -d tests ] && [ ! -d tests/integration ] && python -c 'import importlib.util; raise SystemExit(importlib.util.find_spec("pytest") is None)' 2>/dev/null; then
-    env -u MISE_GITHUB_TOKEN -u MISE_TRUSTED_CONFIG_PATHS -u MISE_YES -u MISE_LOG_LEVEL -u PYTHONHOME -u PYTHONPATH python -m pytest -q tests --cov --cov-report=term-missing --cov-fail-under="${PYTHON_COVERAGE_MIN:-80}"
+    mapfile -t coverage_args < <(python_coverage_args)
+    [ "${#coverage_args[@]}" -gt 0 ] || coverage_args=(--cov)
+    env -u MISE_GITHUB_TOKEN -u MISE_TRUSTED_CONFIG_PATHS -u MISE_YES -u MISE_LOG_LEVEL -u PYTHONHOME -u PYTHONPATH python -m pytest -q tests "${coverage_args[@]}" --cov-report=term-missing --cov-fail-under="${PYTHON_COVERAGE_MIN:-80}"
   else
     echo "Skipping Python unit tests (no unit suite detected)"
   fi
