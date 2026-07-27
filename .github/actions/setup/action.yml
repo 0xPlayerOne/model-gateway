@@ -548,10 +548,14 @@ runs:
       if: inputs.install != 'true' && (inputs.mise-scope == 'auto' || inputs.mise-scope == 'all' || inputs.mise-scope == 'rust') && steps.profile.outputs.rust == 'true' && hashFiles('**/Cargo.toml', '**/Cargo.lock') != ''
       uses: actions/cache@v5
       with:
-        path: ~/.cargo/bin
-        key: ${{ runner.os }}-rust-tools-${{ hashFiles('.mise.toml', 'mise.lock', '.github/scripts/security.sh') }}
+        path: |
+          ~/.cargo/bin
+          ~/.rustup/toolchains
+          ~/.rustup/downloads
+          ~/.rustup/update-hashes
+        key: ${{ runner.os }}-${{ runner.arch }}-rust-tools-v2-${{ hashFiles('.mise.toml', 'mise.lock', '.github/scripts/security.sh') }}
         restore-keys: |
-          ${{ runner.os }}-rust-tools-
+          ${{ runner.os }}-${{ runner.arch }}-rust-tools-v2-
     - name: Cache Rust builds
       if: inputs.install == 'true' && inputs.install-rust == 'true' && inputs.cache-build == 'true' && steps.profile.outputs.rust == 'true' && hashFiles('**/Cargo.toml', '**/Cargo.lock') != ''
       uses: actions/cache@v5
