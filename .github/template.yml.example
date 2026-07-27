@@ -1,5 +1,6 @@
 # Repository-specific settings for the shared initializer and sync scripts.
 version: 1
+template: repo-foundry@latest
 languages: auto
 features: all
 package_manager: auto

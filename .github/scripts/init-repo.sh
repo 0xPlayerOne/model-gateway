@@ -95,12 +95,16 @@ if [ "$dry_run" = true ]; then
 fi
 
 mkdir -p .github
-cat > .github/template.yml <<EOF
-version: 1
-languages: $languages
-features: $features
-package_manager: $package_manager
-EOF
+template_ref="$(awk -F': ' '/^template:/ {print $2; exit}' .github/template.yml 2>/dev/null || true)"
+{
+  printf 'version: 1\n'
+  if [ -n "$template_ref" ]; then
+    printf 'template: %s\n' "$template_ref"
+  fi
+  printf 'languages: %s\n' "$languages"
+  printf 'features: %s\n' "$features"
+  printf 'package_manager: %s\n' "$package_manager"
+} > .github/template.yml
 
 if [ "$bootstrap" = false ]; then
   printf '%s\n' 'Bootstrap skipped.'
