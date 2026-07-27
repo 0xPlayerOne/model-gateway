@@ -124,9 +124,9 @@ unit() {
     else echo "Skipping Rust unit tests (no library or binary target)"; fi
   fi
   if [ -d tests/unit ] && python -c 'import importlib.util; raise SystemExit(importlib.util.find_spec("pytest") is None)' 2>/dev/null; then
-    python -m pytest -q tests/unit --cov --cov-report=term-missing --cov-fail-under="${PYTHON_COVERAGE_MIN:-80}"
+    env -u MISE_GITHUB_TOKEN -u MISE_TRUSTED_CONFIG_PATHS -u MISE_YES -u MISE_LOG_LEVEL python -m pytest -q tests/unit --cov --cov-report=term-missing --cov-fail-under="${PYTHON_COVERAGE_MIN:-80}"
   elif [ -d tests ] && [ ! -d tests/integration ] && python -c 'import importlib.util; raise SystemExit(importlib.util.find_spec("pytest") is None)' 2>/dev/null; then
-    python -m pytest -q tests --cov --cov-report=term-missing --cov-fail-under="${PYTHON_COVERAGE_MIN:-80}"
+    env -u MISE_GITHUB_TOKEN -u MISE_TRUSTED_CONFIG_PATHS -u MISE_YES -u MISE_LOG_LEVEL python -m pytest -q tests --cov --cov-report=term-missing --cov-fail-under="${PYTHON_COVERAGE_MIN:-80}"
   else
     echo "Skipping Python unit tests (no unit suite detected)"
   fi
