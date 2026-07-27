@@ -13,8 +13,15 @@ package_manager() {
 }
 
 if [ -f package.json ]; then
+  audit_args=(--audit-level=high)
+  if [ -f .github/security-audit-allowlist.txt ]; then
+    while IFS= read -r advisory; do
+      [[ -z "$advisory" || "$advisory" == \#* ]] && continue
+      audit_args+=(--ignore "$advisory")
+    done < .github/security-audit-allowlist.txt
+  fi
   case "$(package_manager)" in
-    bun) audits=$((audits + 1)); bun audit --audit-level=high ;;
+    bun) audits=$((audits + 1)); bun audit "${audit_args[@]}" ;;
     pnpm) audits=$((audits + 1)); corepack pnpm audit --audit-level high ;;
     yarn) audits=$((audits + 1)); corepack yarn npm audit --all --recursive ;;
     npm) audits=$((audits + 1)); npm audit --audit-level=high ;;
