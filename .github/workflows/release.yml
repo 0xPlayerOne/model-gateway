@@ -57,6 +57,7 @@ jobs:
         with:
           name: native-x86_64-unknown-linux-gnu
           path: dist/package/*.tar.gz
+          compression-level: 0
           if-no-files-found: error
 
   package:
@@ -127,6 +128,7 @@ jobs:
         with:
           name: native-${{ matrix.target }}
           path: dist/package/*.tar.gz
+          compression-level: 0
           if-no-files-found: error
 
   artifact-smoke:
