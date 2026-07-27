@@ -22,6 +22,7 @@ jobs:
   create-draft-pr:
     name: Create
     runs-on: ubuntu-slim
+    timeout-minutes: 10
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}
       cancel-in-progress: true
