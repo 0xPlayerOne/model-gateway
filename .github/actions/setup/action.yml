@@ -437,7 +437,7 @@ runs:
           **/node_modules
         key: ${{ runner.os }}-javascript-installed-v3-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.npmrc', '**/.yarnrc*', '**/.pnpmfile.cjs', '.github/template.yml', '.mise.toml', 'mise.lock') }}
     - name: Restore Bun dependencies
-      id: javascript-bun-dependencies
+      id: javascript-bun-cache-restore
       if: >-
         inputs.install == 'true' &&
         inputs.install-javascript == 'true' &&
@@ -452,6 +452,21 @@ runs:
         key: ${{ runner.os }}-javascript-installed-v4-bun-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/.npmrc', '.github/template.yml', '.mise.toml', 'mise.lock') }}
         restore-keys: |
           ${{ runner.os }}-javascript-installed-v4-bun-
+    - name: Detect Bun dependencies
+      id: javascript-bun-dependencies
+      if: >-
+        inputs.install == 'true' &&
+        inputs.install-javascript == 'true' &&
+        inputs.cache-installed != 'false' &&
+        steps.profile.outputs.javascript_dependencies == 'true' &&
+        steps.profile.outputs.javascript_package_manager == 'bun'
+      shell: bash
+      run: |
+        if find . -path './.git' -prune -o -type d -name node_modules -print -quit | grep -q .; then
+          echo 'restored=true' >> "$GITHUB_OUTPUT"
+        else
+          echo 'restored=false' >> "$GITHUB_OUTPUT"
+        fi
     - name: Cache Corepack managers
       if: (inputs.mise-scope == 'javascript' || steps.javascript-dependencies.outputs.cache-hit == 'true') && inputs.install-javascript == 'true' && steps.profile.outputs.javascript == 'true' && hashFiles('**/pnpm-lock.yaml', '**/yarn.lock') != ''
       uses: actions/cache@v5
@@ -463,7 +478,7 @@ runs:
         restore-keys: |
           ${{ runner.os }}-corepack-
     - name: Cache JavaScript packages
-      if: inputs.install == 'true' && inputs.install-javascript == 'true' && steps.profile.outputs.javascript_packages_cache == 'true' && steps.profile.outputs.javascript == 'true' && hashFiles('**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json') != '' && steps.javascript-dependencies.outputs.cache-hit != 'true' && steps.javascript-bun-dependencies.outputs.cache-hit != 'true'
+      if: inputs.install == 'true' && inputs.install-javascript == 'true' && steps.profile.outputs.javascript_packages_cache == 'true' && steps.profile.outputs.javascript == 'true' && hashFiles('**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json') != '' && steps.javascript-dependencies.outputs.cache-hit != 'true' && steps.javascript-bun-dependencies.outputs.restored != 'true'
       uses: actions/cache@v5
       with:
         path: |
@@ -643,7 +658,7 @@ runs:
       if: inputs.install == 'true'
       shell: bash
       env:
-        REPO_FOUNDRY_JAVASCRIPT_CACHE_HIT: ${{ steps.javascript-dependencies.outputs.cache-hit == 'true' || steps.javascript-bun-dependencies.outputs.cache-hit == 'true' }}
+        REPO_FOUNDRY_JAVASCRIPT_CACHE_HIT: ${{ steps.javascript-dependencies.outputs.cache-hit == 'true' || steps.javascript-bun-dependencies.outputs.restored == 'true' }}
         REPO_FOUNDRY_PYTHON_CACHE_HIT: ${{ steps.python-environment.outputs.cache-hit }}
         REPO_FOUNDRY_RUST_CACHE_HIT: ${{ steps.rust-packages.outputs.cache-hit }}
         REPO_FOUNDRY_INSTALL_JAVASCRIPT: ${{ inputs.install-javascript }}
@@ -659,7 +674,7 @@ runs:
         inputs.cache-installed != 'false' &&
         steps.profile.outputs.javascript_package_manager == 'bun' &&
         steps.profile.outputs.javascript_dependencies == 'true' &&
-        steps.javascript-bun-dependencies.outputs.cache-hit != 'true' &&
+        steps.javascript-bun-dependencies.outputs.restored != 'true' &&
         !cancelled()
       shell: bash
       run: |
