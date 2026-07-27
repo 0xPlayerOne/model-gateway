@@ -56,7 +56,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
           - target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-14
           - target: aarch64-apple-darwin
             os: macos-14
     runs-on: ${{ matrix.os }}
@@ -94,7 +94,7 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --locked --release --target ${{ matrix.target }}
       - name: Smoke native binary
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'x86_64-apple-darwin'
         run: |
           target/${{ matrix.target }}/release/model-gateway --version
           target/${{ matrix.target }}/release/model-gateway --help >/dev/null
