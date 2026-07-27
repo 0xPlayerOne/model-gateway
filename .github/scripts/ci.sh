@@ -44,6 +44,32 @@ run_package_tool() {
   esac
 }
 
+run_bun_coverage() {
+  local log_file coverage_line functions lines minimum
+  log_file="$(mktemp)"
+  if ! run_script test:coverage 2>&1 | tee "$log_file"; then
+    rm -f "$log_file"
+    return 1
+  fi
+  coverage_line="$(grep -E '^All files[[:space:]]*\|' "$log_file" | tail -n 1 || true)"
+  if [ -z "$coverage_line" ]; then
+    echo "Coverage summary not found in test:coverage output" >&2
+    rm -f "$log_file"
+    return 1
+  fi
+  functions="$(printf '%s\n' "$coverage_line" | awk -F'|' '{gsub(/[[:space:]]/, "", $2); print $2}')"
+  lines="$(printf '%s\n' "$coverage_line" | awk -F'|' '{gsub(/[[:space:]]/, "", $3); print $3}')"
+  minimum="${BUN_COVERAGE_MIN:-80}"
+  if ! awk -v functions="$functions" -v lines="$lines" -v minimum="$minimum" \
+    'BEGIN { exit !(functions + 0 >= minimum && lines + 0 >= minimum) }'; then
+    echo "Coverage below ${minimum}%: functions=${functions}% lines=${lines}%" >&2
+    rm -f "$log_file"
+    return 1
+  fi
+  echo "Coverage threshold passed: functions=${functions}% lines=${lines}% (minimum ${minimum}%)"
+  rm -f "$log_file"
+}
+
 install() {
   if [ -f package.json ]; then
     case "$(package_manager)" in
@@ -112,7 +138,7 @@ unit() {
   if has_script test:unit; then
     run_script test:unit
   elif has_script test:coverage; then
-    run_script test:coverage
+    if [ "$(package_manager)" = bun ]; then run_bun_coverage; else run_script test:coverage; fi
   elif has_script test && ! has_script test:integration; then
     run_script test
   else
