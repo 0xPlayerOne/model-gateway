@@ -48,6 +48,7 @@ tests/.bin/
 # Logs and temporary files
 *.log
 *.tmp
+*.pid
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
