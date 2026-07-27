@@ -375,8 +375,8 @@ runs:
         REPO_FOUNDRY_MISE_SCOPE: ${{ inputs.mise-scope }}
         REPO_FOUNDRY_TASK: ${{ inputs.task }}
         REPO_FOUNDRY_TASK_JAVASCRIPT: ${{ inputs.task-javascript }}
-       REPO_FOUNDRY_TASK_PYTHON: ${{ inputs.task-python }}
-       REPO_FOUNDRY_TASK_RUST: ${{ inputs.task-rust }}
+        REPO_FOUNDRY_TASK_PYTHON: ${{ inputs.task-python }}
+        REPO_FOUNDRY_TASK_RUST: ${{ inputs.task-rust }}
 
     - name: Setup uv
       if: >-
