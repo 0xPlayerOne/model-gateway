@@ -79,7 +79,14 @@ while IFS= read -r context; do
   [ -n "$context" ] || continue
   case "$context" in
     'Slither / Analyze') continue ;; # removed from the standard workflow set
-    'Dependency Audit'|'Dependency Audit ('*|'Test Profile'|'CI / '*|'Test / '*|'Security / '*|'CodeQL / '*) ;;
+    # Remove both the current concise job names and older workflow-prefixed
+    # names before rebuilding the standard set. This prevents stale required
+    # checks from remaining required after a repository changes visibility or
+    # template version.
+    'Dependency Audit'|'Dependency Audit ('*|'Profile'|'Test Profile'|\
+    'Format'|'Lint'|'Type-Check'|'Build'|'Unit'|'Integration'|'E2E'|'Smoke'|\
+    'Detect'|'Analyze'|'Analyze ('*|\
+    'CI / '*|'Test / '*|'Security / '*|'CodeQL / '*) ;;
     *) preserved+=("$context") ;;
   esac
 done <<< "$existing"
