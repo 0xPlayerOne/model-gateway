@@ -25,16 +25,12 @@ jobs:
 
       - name: Check
         id: check-pr
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           EXISTING=$(gh pr list --base main --head staging --state open --json number 2>/dev/null | jq 'length')
           echo "existing=$EXISTING" >> "$GITHUB_OUTPUT"
 
       - name: Create
         if: steps.check-pr.outputs.existing == '0'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           DATE=$(date +%Y-%m-%d)
           BODY_FILE="$RUNNER_TEMP/release-pr.md"
