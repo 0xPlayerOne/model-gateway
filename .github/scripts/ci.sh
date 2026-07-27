@@ -61,8 +61,7 @@ run_bun_coverage() {
     rm -f "$log_file"
     return 1
   fi
-  functions="$(printf '%s\n' "$coverage_line" | awk -F'|' '{gsub(/[[:space:]]/, "", $4); print $4}')"
-  lines="$(printf '%s\n' "$coverage_line" | awk -F'|' '{gsub(/[[:space:]]/, "", $5); print $5}')"
+  read -r functions lines < <(printf '%s\n' "$coverage_line" | awk -F'|' '{for (i = 1; i <= NF; i++) gsub(/[[:space:]]/, "", $i); if (NF >= 5) print $4, $5; else if (NF >= 3) print $2, $3}')
   minimum="${BUN_COVERAGE_MIN:-80}"
   if ! awk -v functions="$functions" -v lines="$lines" -v minimum="$minimum" \
     'BEGIN { exit !(functions + 0 >= minimum && lines + 0 >= minimum) }'; then
