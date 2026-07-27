@@ -95,6 +95,29 @@ runs:
         NODE
         }
 
+        script_uses_turbo() {
+          [ -f package.json ] || return 1
+          REPO_FOUNDRY_TURBO_TASK="$REPO_FOUNDRY_TASK" node <<'NODE'
+        const fs = require('node:fs');
+        const task = process.env.REPO_FOUNDRY_TURBO_TASK || '';
+        const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+        const scripts = packageJson.scripts || {};
+        const candidates = {
+          format: ['format:check', 'format', 'fmt'],
+          lint: ['lint'],
+          type_check: ['type-check', 'typecheck', 'type:check'],
+          build: ['build'],
+          unit: ['test:unit', 'test:coverage', 'test'],
+          integration: ['test:integration'],
+          e2e: ['test:e2e', 'e2e'],
+          smoke: ['test:smoke', 'smoke'],
+        }[task] || [];
+        const selected = candidates.find((name) => scripts[name]);
+        const usesTurbo = Boolean(selected && /\bturbo(?:\s|$)/.test(scripts[selected]));
+        process.exit(usesTurbo ? 0 : 1);
+        NODE
+        }
+
         uses_prettier() {
           [ -f package.json ] || return 0
           node <<'NODE'
@@ -249,6 +272,12 @@ runs:
         fi
         printf 'prettier_fallback=%s\n' "$prettier_fallback" >> "$GITHUB_OUTPUT"
         printf 'eslint_fallback=%s\n' "$eslint_fallback" >> "$GITHUB_OUTPUT"
+
+        turbo_task=false
+        if [ -z "$REPO_FOUNDRY_TASK" ] || script_uses_turbo; then
+          turbo_task=true
+        fi
+        printf 'turbo_task=%s\n' "$turbo_task" >> "$GITHUB_OUTPUT"
 
         build=false
         if has_tracked_regex '(^|/)(next\.config\.[^/]*|vite\.config\.[^/]*|tsconfig[^/]*\.json)$'; then
@@ -470,6 +499,7 @@ runs:
         inputs.install-javascript == 'true' &&
         inputs.cache-turbo != 'false' &&
         steps.profile.outputs.turbo == 'true' &&
+        steps.profile.outputs.turbo_task == 'true' &&
         hashFiles('**/turbo.json', '**/turbo.jsonc') != '' &&
         (inputs.cache-turbo == 'true' || env.TURBO_TOKEN == '' || env.TURBO_TEAM == '')
       uses: actions/cache@v5
@@ -486,6 +516,7 @@ runs:
         inputs.cache-turbo != 'true' &&
         env.TURBO_TOKEN != '' &&
         env.TURBO_TEAM != '' &&
+        steps.profile.outputs.turbo_task == 'true' &&
         steps.profile.outputs.turbo == 'true'
       shell: bash
       run: echo 'REPO_FOUNDRY_TURBO_REMOTE_ONLY=true' >> "$GITHUB_ENV"
