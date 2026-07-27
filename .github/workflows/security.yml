@@ -33,6 +33,8 @@ jobs:
           filter: blob:none
           sparse-checkout: |
             .github
+            .mise.toml
+            mise.lock
             .npmrc
             .pnpmfile.cjs
             .yarnrc*
@@ -71,6 +73,8 @@ jobs:
           filter: blob:none
           sparse-checkout: |
             .github
+            .mise.toml
+            mise.lock
             .npmrc
             .pnpmfile.cjs
             .yarnrc*
@@ -101,6 +105,8 @@ jobs:
           filter: blob:none
           sparse-checkout: |
             .github
+            .mise.toml
+            mise.lock
             **/Cargo.toml
             **/Cargo.lock
             **/.cargo/**
@@ -125,6 +131,8 @@ jobs:
           filter: blob:none
           sparse-checkout: |
             .github
+            .mise.toml
+            mise.lock
             **/pyproject.toml
             **/requirements*.txt
             **/setup.py

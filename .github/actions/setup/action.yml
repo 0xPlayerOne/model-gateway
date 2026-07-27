@@ -259,7 +259,13 @@ runs:
 
         mise_tools=()
         add_configured_tool() {
-          configured_tool "$1" && mise_tools+=("$1")
+          # Optional tools are expected to be absent in single-language repos.
+          # Keep that a successful probe so Bash strict mode does not abort
+          # profile detection before the actual setup step runs.
+          if configured_tool "$1"; then
+            mise_tools+=("$1")
+          fi
+          return 0
         }
 
         case "$REPO_FOUNDRY_MISE_SCOPE" in
