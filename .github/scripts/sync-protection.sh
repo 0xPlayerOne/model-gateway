@@ -49,6 +49,10 @@ done
 command -v gh >/dev/null 2>&1 || { echo "gh is required" >&2; exit 1; }
 
 is_private="$(gh repo view "$repo" --json isPrivate --jq '.isPrivate')"
+code_security_status="disabled"
+if [ "$is_private" = true ]; then
+  code_security_status="$(gh api "repos/$repo" --jq '.security_and_analysis.code_security.status // "disabled"' 2>/dev/null || printf 'disabled')"
+fi
 contexts=()
 if feature_enabled ci; then contexts+=(Format Lint Type-Check Build); fi
 if feature_enabled test; then contexts+=(Unit Integration E2E Smoke); fi
@@ -57,7 +61,7 @@ if feature_enabled security; then
 fi
 if feature_enabled codeql; then contexts+=(Detect); fi
 
-if [ "$is_private" != true ] && feature_enabled codeql; then
+if { [ "$is_private" != true ] || [ "$code_security_status" = enabled ]; } && feature_enabled codeql; then
   contexts+=("Analyze (Actions)")
   if language_enabled typescript && git ls-files -- '*.ts' '*.tsx' '*.js' '*.jsx' package.json tsconfig\*.json | grep -q .; then contexts+=("Analyze (TypeScript)"); fi
   if language_enabled python && git ls-files -- '*.py' pyproject.toml requirements\*.txt setup.py ':!.github/**' | grep -q .; then contexts+=("Analyze (Python)"); fi

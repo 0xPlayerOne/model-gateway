@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-slim
     outputs:
       languages: ${{ steps.languages.outputs.languages }}
+      code_security: ${{ steps.security.outputs.status }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -38,11 +39,23 @@ jobs:
         env:
           CODEQL_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: bash .github/scripts/codeql-languages.sh
+      - name: Detect Code Security
+        id: security
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status="disabled"
+          if [ "${{ github.event.repository.private }}" != "true" ]; then
+            status="enabled"
+          else
+            status="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.security_and_analysis.code_security.status // "disabled"' 2>/dev/null || printf 'disabled')"
+          fi
+          printf 'status=%s\n' "$status" >> "$GITHUB_OUTPUT"
 
   analyze:
     name: Analyze (${{ matrix.name }})
     needs: detect
-    if: ${{ !github.event.repository.private }}
+    if: ${{ !github.event.repository.private || needs.detect.outputs.code_security == 'enabled' }}
     # Unchanged matrix entries only complete skipped steps; reserve a full
     # runner for analyzers that actually initialize and scan source.
     runs-on: ${{ matrix.changed && 'ubuntu-latest' || 'ubuntu-slim' }}
