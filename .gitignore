@@ -38,6 +38,12 @@ coverage/
 htmlcov/
 .coverage*
 .next/
+artifacts/
+cache/
+typechain/
+coverage.json
+tests/.bin/
+**/.app/
 
 # Logs and temporary files
 *.log
