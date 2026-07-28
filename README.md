@@ -44,7 +44,7 @@ CLIProxyAPI can run as an optional loopback sidecar for Claude Code and ChatGPT/
 model-gateway cli-proxy setup
 model-gateway cli-proxy login claude
 model-gateway cli-proxy login codex --device
-model-gateway cli-proxy serve
+./scripts/start-cli-proxy.sh
 
 # In another terminal, after at least one account is connected:
 model-gateway catalog refresh --provider cli-proxy
@@ -52,6 +52,8 @@ model-gateway serve
 ```
 
 Repeat either login command to add accounts to the pool. The setup command downloads checksum-pinned CLIProxyAPI `v7.2.103`, binds it to `127.0.0.1:8317`, disables remote management/plugins/control-panel updates, and creates a `subscription` provider. It does not replace direct APIs, Ollama, LM Studio, or the built-in local endpoint. See [docs/providers.md](docs/providers.md#cliproxyapi-oauth-sidecar) for security and provider-policy limitations.
+
+The launcher backgrounds CLIProxyAPI and writes logs to its sidecar directory. Once CLIProxyAPI is configured, `./scripts/start-server.sh` and `./scripts/restart-server.sh` start and restart both services automatically. Use `./scripts/start-server.sh --follow` (or `-f`) to keep the gateway in the foreground; the sidecar remains managed in the background. Use `./scripts/start-cli-proxy.sh --follow` when you specifically want to follow only sidecar logs.
 
 ## Verification
 

@@ -34,4 +34,10 @@ if lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     exit 1
 fi
 
+CLI_PROXY_HOME="${MODEL_GATEWAY_CLI_PROXY_HOME:-$HOME/.config/model-gateway/cli-proxy}"
+CLI_PROXY_CONFIG="${MODEL_GATEWAY_CLI_PROXY_CONFIG:-$CLI_PROXY_HOME/config.yaml}"
+if [ -f "$CLI_PROXY_CONFIG" ]; then
+    "$(cd "$(dirname "$0")" && pwd)/restart-cli-proxy.sh"
+fi
+
 exec "$ROOT/scripts/start-server.sh" "$@"

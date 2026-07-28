@@ -42,6 +42,8 @@ CLIProxyAPI is integrated as a separate loopback process, not embedded into the 
 
 `model-gateway cli-proxy setup` installs exact version `v7.2.103` with platform-specific SHA-256 verification on macOS and Linux. It generates a private config under `~/.config/model-gateway/cli-proxy`, stores the frontend key through the gateway secret resolver, and adds `[providers.cli-proxy]` with `billing_mode = "subscription"`.
 
+Use `./scripts/start-server.sh` to start the gateway and, when configured, the CLIProxyAPI sidecar together. Logs are written to `~/.config/model-gateway/cli-proxy/server.log`; pass `--follow` or `-f` to keep the gateway in the foreground. `./scripts/restart-server.sh` restarts both services. Use the dedicated `start-cli-proxy.sh` and `restart-cli-proxy.sh` scripts when managing only the sidecar. The lower-level `model-gateway cli-proxy serve` command remains a foreground runner.
+
 CLIProxyAPI owns account-level round-robin selection, cooldown, token refresh, and pre-output credential failover. The gateway treats it as one provider and may fall back to a different gateway provider only after CLIProxyAPI returns a terminal response.
 
 Security and policy boundaries:
