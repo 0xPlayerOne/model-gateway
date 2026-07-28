@@ -4,7 +4,7 @@ languages: rust,python
 features: all
 package_manager: none
 runtime_repository: 0xPlayerOne/code-foundry
-runtime_ref: v0.25.0
+runtime_ref: v0.26.0
 runner: ubuntu-latest
 unit_runner: ubuntu-slim
 ci_runner: ubuntu-latest
@@ -20,4 +20,4 @@ coverage_minimum: 80
 turbo_remote: auto
 release_type: rust
 npm_publish: false
-license: preserve
+license: agpl-3.0-or-later
