@@ -1578,12 +1578,14 @@ impl RoutingStore {
                         provider,
                         model,
                         quota_kind(quota.kind),
-                        quota.window_seconds,
+                        quota.window_seconds as i64,
                         window_start
                     ],
-                    |row| row.get(0),
+                    |row| row.get::<_, i64>(0),
                 )
                 .optional()?
+                .unwrap_or(0)
+                .try_into()
                 .unwrap_or(0);
             if used.saturating_add(amount) > quota.limit {
                 return Ok(ReservationOutcome::QuotaExceeded(quota.kind));
@@ -1602,9 +1604,9 @@ impl RoutingStore {
                     provider,
                     model,
                     quota_kind(quota.kind),
-                    quota.window_seconds,
+                    quota.window_seconds as i64,
                     window_start,
-                    amount
+                    amount as i64
                 ],
             )?;
         }
@@ -1624,9 +1626,9 @@ impl RoutingStore {
                 params![
                     reservation_id,
                     quota_kind(quota.kind),
-                    quota.window_seconds,
+                    quota.window_seconds as i64,
                     window_start,
-                    quota_amount(quota.kind, estimated_tokens, expected_cost_microusd)
+                    quota_amount(quota.kind, estimated_tokens, expected_cost_microusd) as i64
                 ],
             )?;
         }
@@ -1712,9 +1714,9 @@ impl RoutingStore {
                 .query_map([token.id], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, u64>(1)?,
+                        row.get::<_, i64>(1)?.try_into().unwrap_or(0),
                         row.get::<_, i64>(2)?,
-                        row.get::<_, u64>(3)?,
+                        row.get::<_, i64>(3)?.try_into().unwrap_or(0),
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -1769,9 +1771,9 @@ impl RoutingStore {
                 .query_map([token.id], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, u64>(1)?,
+                        row.get::<_, i64>(1)?.try_into().unwrap_or(0),
                         row.get::<_, i64>(2)?,
-                        row.get::<_, u64>(3)?,
+                        row.get::<_, i64>(3)?.try_into().unwrap_or(0),
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -2226,9 +2228,9 @@ fn expire_reservations(
                 .query_map([id], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, u64>(1)?,
+                        row.get::<_, i64>(1)?.try_into().unwrap_or(0),
                         row.get::<_, i64>(2)?,
-                        row.get::<_, u64>(3)?,
+                        row.get::<_, i64>(3)?.try_into().unwrap_or(0),
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -2262,7 +2264,7 @@ fn decrement_counter_at(
         "UPDATE usage_counters SET used = MAX(0, used - ?1)
          WHERE provider = ?2 AND model = ?3 AND kind = ?4
            AND window_seconds = ?5 AND window_start = ?6",
-        params![amount, provider, model, kind, window_seconds, window_start],
+        params![amount as i64, provider, model, kind, window_seconds as i64, window_start],
     )?;
     Ok(())
 }
@@ -2284,11 +2286,11 @@ fn adjust_counter_at(
              WHERE provider = ?2 AND model = ?3 AND kind = ?4
                AND window_seconds = ?5 AND window_start = ?6",
             params![
-                actual - reserved,
+                (actual - reserved) as i64,
                 provider,
                 model,
                 kind,
-                window_seconds,
+                window_seconds as i64,
                 window_start
             ],
         )?;
