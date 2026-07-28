@@ -36,30 +36,6 @@ fn strip_provider_env_vars(mut cmd: Command) -> Command {
 }
 
 #[test]
-fn cli_proxy_accounts_reports_counts_without_token_values() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let home = directory.path().join("cli-proxy");
-    let auth = home.join("auth");
-    std::fs::create_dir_all(&auth).expect("auth dir");
-    std::fs::write(
-        auth.join("claude.json"),
-        r#"{"type":"claude","access_token":"must-not-leak"}"#,
-    )
-    .expect("auth file");
-    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
-        .args(["cli-proxy", "accounts"])
-        .env("MODEL_GATEWAY_CONFIG", directory.path().join("config.toml"))
-        .env("MODEL_GATEWAY_CLI_PROXY_HOME", home)
-        .output()
-        .expect("run cli-proxy accounts");
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("stdout");
-    assert_eq!(stdout, "claude: 1 accounts\n");
-    assert!(!stdout.contains("must-not-leak"));
-    assert!(output.stderr.is_empty());
-}
-
-#[test]
 fn cli_proxy_environment_discovery_uses_subscription_billing() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
@@ -100,7 +76,8 @@ fn cli_proxy_setup_uses_environment_frontend_key_consistently() {
         .expect("run cli-proxy setup");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout");
-    assert!(stdout.contains("Stored CLI_PROXY_API_KEY in environment"));
+    assert!(stdout.contains("Stored the CLIProxyAPI frontend key"));
+    assert!(!stdout.contains("environment-sidecar-key"));
     let sidecar_config = std::fs::read_to_string(home.join("config.yaml")).expect("sidecar config");
     assert!(sidecar_config.contains("environment-sidecar-key"));
     let gateway_config = std::fs::read_to_string(config_path).expect("gateway config");

@@ -13,8 +13,8 @@ use model_gateway::benchmarks::{BenchmarkImport, parse_artificial_analysis};
 use model_gateway::cli_proxy::{
     API_KEY_SECRET as CLI_PROXY_API_KEY_SECRET, BASE_URL as CLI_PROXY_BASE_URL, CliProxyPaths,
     OAuthProvider, PROVIDER_KEY as CLI_PROXY_PROVIDER_KEY, VERSION as CLI_PROXY_VERSION,
-    account_summary, generate_api_key, initialize as initialize_cli_proxy,
-    install as install_cli_proxy, login as login_cli_proxy, serve as serve_cli_proxy,
+    generate_api_key, initialize as initialize_cli_proxy, install as install_cli_proxy,
+    login as login_cli_proxy, serve as serve_cli_proxy,
 };
 use model_gateway::config::{
     BillingMode, Config, ConfigError, Exposure, ModelConfig, ProviderProfileId, QuotaBoundary,
@@ -211,7 +211,6 @@ enum CliProxyCommand {
     },
     Serve,
     Status,
-    Accounts,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -265,8 +264,8 @@ fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
                 )
                 .into());
             }
-            let (api_key, source) = match std::env::var(CLI_PROXY_API_KEY_SECRET) {
-                Ok(value) if !value.trim().is_empty() => (value, "environment"),
+            let api_key = match std::env::var(CLI_PROXY_API_KEY_SECRET) {
+                Ok(value) if !value.trim().is_empty() => value,
                 Ok(_) => {
                     return Err(format!(
                         "{CLI_PROXY_API_KEY_SECRET} is set but empty; remove it or provide the frontend key"
@@ -278,14 +277,11 @@ fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
                         .get(CLI_PROXY_API_KEY_SECRET)?
                         .filter(|value| !value.trim().is_empty())
                     {
-                        let source = resolver
-                            .source(CLI_PROXY_API_KEY_SECRET)?
-                            .unwrap_or("configured-secret-store");
-                        (value, source)
+                        value
                     } else {
                         let value = generate_api_key()?;
-                        let source = resolver.set_preferred(CLI_PROXY_API_KEY_SECRET, &value)?;
-                        (value, source)
+                        resolver.set_preferred(CLI_PROXY_API_KEY_SECRET, &value)?;
+                        value
                     }
                 }
                 Err(std::env::VarError::NotUnicode(_)) => {
@@ -319,7 +315,7 @@ fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
             println!("Installed binary: {}", paths.binary.display());
             println!("Generated config: {}", paths.config.display());
             println!("OAuth directory: {}", paths.auth_dir.display());
-            println!("Stored {CLI_PROXY_API_KEY_SECRET} in {source}");
+            println!("Stored the CLIProxyAPI frontend key in the configured secret source");
             println!("Added provider '{CLI_PROXY_PROVIDER_KEY}' with subscription billing");
             println!("Next: model-gateway cli-proxy login claude");
             println!("      model-gateway cli-proxy login codex --device");
@@ -379,18 +375,6 @@ fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
             println!("CLIProxyAPI v{CLI_PROXY_VERSION}: ready, {models} models");
-            for summary in account_summary(&paths)? {
-                println!("{}: {} accounts", summary.provider, summary.accounts);
-            }
-        }
-        CliProxyCommand::Accounts => {
-            let summary = account_summary(&paths)?;
-            if summary.is_empty() {
-                println!("No CLIProxyAPI OAuth accounts found");
-            }
-            for summary in summary {
-                println!("{}: {} accounts", summary.provider, summary.accounts);
-            }
         }
     }
     Ok(())
