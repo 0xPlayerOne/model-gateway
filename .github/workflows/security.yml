@@ -13,7 +13,7 @@ permissions:
 jobs:
   security:
     name: Security
-    uses: 0xPlayerOne/code-foundry/.github/workflows/reusable-security.yml@v0.22.0
+    uses: 0xPlayerOne/code-foundry/.github/workflows/security.yml@v0.22.0
     with:
       runtime-repository: 0xPlayerOne/code-foundry
       runtime-ref: v0.22.0
