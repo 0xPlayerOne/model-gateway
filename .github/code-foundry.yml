@@ -1,6 +1,6 @@
 version: 1
 profile: application
-languages: rust,python
+languages: rust
 features: all
 package_manager: none
 runtime_repository: 0xPlayerOne/code-foundry
