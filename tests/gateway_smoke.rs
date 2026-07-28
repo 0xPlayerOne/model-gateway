@@ -982,19 +982,10 @@ async fn auto_models_include_free_candidates_without_price_observations() {
             }],
         )
         .expect("catalog");
+    let mut benchmark = BenchmarkModel::fixture("free-model", 80.0, 80.0, 80.0, 0.0, 0.0);
+    benchmark.reasoning_effort = Some("medium".to_owned());
     store
-        .replace_benchmarks(
-            "fixture",
-            "Fixture",
-            &[BenchmarkModel::fixture(
-                "free-model",
-                80.0,
-                80.0,
-                80.0,
-                0.0,
-                0.0,
-            )],
-        )
+        .replace_benchmarks("fixture", "Fixture", &[benchmark])
         .expect("benchmarks");
     drop(store);
 
@@ -1046,11 +1037,12 @@ async fn auto_models_include_free_candidates_without_price_observations() {
         primary["links"]["self"],
         format!("{gateway}/v1/catalog/models/free-provider/free-model")
     );
+    assert_eq!(primary["reasoning_effort"], "medium");
     assert_eq!(
         primary
             .as_object()
             .map(|object| object.keys().map(String::as_str).collect::<Vec<_>>()),
-        Some(vec!["id", "links", "quality"])
+        Some(vec!["id", "links", "quality", "reasoning_effort"])
     );
     assert!(primary.get("price_per_million").is_none());
     assert!(primary.get("reference_price_per_million").is_none());
@@ -4077,7 +4069,7 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         collection_body["data"][0]
             .as_object()
             .map(|object| object.keys().map(String::as_str).collect::<Vec<_>>()),
-        Some(vec!["id", "links", "quality"])
+        Some(vec!["id", "links", "quality", "reasoning_effort"])
     );
     assert!(collection_body["data"][0]["links"]["self"].is_string());
     assert!(collection_body["data"][0]["quality"].is_object());

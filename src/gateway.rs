@@ -1606,6 +1606,7 @@ fn catalog_model_summary_json(entry: &CatalogModelEntry, origin: &str) -> Value 
             "score": entry.composite_quality,
             "rank": entry.rank,
         },
+        "reasoning_effort": entry.effort_level,
     })
 }
 
@@ -2174,6 +2175,7 @@ struct ModeModelValue<'a> {
     access_kind: AccessKind,
     reference_input_price: Option<f64>,
     reference_output_price: Option<f64>,
+    reasoning_effort: Option<&'a str>,
 }
 
 fn effective_access_kind(provider: &ProviderConfig, offering: &CatalogOffering) -> AccessKind {
@@ -2619,6 +2621,7 @@ fn select_mode_models(
                 access_kind: candidate.offering.access_kind,
                 reference_input_price,
                 reference_output_price,
+                reasoning_effort: benchmark.and_then(|b| b.reasoning_effort.as_deref()),
             },
         });
     }
@@ -2687,7 +2690,10 @@ fn mode_model_entry(
         return json!({
             "id": id,
             "links": {"self": link},
-            "quality": candidate.quality,
+            "quality": {
+                "score": candidate.quality,
+            },
+            "reasoning_effort": candidate.value.reasoning_effort,
         });
     }
     let entry = json!({

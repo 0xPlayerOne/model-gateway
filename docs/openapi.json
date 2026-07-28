@@ -303,11 +303,18 @@
       },
       "ModelSummary": {
         "type": "object",
-        "required": ["id", "links", "quality"],
+        "required": ["id", "links", "quality", "reasoning_effort"],
         "properties": {
           "id": { "type": "string" },
           "links": { "$ref": "#/components/schemas/Links" },
-          "quality": { "type": "object" }
+          "quality": {
+            "type": "object",
+            "properties": {
+              "score": { "type": ["number", "null"] },
+              "rank": { "type": "integer" }
+            }
+          },
+          "reasoning_effort": { "type": ["string", "null"] }
         }
       },
       "Error": {
