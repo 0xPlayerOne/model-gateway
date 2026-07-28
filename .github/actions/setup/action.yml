@@ -34,6 +34,10 @@ inputs:
     description: Cache materialized JavaScript dependencies; auto skips large Bun node_modules trees and keeps compact link-based installs.
     required: false
     default: auto
+  cache-save:
+    description: Save restored JavaScript dependency and package caches after installation.
+    required: false
+    default: 'true'
   cache-packages:
     description: Restore JavaScript package-manager caches; auto skips large Bun lockfiles, or use true/false to override.
     required: false
@@ -431,7 +435,7 @@ runs:
         steps.profile.outputs.javascript_package_manager == 'pnpm' ||
         steps.profile.outputs.javascript_package_manager == 'yarn') &&
         hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.npmrc', '**/.yarnrc*', '**/.pnpmfile.cjs', '.github/template.yml', '.mise.toml', 'mise.lock') != ''
-      uses: actions/cache@v5
+      uses: actions/cache/restore@v5
       with:
         path: |
           **/node_modules
@@ -478,8 +482,9 @@ runs:
         restore-keys: |
           ${{ runner.os }}-corepack-
     - name: Cache JavaScript packages
+      id: javascript-packages
       if: inputs.install == 'true' && inputs.install-javascript == 'true' && steps.profile.outputs.javascript_packages_cache == 'true' && steps.profile.outputs.javascript == 'true' && hashFiles('**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json') != '' && steps.javascript-dependencies.outputs.cache-hit != 'true' && steps.javascript-bun-dependencies.outputs.restored != 'true'
-      uses: actions/cache@v5
+      uses: actions/cache/restore@v5
       with:
         path: |
           ~/.bun/install/cache
@@ -696,6 +701,7 @@ runs:
         fi
     - name: Save Bun dependencies
       if: >-
+        inputs.cache-save == 'true' &&
         steps.javascript-bun-cache.outputs.cacheable == 'true' &&
         !cancelled()
       continue-on-error: true
@@ -704,3 +710,41 @@ runs:
         path: |
           **/node_modules
         key: ${{ runner.os }}-javascript-installed-v4-bun-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/.npmrc', '.github/template.yml', '.mise.toml', 'mise.lock') }}
+    - name: Save installed JavaScript dependencies
+      if: >-
+        inputs.cache-save == 'true' &&
+        inputs.install == 'true' &&
+        inputs.install-javascript == 'true' &&
+        steps.javascript-dependencies.outputs.cache-hit != 'true' &&
+        steps.profile.outputs.javascript_dependencies == 'true' &&
+        (steps.profile.outputs.javascript_package_manager == 'pnpm' ||
+        steps.profile.outputs.javascript_package_manager == 'yarn') &&
+        !cancelled()
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          **/node_modules
+        key: ${{ runner.os }}-javascript-installed-v3-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.npmrc', '**/.yarnrc*', '**/.pnpmfile.cjs', '.github/template.yml', '.mise.toml', 'mise.lock') }}
+    - name: Save JavaScript packages
+      if: >-
+        inputs.cache-save == 'true' &&
+        inputs.install == 'true' &&
+        inputs.install-javascript == 'true' &&
+        steps.javascript-packages.outputs.cache-hit != 'true' &&
+        steps.profile.outputs.javascript_packages_cache == 'true' &&
+        steps.profile.outputs.javascript == 'true' &&
+        hashFiles('**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json') != '' &&
+        steps.javascript-dependencies.outputs.cache-hit != 'true' &&
+        steps.javascript-bun-dependencies.outputs.restored != 'true' &&
+        !cancelled()
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          ~/.bun/install/cache
+          ~/.cache/node/corepack
+          ~/.npm
+          ~/.cache/yarn
+          ~/.local/share/pnpm/store
+        key: ${{ runner.os }}-javascript-${{ hashFiles('**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json') }}

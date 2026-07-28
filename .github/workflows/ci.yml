@@ -40,6 +40,7 @@ jobs:
           install-python: false
           install-rust: false
           cache-build: false
+          cache-save: false
           cache-format: true
           task: format
       - name: Format
@@ -65,6 +66,7 @@ jobs:
           install: true
           install-python: false
           cache-build: false
+          cache-save: false
           cache-lint: true
           task: lint
       - name: Lint
@@ -89,6 +91,7 @@ jobs:
         with:
           install: true
           install-python: false
+          cache-save: false
           task: type_check
       - name: Type-Check
         if: steps.applicability.outputs.applicable == 'true'
@@ -112,6 +115,7 @@ jobs:
         with:
           install: true
           install-python: false
+          cache-save: false
           task: build
       - name: Build
         if: steps.applicability.outputs.applicable == 'true'
