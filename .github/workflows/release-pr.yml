@@ -11,7 +11,7 @@ permissions:
 jobs:
   release-pr:
     name: Release PR
-    uses: 0xPlayerOne/code-foundry/.github/workflows/reusable-release-pr.yml@v0.22.0
+    uses: 0xPlayerOne/code-foundry/.github/workflows/release-pr.yml@v0.22.0
     with:
       runner: ubuntu-slim
     secrets: inherit
