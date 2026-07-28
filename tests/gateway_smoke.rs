@@ -3913,6 +3913,38 @@ async fn paid_models_lists_only_paid_provider_offerings() {
             }],
         )
         .expect("free catalog");
+    store
+        .replace_pricing(
+            "models.dev",
+            PriceSourceKind::ModelsDev,
+            "Models.dev fixture",
+            &[PriceObservation {
+                source: "models.dev".to_owned(),
+                source_kind: PriceSourceKind::ModelsDev,
+                scope: PriceScope::RuntimeProvider,
+                provider_key: Some("paid".to_owned()),
+                model_id: "gpt-4o".to_owned(),
+                rates: PriceRates {
+                    input_price_per_million: Some(2.5),
+                    output_price_per_million: Some(10.0),
+                    cache_read_price_per_million: Some(1.25),
+                    cache_write_price_per_million: Some(3.75),
+                    ..PriceRates::default()
+                },
+                fetched_at: None,
+                as_of: None,
+                valid_from: None,
+                valid_until: None,
+                attribution: Some("fixture".to_owned()),
+            }],
+        )
+        .expect("pricing fixture");
+    let effective = store
+        .effective_price("paid", Some("openrouter"), "gpt-4o", None, 604_800)
+        .expect("effective fixture price")
+        .expect("fixture price observation");
+    assert_eq!(effective.cache_read_price_per_million, Some(1.25));
+    assert_eq!(effective.cache_write_price_per_million, Some(3.75));
 
     let gateway = spawn_gateway(config).await;
     let client = reqwest::Client::new();
@@ -3952,6 +3984,8 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         body["data"][0]["links"]["self"],
         "/v1/catalog/models/paid/gpt-4o"
     );
+    assert_eq!(body["data"][0]["price_per_million"]["cache_read"], 1.25);
+    assert_eq!(body["data"][0]["price_per_million"]["cache_write"], 3.75);
     assert_eq!(body["data"][0]["price_per_million"]["input"], 2.5);
 
     let detail: Value = client

@@ -129,6 +129,36 @@ pub struct PriceObservation {
     pub attribution: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct PricingCoverageSummary {
+    pub total: usize,
+    pub complete: usize,
+    pub incomplete: usize,
+    pub cache_read: usize,
+    pub cache_write: usize,
+}
+
+pub fn summarize_pricing(observations: &[PriceObservation]) -> PricingCoverageSummary {
+    let mut summary = PricingCoverageSummary {
+        total: observations.len(),
+        ..PricingCoverageSummary::default()
+    };
+    for observation in observations {
+        if observation.rates.is_complete() {
+            summary.complete += 1;
+        } else {
+            summary.incomplete += 1;
+        }
+        if observation.rates.cache_read_price_per_million.is_some() {
+            summary.cache_read += 1;
+        }
+        if observation.rates.cache_write_price_per_million.is_some() {
+            summary.cache_write += 1;
+        }
+    }
+    summary
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManualPriceImport {
@@ -349,7 +379,10 @@ pub fn fetch_models_dev() -> Result<Vec<PriceObservation>, String> {
 mod tests {
     use serde_json::json;
 
-    use super::{PriceObservation, PriceRates, PriceScope, PriceSourceKind, parse_models_dev};
+    use super::{
+        PriceObservation, PriceRates, PriceScope, PriceSourceKind, parse_models_dev,
+        summarize_pricing,
+    };
 
     #[test]
     fn models_dev_parser_preserves_provider_scope_and_zero_prices() {
@@ -376,6 +409,16 @@ mod tests {
         assert_eq!(
             observations[1].rates.cache_write_price_per_million,
             Some(4.0)
+        );
+        assert_eq!(
+            summarize_pricing(&observations),
+            super::PricingCoverageSummary {
+                total: 2,
+                complete: 2,
+                incomplete: 0,
+                cache_read: 1,
+                cache_write: 1,
+            }
         );
     }
 
