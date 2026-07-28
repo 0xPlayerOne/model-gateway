@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.9.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.8.0...v0.9.0) (2026-07-28)
+
+
+### Features
+
+* add OAuth subscription sidecar ([7eaa3c9](https://github.com/0xPlayerOne/model-gateway/commit/7eaa3c96e1bca3c9ad566164b74548ce157345ab))
+
+
+### Bug Fixes
+
+* avoid OAuth metadata logging ([5e8161d](https://github.com/0xPlayerOne/model-gateway/commit/5e8161d88dd6e3e1689a61034522d9ec745eb127))
+* avoid OAuth metadata logging ([5131280](https://github.com/0xPlayerOne/model-gateway/commit/51312803f80aa1304a64af76feae34291946b8b7))
+* **security:** provide stable Python audit gate ([770dff7](https://github.com/0xPlayerOne/model-gateway/commit/770dff77b9e5b87589758b267ce1f272077722b1))
+
+
+### Performance Improvements
+
+* **security:** use preinstalled Rust toolchain ([f8424c8](https://github.com/0xPlayerOne/model-gateway/commit/f8424c8e5168354a8bce7d90cd87a09da76b2e5b))
+
 ## [0.8.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.7.0...v0.8.0) (2026-07-28)
 
 
