@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.9.0...v0.10.0) (2026-07-28)
+
+
+### Features
+
+* improve model reconciliation and pricing coverage ([8d43001](https://github.com/0xPlayerOne/model-gateway/commit/8d430017c6e10b7e7553c3ffdbe1dde9b6725908))
+
 ## [0.9.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.8.0...v0.9.0) (2026-07-28)
 
 
