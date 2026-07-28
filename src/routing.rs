@@ -979,46 +979,8 @@ impl RoutingStore {
                AND (o.valid_from IS NULL OR o.valid_from <= ?3)
                AND (o.valid_until IS NULL OR o.valid_until > ?3)",
         )?;
-        let rows = statement.query_map(params![cutoff, model_id, now], |row| {
-            let source_kind = match row.get::<_, String>(1)?.as_str() {
-                "manual" => PriceSourceKind::Manual,
-                "provider_catalog" => PriceSourceKind::ProviderCatalog,
-                "official_api" => PriceSourceKind::OfficialApi,
-                "models_dev" => PriceSourceKind::ModelsDev,
-                "aggregate" => PriceSourceKind::Aggregate,
-                "benchmark" => PriceSourceKind::Benchmark,
-                other => return Err(rusqlite::Error::InvalidParameterName(other.to_owned())),
-            };
-            let scope = match row.get::<_, String>(2)?.as_str() {
-                "runtime_provider" => PriceScope::RuntimeProvider,
-                "provider_profile" => PriceScope::ProviderProfile,
-                "canonical" => PriceScope::Canonical,
-                other => return Err(rusqlite::Error::InvalidParameterName(other.to_owned())),
-            };
-            Ok(PriceObservation {
-                source: row.get(0)?,
-                source_kind,
-                scope,
-                provider_key: row.get(3)?,
-                model_id: row.get(4)?,
-                rates: crate::pricing::PriceRates {
-                    input_price_per_million: row.get(5)?,
-                    output_price_per_million: row.get(6)?,
-                    cache_read_price_per_million: row.get(7)?,
-                    cache_write_price_per_million: row.get(8)?,
-                    reasoning_price_per_million: row.get(9)?,
-                    input_audio_price_per_million: row.get(10)?,
-                    output_audio_price_per_million: row.get(11)?,
-                    request_price: row.get(12)?,
-                    modifiers: BTreeMap::new(),
-                },
-                fetched_at: row.get(16)?,
-                as_of: row.get(13)?,
-                valid_from: row.get(14)?,
-                valid_until: row.get(15)?,
-                attribution: None,
-            })
-        })?;
+        let rows =
+            statement.query_map(params![cutoff, model_id, now], price_observation_from_row)?;
         for row in rows {
             observations.push(row?);
         }
@@ -1087,46 +1049,10 @@ impl RoutingStore {
         };
         let canonical_id = normalize_price_id(canonical_id);
         let mut canonical_candidates = statement
-            .query_map(params![cutoff, canonical_id, now], |row| {
-                let source_kind = match row.get::<_, String>(1)?.as_str() {
-                    "manual" => PriceSourceKind::Manual,
-                    "provider_catalog" => PriceSourceKind::ProviderCatalog,
-                    "official_api" => PriceSourceKind::OfficialApi,
-                    "models_dev" => PriceSourceKind::ModelsDev,
-                    "aggregate" => PriceSourceKind::Aggregate,
-                    "benchmark" => PriceSourceKind::Benchmark,
-                    other => return Err(rusqlite::Error::InvalidParameterName(other.to_owned())),
-                };
-                let scope = match row.get::<_, String>(2)?.as_str() {
-                    "runtime_provider" => PriceScope::RuntimeProvider,
-                    "provider_profile" => PriceScope::ProviderProfile,
-                    "canonical" => PriceScope::Canonical,
-                    other => return Err(rusqlite::Error::InvalidParameterName(other.to_owned())),
-                };
-                Ok(PriceObservation {
-                    source: row.get(0)?,
-                    source_kind,
-                    scope,
-                    provider_key: row.get(3)?,
-                    model_id: row.get(4)?,
-                    rates: crate::pricing::PriceRates {
-                        input_price_per_million: row.get(5)?,
-                        output_price_per_million: row.get(6)?,
-                        cache_read_price_per_million: row.get(7)?,
-                        cache_write_price_per_million: row.get(8)?,
-                        reasoning_price_per_million: row.get(9)?,
-                        input_audio_price_per_million: row.get(10)?,
-                        output_audio_price_per_million: row.get(11)?,
-                        request_price: row.get(12)?,
-                        modifiers: BTreeMap::new(),
-                    },
-                    fetched_at: row.get(16)?,
-                    as_of: row.get(13)?,
-                    valid_from: row.get(14)?,
-                    valid_until: row.get(15)?,
-                    attribution: None,
-                })
-            })?
+            .query_map(
+                params![cutoff, canonical_id, now],
+                price_observation_from_row,
+            )?
             .collect::<Result<Vec<_>, _>>()?;
         canonical_candidates.retain(|observation| {
             observation.rates.is_complete()
@@ -2285,6 +2211,47 @@ fn database_bool(value: Option<i64>) -> Option<bool> {
     value.map(|value| value != 0)
 }
 
+fn price_observation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PriceObservation> {
+    let source_kind = match row.get::<_, String>(1)?.as_str() {
+        "manual" => PriceSourceKind::Manual,
+        "provider_catalog" => PriceSourceKind::ProviderCatalog,
+        "official_api" => PriceSourceKind::OfficialApi,
+        "models_dev" => PriceSourceKind::ModelsDev,
+        "aggregate" => PriceSourceKind::Aggregate,
+        "benchmark" => PriceSourceKind::Benchmark,
+        other => return Err(rusqlite::Error::InvalidParameterName(other.to_owned())),
+    };
+    let scope = match row.get::<_, String>(2)?.as_str() {
+        "runtime_provider" => PriceScope::RuntimeProvider,
+        "provider_profile" => PriceScope::ProviderProfile,
+        "canonical" => PriceScope::Canonical,
+        other => return Err(rusqlite::Error::InvalidParameterName(other.to_owned())),
+    };
+    Ok(PriceObservation {
+        source: row.get(0)?,
+        source_kind,
+        scope,
+        provider_key: row.get(3)?,
+        model_id: row.get(4)?,
+        rates: crate::pricing::PriceRates {
+            input_price_per_million: row.get(5)?,
+            output_price_per_million: row.get(6)?,
+            cache_read_price_per_million: row.get(7)?,
+            cache_write_price_per_million: row.get(8)?,
+            reasoning_price_per_million: row.get(9)?,
+            input_audio_price_per_million: row.get(10)?,
+            output_audio_price_per_million: row.get(11)?,
+            request_price: row.get(12)?,
+            modifiers: BTreeMap::new(),
+        },
+        fetched_at: row.get(16)?,
+        as_of: row.get(13)?,
+        valid_from: row.get(14)?,
+        valid_until: row.get(15)?,
+        attribution: None,
+    })
+}
+
 fn expire_reservations(
     transaction: &rusqlite::Transaction<'_>,
     now: i64,
@@ -2558,7 +2525,9 @@ mod tests {
     use crate::pricing::{PriceObservation, PriceRates, PriceScope, PriceSourceKind};
     use crate::providers::AccountLimit;
 
-    use super::{AccessKind, CatalogRecord, ReservationOutcome, RoutingStore};
+    use super::{
+        AccessKind, CatalogRecord, ReservationOutcome, RoutingStore, price_observation_from_row,
+    };
 
     #[test]
     fn catalog_replacement_is_atomic_per_provider() {
@@ -2810,6 +2779,82 @@ mod tests {
             valid_until: None,
             attribution: None,
         }
+    }
+
+    #[test]
+    fn price_observation_row_mapping_preserves_all_fields() {
+        let connection = rusqlite::Connection::open_in_memory().expect("connection");
+        connection
+            .execute_batch(
+                "CREATE TABLE price_row (
+                    source TEXT, source_kind TEXT, scope TEXT, provider_key TEXT,
+                    model_id TEXT, input_price REAL, output_price REAL,
+                    cache_read_price REAL, cache_write_price REAL, reasoning_price REAL,
+                    input_audio_price REAL, output_audio_price REAL, request_price REAL,
+                    as_of TEXT, valid_from INTEGER, valid_until INTEGER, fetched_at INTEGER
+                );
+                INSERT INTO price_row VALUES
+                    ('manual-overrides', 'manual', 'runtime_provider', 'provider-a',
+                     'model-a', 1.0, 2.0, 0.5, 0.25, 0.1, 3.0, 4.0, 0.01,
+                     '2026-07-28', 10, 20, 30);",
+            )
+            .expect("price row");
+
+        let observation = connection
+            .query_row("SELECT * FROM price_row", [], price_observation_from_row)
+            .expect("observation");
+        assert_eq!(observation.source, "manual-overrides");
+        assert_eq!(observation.source_kind, PriceSourceKind::Manual);
+        assert_eq!(observation.scope, PriceScope::RuntimeProvider);
+        assert_eq!(observation.provider_key.as_deref(), Some("provider-a"));
+        assert_eq!(observation.model_id, "model-a");
+        assert_eq!(observation.rates.input_price_per_million, Some(1.0));
+        assert_eq!(observation.rates.request_price, Some(0.01));
+        assert_eq!(observation.as_of.as_deref(), Some("2026-07-28"));
+        assert_eq!(observation.valid_from, Some(10));
+        assert_eq!(observation.valid_until, Some(20));
+        assert_eq!(observation.fetched_at, Some(30));
+        assert!(observation.rates.modifiers.is_empty());
+    }
+
+    #[test]
+    fn price_observation_row_mapping_rejects_unknown_enums() {
+        let connection = rusqlite::Connection::open_in_memory().expect("connection");
+        connection
+            .execute_batch(
+                "CREATE TABLE price_row (
+                    source TEXT, source_kind TEXT, scope TEXT, provider_key TEXT,
+                    model_id TEXT, input_price REAL, output_price REAL,
+                    cache_read_price REAL, cache_write_price REAL, reasoning_price REAL,
+                    input_audio_price REAL, output_audio_price REAL, request_price REAL,
+                    as_of TEXT, valid_from INTEGER, valid_until INTEGER, fetched_at INTEGER
+                );
+                INSERT INTO price_row VALUES
+                    ('source', 'unknown', 'runtime_provider', NULL, 'model', NULL, NULL,
+                     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1);",
+            )
+            .expect("price row");
+        let error = connection
+            .query_row("SELECT * FROM price_row", [], price_observation_from_row)
+            .expect_err("unknown source kind");
+        assert!(matches!(
+            error,
+            rusqlite::Error::InvalidParameterName(value) if value == "unknown"
+        ));
+
+        connection
+            .execute(
+                "UPDATE price_row SET source_kind = 'manual', scope = 'unknown'",
+                [],
+            )
+            .expect("invalid scope row");
+        let error = connection
+            .query_row("SELECT * FROM price_row", [], price_observation_from_row)
+            .expect_err("unknown scope");
+        assert!(matches!(
+            error,
+            rusqlite::Error::InvalidParameterName(value) if value == "unknown"
+        ));
     }
 
     #[test]
