@@ -6,7 +6,7 @@
 
 This gateway is designed to **eliminate cache misses**:
 
-1. **One model per mode** — each mode (auto-free, auto-efficient, auto-balanced, auto-frontier) picks ONE model from the Pareto frontier. No task-specific routing, no complexity tiers.
+1. **One primary model per mode** — each mode (auto-free, auto-efficient, auto-balanced, auto-frontier) picks one primary from the Pareto frontier. Eligible dominated candidates remain available only as failure fallbacks. No task-specific routing or complexity tiers.
 2. **Session pinning** — the first successful request pins the session to `(provider, model)`. All subsequent requests use the same model. Pin survives transient rate limits (429). Only permanent auth failures (401/403) destroy the pin.
 3. **Composite quality score** — `0.8*intelligence + 0.1*coding + 0.1*agentic` gives a well-rounded model for any task. No re-routing based on task type.
 4. **Pareto frontier handles reasoning effort** — for models with multiple variants (e.g., GPT 5.6 Luna/Sol/Sol Max), the Pareto frontier picks the most efficient one. Sol Max is dominated by Sol (higher cost, marginal quality gain).
@@ -93,9 +93,12 @@ Selects the best free model. Filter + rank pipeline:
    - For free models (cost=0), degenerates to quality vs latency
    - Faster models with sufficient quality beat slower overqualified models
 5. **Sort** — pinned first → cost → latency → quality
-6. **Fallback** — unbenchmarked models → local
+6. **Fallback** — eligible dominated models → unbenchmarked models → local
 
 Free-tier eligibility rules are provider-specific. See [providers.md](providers.md).
+Free catalog and route responses expose effective input/output prices as zero
+with `source: "provider_free"`. Benchmark list prices remain benchmark metadata
+and never affect free routing cost or classify a free offering as paid.
 
 ## `auto-efficient`
 
@@ -108,8 +111,11 @@ Best bang-for-buck. Quality floor: **40**. Pipeline:
 5. **Pareto ranking** — `pareto_rank(composite_quality, cost_microusd, latency)`
    - Removes dominated candidates (worse on all three axes)
    - Sorts non-dominated by cost → latency → quality
-6. **Session pin** — pinned models sort first
-7. **Fallback** — `auto-free` → `local`
+6. **Eligible fallback fill** — after the Pareto candidates, retain dominated
+   candidates that still satisfy the mode's quality, capability, identity, and
+   pricing requirements
+7. **Session pin** — pinned models sort first within their rank group
+8. **Fallback** — `auto-free` → `local`
 
 Expected cost is computed from the offering's input/output prices and estimated request tokens. Cost-based quota windows impose spend caps.
 
@@ -146,7 +152,7 @@ When a request succeeds, the session is pinned to `(provider, model)` for 30 min
 
 ### `/v1/free-models`
 
-Returns all free models filtered by the quality bar. Supports `?provider=`, `?task=`, `?limit=` query parameters. Task filters are for discovery/rankings display — routing uses composite quality.
+Returns all free models filtered by the quality bar. Supports `?provider=`, `?task=`, `?limit=` query parameters. Task filters are for discovery/rankings display — routing uses composite quality. Every returned offering has an effective zero price with `source: "provider_free"`; benchmark list prices are not exposed as offering prices.
 
 ### `/v1/paid-models`
 
@@ -154,7 +160,7 @@ Returns all non-free models from paid/subscription providers. Supports `?task=`,
 
 ### `/v1/auto-models`
 
-Shows the current routing mode configuration with the top model selections for each mode. Returns primary + up to 2 fallbacks per mode using composite quality Pareto ranking. Supports `?route=free|efficient|balanced|frontier` to filter a single mode.
+Shows the current routing mode configuration with the top model selections for each mode. Returns a Pareto-frontier primary plus up to two additional eligible candidates as fallbacks. A dominated candidate may be a fallback but never displaces a non-dominated primary. Supports `?route=free|efficient|balanced|frontier` to filter a single mode.
 
 ### `/v1/rankings`
 
