@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
-use axum::extract::rejection::BytesRejection;
+use axum::extract::rejection::{BytesRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -15,6 +15,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
@@ -196,13 +197,21 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
     Ok(Router::new()
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
+        .route(
+            "/openapi.json",
+            get(|| async {
+                (
+                    [("content-type", "application/json; charset=utf-8")],
+                    include_str!("../docs/openapi.json"),
+                )
+            }),
+        )
         .route("/v1/models", get(list_models))
-        .route("/v1/models/{*model_id}", get(get_model))
+        .route("/v1/catalog/models", get(list_catalog_models))
+        .route("/v1/catalog/models/{*model_id}", get(get_catalog_model))
         .route("/v1/providers", get(list_providers))
         .route("/v1/rankings", get(list_rankings))
         .route("/v1/auto-models", get(list_auto_models))
-        .route("/v1/free-models", get(list_free_models))
-        .route("/v1/paid-models", get(list_paid_models))
         .route("/v1/chat/completions", post(chat_completions))
         .layer(DefaultBodyLimit::max(state.config.server.max_body_bytes))
         .with_state(state))
@@ -1293,19 +1302,21 @@ struct AutoModelsQuery {
     route: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct FreeModelsQuery {
-    task: Option<String>,
-    limit: Option<usize>,
-    provider: Option<String>,
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CatalogAccess {
+    Free,
+    Paid,
+    All,
 }
 
 #[derive(Debug, Deserialize)]
-struct PaidModelsQuery {
+struct CatalogModelsQuery {
+    access: Option<CatalogAccess>,
     task: Option<String>,
-    limit: Option<usize>,
     provider: Option<String>,
-    page: Option<usize>,
+    limit: Option<usize>,
+    cursor: Option<String>,
     view: Option<ModelView>,
 }
 
@@ -1449,6 +1460,7 @@ struct CatalogModelEntry<'a> {
 
 fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
     let has_zero_effective_price = entry.offering.access_kind.has_zero_effective_price();
+    let model_id = model_resource_id(entry.offering);
     let reference_input = entry
         .offering
         .input_price_per_million
@@ -1487,6 +1499,11 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
             .or_else(|| entry.benchmark.and_then(|b| b.output_price_per_million))
     };
     json!({
+        "id": model_id,
+        "object": "model",
+        "links": {
+            "self": model_detail_path(entry.offering),
+        },
         "model": {
             "name": entry.offering.model,
             "provider": entry.offering.provider,
@@ -1562,12 +1579,47 @@ fn model_resource_id(offering: &CatalogOffering) -> String {
 }
 
 fn model_detail_path(offering: &CatalogOffering) -> String {
-    format!("/v1/models/{}", model_resource_id(offering))
+    catalog_model_link(offering)
 }
 
 fn catalog_model_summary_json(entry: &CatalogModelEntry) -> Value {
-    let full = catalog_model_json(entry);
     let model_id = model_resource_id(entry.offering);
+    let has_zero_effective_price = entry.offering.access_kind.has_zero_effective_price();
+    let input_price = if has_zero_effective_price {
+        Some(0.0)
+    } else {
+        entry
+            .price
+            .as_ref()
+            .map(|price| price.input_price_per_million)
+            .or(entry.offering.input_price_per_million)
+            .or_else(|| entry.benchmark.and_then(|b| b.input_price_per_million))
+    };
+    let output_price = if has_zero_effective_price {
+        Some(0.0)
+    } else {
+        entry
+            .price
+            .as_ref()
+            .map(|price| price.output_price_per_million)
+            .or(entry.offering.output_price_per_million)
+            .or_else(|| entry.benchmark.and_then(|b| b.output_price_per_million))
+    };
+    let price_source = if has_zero_effective_price {
+        Some(match entry.offering.access_kind {
+            AccessKind::ZeroPrice => "provider_free",
+            AccessKind::QuotaLimitedFreeTier => "free_tier",
+            AccessKind::SubscriptionIncluded => "subscription",
+            AccessKind::Paid | AccessKind::Unknown => "unknown",
+        })
+    } else {
+        entry.price.as_ref().map(|price| price.source.as_str())
+    };
+    let overage = match entry.offering.access_kind {
+        AccessKind::ZeroPrice | AccessKind::QuotaLimitedFreeTier => "gateway_blocked",
+        AccessKind::SubscriptionIncluded => "subscription_limited",
+        AccessKind::Paid | AccessKind::Unknown => "paid",
+    };
     json!({
         "id": model_id,
         "object": "model",
@@ -1577,49 +1629,26 @@ fn catalog_model_summary_json(entry: &CatalogModelEntry) -> Value {
             "score": entry.composite_quality,
             "rank": entry.rank,
         },
-        "capabilities": full["capabilities"].clone(),
+        "capabilities": {
+            "context_length": entry.offering.context_length,
+            "supports_tools": entry.offering.supports_tools,
+            "supports_vision": entry.offering.supports_vision,
+            "supports_structured_output": entry.offering.supports_structured_output,
+        },
         "pricing": {
-            "input": full["price_per_million"]["input"].clone(),
-            "output": full["price_per_million"]["output"].clone(),
-            "source": full["price_per_million"]["source"].clone(),
-            "eligible": full["price_per_million"]["pricing_eligible"].clone(),
+            "input": input_price,
+            "output": output_price,
+            "source": price_source,
+            "eligible": input_price.is_some() && output_price.is_some(),
         },
         "access": {
-            "kind": full["access"]["kind"].clone(),
-            "overage": full["access"]["overage"].clone(),
+            "kind": entry.offering.access_kind,
+            "overage": overage,
         },
         "links": {
             "self": model_detail_path(entry.offering),
         },
     })
-}
-
-fn ranked_paid_candidates(
-    mut candidates: Vec<ModelCandidate>,
-    task: TaskKind,
-) -> Vec<ModelCandidate> {
-    candidates.sort_by(|left, right| {
-        let left_quality = left.benchmark.as_ref().and_then(|b| quality_for(b, task));
-        let right_quality = right.benchmark.as_ref().and_then(|b| quality_for(b, task));
-        match (left_quality, right_quality) {
-            (Some(left_quality), Some(right_quality)) => right_quality
-                .total_cmp(&left_quality)
-                .then_with(|| left.offering.model.cmp(&right.offering.model)),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => left.offering.model.cmp(&right.offering.model),
-        }
-        .then_with(|| left.offering.provider.cmp(&right.offering.provider))
-    });
-
-    let mut seen = std::collections::HashSet::new();
-    candidates.retain(|candidate| {
-        seen.insert((
-            candidate.offering.provider.clone(),
-            normalize_identifier(&candidate.offering.model),
-        ))
-    });
-    candidates
 }
 
 async fn load_paid_candidates(
@@ -1661,7 +1690,312 @@ async fn load_paid_candidates(
     ))
 }
 
-fn catalog_model_response(candidate: &ModelCandidate, rank: usize, view: ModelView) -> Value {
+async fn load_free_candidates(
+    state: &AppState,
+    provider_filter: Option<&str>,
+) -> Result<(Vec<ModelCandidate>, BTreeMap<String, AccountLimitSnapshot>), ()> {
+    let max_age = state.config.server.catalog_max_age_seconds;
+    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
+    let (offerings, benchmarks, account_limits) = tokio::try_join!(
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.all_candidates(max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.benchmark_models(benchmark_max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.account_limits()
+        })
+    )
+    .map_err(|_| ())?;
+
+    let mut benchmark_map = BTreeMap::new();
+    for benchmark in benchmarks {
+        benchmark_map
+            .entry(benchmark.id.clone())
+            .or_insert_with(Vec::new)
+            .push(benchmark);
+    }
+    let mappings = identity_mapping_indexes(&state.routing);
+    let candidates = collect_free_candidates(
+        &offerings,
+        &benchmark_map,
+        FreeCandidateContext {
+            providers: &state.config.providers,
+            runtimes: &state.providers,
+            cfg: &state.config.server,
+            provider_filter,
+            mappings: &mappings,
+            account_limits: &account_limits,
+        },
+    );
+    Ok((candidates, account_limits))
+}
+
+#[derive(Debug)]
+struct CatalogSnapshot {
+    candidates: Vec<ModelCandidate>,
+    account_limits: BTreeMap<String, AccountLimitSnapshot>,
+    token: String,
+    last_modified: i64,
+}
+
+fn catalog_snapshot(
+    mut candidates: Vec<ModelCandidate>,
+    account_limits: BTreeMap<String, AccountLimitSnapshot>,
+    access: CatalogAccess,
+    task: TaskKind,
+) -> CatalogSnapshot {
+    candidates.sort_by(|left, right| {
+        let left_quality = left.benchmark.as_ref().and_then(|b| quality_for(b, task));
+        let right_quality = right.benchmark.as_ref().and_then(|b| quality_for(b, task));
+        right_quality
+            .is_some()
+            .cmp(&left_quality.is_some())
+            .then_with(|| match (left_quality, right_quality) {
+                (Some(left), Some(right)) => right.total_cmp(&left),
+                _ => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| left.offering.provider.cmp(&right.offering.provider))
+            .then_with(|| left.offering.model.cmp(&right.offering.model))
+    });
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|candidate| {
+        seen.insert((
+            candidate.offering.provider.clone(),
+            normalize_identifier(&candidate.offering.model),
+        ))
+    });
+
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{:?}:{:?}", access, task));
+    hasher.update(format!("{:?}", account_limits).as_bytes());
+    let mut last_modified = 0;
+    for candidate in &candidates {
+        hasher.update(format!("{:?}", candidate).as_bytes());
+        last_modified = last_modified.max(candidate.offering.refreshed_at);
+        if let Some(price) = candidate.price.as_ref() {
+            last_modified = last_modified.max(price.fetched_at.unwrap_or_default());
+        }
+    }
+    let token = digest_hex(hasher.finalize());
+    for account in account_limits.values() {
+        last_modified = last_modified.max(account.fetched_at);
+    }
+    CatalogSnapshot {
+        candidates,
+        account_limits,
+        token,
+        last_modified,
+    }
+}
+
+fn digest_hex(digest: impl AsRef<[u8]>) -> String {
+    digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn catalog_access_name(access: CatalogAccess) -> &'static str {
+    match access {
+        CatalogAccess::Free => "free",
+        CatalogAccess::Paid => "paid",
+        CatalogAccess::All => "all",
+    }
+}
+
+fn encode_uri_component(value: &str, allow_slash: bool) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'.' | b'_' | b'~')
+            || (allow_slash && byte == b'/')
+        {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn catalog_model_link(offering: &CatalogOffering) -> String {
+    format!(
+        "/v1/catalog/models/{}/{}",
+        encode_uri_component(&offering.provider, false),
+        encode_uri_component(&offering.model, false)
+    )
+}
+
+fn catalog_links(
+    query: &CatalogModelsQuery,
+    access: CatalogAccess,
+    snapshot: &str,
+    offset: usize,
+    limit: usize,
+    total: usize,
+) -> Value {
+    let query_url = |cursor: Option<String>| {
+        let mut params = vec![format!("access={}", catalog_access_name(access))];
+        if let Some(task) = query.task.as_deref() {
+            params.push(format!("task={}", encode_uri_component(task, false)));
+        }
+        if let Some(provider) = query.provider.as_deref() {
+            params.push(format!(
+                "provider={}",
+                encode_uri_component(provider, false)
+            ));
+        }
+        params.push(format!("limit={limit}"));
+        if let Some(view) = query.view {
+            params.push(format!(
+                "view={}",
+                if view.is_full() { "full" } else { "summary" }
+            ));
+        }
+        if let Some(cursor) = cursor {
+            params.push(format!("cursor={}", encode_uri_component(&cursor, false)));
+        }
+        format!("/v1/catalog/models?{}", params.join("&"))
+    };
+    let mut links = serde_json::Map::from_iter([(
+        "self".to_owned(),
+        Value::String(query_url(query.cursor.clone())),
+    )]);
+    if offset > 0 {
+        let previous = offset.saturating_sub(limit);
+        links.insert(
+            "prev".to_owned(),
+            Value::String(query_url(Some(format!("{snapshot}:{previous}")))),
+        );
+    }
+    if offset.saturating_add(limit) < total {
+        let next = offset.saturating_add(limit);
+        links.insert(
+            "next".to_owned(),
+            Value::String(query_url(Some(format!("{snapshot}:{next}")))),
+        );
+    }
+    Value::Object(links)
+}
+
+fn cached_json_response(value: Value, request_headers: &HeaderMap, last_modified: i64) -> Response {
+    let body = serde_json::to_vec(&value).unwrap_or_else(|_| b"{}".to_vec());
+    let etag = format!("\"{}\"", digest_hex(Sha256::digest(&body)));
+    let modified_at = if last_modified > 0 {
+        UNIX_EPOCH + Duration::from_secs(last_modified as u64)
+    } else {
+        SystemTime::now()
+    };
+    let last_modified = httpdate::fmt_http_date(modified_at);
+    let cache_control = "private, max-age=30, must-revalidate";
+    let not_modified = if let Some(if_none_match) = request_headers
+        .get("if-none-match")
+        .and_then(|value| value.to_str().ok())
+    {
+        if_none_match
+            .split(',')
+            .any(|candidate| candidate.trim() == etag)
+    } else {
+        request_headers
+            .get("if-modified-since")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| httpdate::parse_http_date(value).ok())
+            .and_then(|since| {
+                httpdate::parse_http_date(&last_modified)
+                    .ok()
+                    .map(|modified| modified <= since)
+            })
+            .unwrap_or(false)
+    };
+    if not_modified {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header("etag", etag)
+            .header("last-modified", last_modified)
+            .header("cache-control", cache_control)
+            .body(Body::empty())
+            .expect("valid cache response");
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .header("etag", etag)
+        .header("last-modified", last_modified)
+        .header("cache-control", cache_control)
+        .body(Body::from(body))
+        .expect("valid JSON response")
+}
+
+fn parse_catalog_task(task: Option<&str>) -> Result<TaskKind, Box<Response>> {
+    match task.unwrap_or("general") {
+        "general" => Ok(TaskKind::General),
+        "coding" => Ok(TaskKind::Coding),
+        "agentic" => Ok(TaskKind::Agentic),
+        _ => Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": "task must be one of general, coding, agentic",
+                        "type": "invalid_request_error",
+                        "code": "invalid_task"
+                    }
+                })),
+            )
+                .into_response(),
+        )),
+    }
+}
+
+fn catalog_query_error(rejection: QueryRejection) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": {
+                "message": rejection.to_string(),
+                "type": "invalid_request_error",
+                "code": "invalid_query"
+            }
+        })),
+    )
+        .into_response()
+}
+
+async fn load_catalog_snapshot(
+    state: &AppState,
+    access: CatalogAccess,
+    provider_filter: Option<&str>,
+    task: TaskKind,
+) -> Result<CatalogSnapshot, ()> {
+    let (mut candidates, account_limits) = match access {
+        CatalogAccess::Free => load_free_candidates(state, provider_filter).await?,
+        CatalogAccess::Paid => (
+            load_paid_candidates(state, provider_filter).await?,
+            BTreeMap::new(),
+        ),
+        CatalogAccess::All => {
+            let paid = load_paid_candidates(state, provider_filter).await?;
+            let (mut free, account_limits) = load_free_candidates(state, provider_filter).await?;
+            let mut candidates = paid;
+            candidates.append(&mut free);
+            (candidates, account_limits)
+        }
+    };
+    if matches!(access, CatalogAccess::Paid) {
+        candidates.retain(|candidate| candidate.offering.access_kind.is_paid_route_eligible());
+    }
+    Ok(catalog_snapshot(candidates, account_limits, access, task))
+}
+
+fn catalog_model_response(
+    candidate: &ModelCandidate,
+    rank: usize,
+    account_limit: Option<AccountLimitSnapshot>,
+    view: ModelView,
+) -> Value {
     let composite_quality = candidate.benchmark.as_ref().and_then(composite_quality);
     let effort_level = candidate
         .benchmark
@@ -1676,7 +2010,7 @@ fn catalog_model_response(candidate: &ModelCandidate, rank: usize, view: ModelVi
         effort_level,
         parameters: None,
         match_kind: candidate.match_kind,
-        account_limit: None,
+        account_limit,
     };
     if view.is_full() {
         catalog_model_json(&entry)
@@ -1685,38 +2019,7 @@ fn catalog_model_response(candidate: &ModelCandidate, rank: usize, view: ModelVi
     }
 }
 
-fn paged_links(query: &PaidModelsQuery, page: usize, pages: usize) -> Value {
-    let page_url = |target_page: usize| {
-        let mut params = vec![format!("page={target_page}")];
-        if let Some(limit) = query.limit {
-            params.push(format!("limit={limit}"));
-        }
-        if let Some(task) = query.task.as_deref() {
-            params.push(format!("task={task}"));
-        }
-        if let Some(provider) = query.provider.as_deref() {
-            params.push(format!("provider={provider}"));
-        }
-        if let Some(view) = query.view {
-            params.push(format!(
-                "view={}",
-                if view.is_full() { "full" } else { "summary" }
-            ));
-        }
-        format!("/v1/paid-models?{}", params.join("&"))
-    };
-
-    let mut links =
-        serde_json::Map::from_iter([("self".to_owned(), Value::String(page_url(page)))]);
-    if page > 1 {
-        links.insert("prev".to_owned(), Value::String(page_url(page - 1)));
-    }
-    if page < pages {
-        links.insert("next".to_owned(), Value::String(page_url(page + 1)));
-    }
-    Value::Object(links)
-}
-
+#[derive(Debug)]
 struct ModelCandidate {
     quality: Option<f64>,
     benchmark: Option<BenchmarkModel>,
@@ -2409,10 +2712,16 @@ fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
     })
 }
 
-async fn list_free_models(
+async fn list_catalog_models(
     State(state): State<AppState>,
-    Query(query): Query<FreeModelsQuery>,
+    headers: HeaderMap,
+    query: Result<Query<CatalogModelsQuery>, QueryRejection>,
 ) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(rejection) => return catalog_query_error(rejection),
+    };
+    let access = query.access.unwrap_or(CatalogAccess::All);
     let provider_filter = match query.provider.as_deref() {
         None | Some("all") => None,
         Some(provider) => Some(provider),
@@ -2432,341 +2741,119 @@ async fn list_free_models(
                 .into_response();
         }
     }
-    let task = match query.task.as_deref().unwrap_or("general") {
-        "general" => TaskKind::General,
-        "coding" => TaskKind::Coding,
-        "agentic" => TaskKind::Agentic,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": "task must be one of general, coding, agentic",
-                        "type": "invalid_request_error",
-                        "code": "invalid_task"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-    let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
-    let max_age = state.config.server.catalog_max_age_seconds;
-    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
-
-    let (offerings, benchmarks, account_limits) = match tokio::try_join!(
-        routing_operation(state.routing.clone(), move |routing| {
-            routing.all_candidates(max_age)
-        }),
-        routing_operation(state.routing.clone(), move |routing| {
-            routing.benchmark_models(benchmark_max_age)
-        }),
-        routing_operation(state.routing.clone(), move |routing| {
-            routing.account_limits()
-        })
-    ) {
-        Ok(v) => v,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {
-                        "message": "routing state is unavailable",
-                        "type": "server_error",
-                        "code": "routing_state_unavailable"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let mut benchmark_map = BTreeMap::new();
-    for b in &benchmarks {
-        benchmark_map
-            .entry(b.id.clone())
-            .or_insert_with(Vec::new)
-            .push(b.clone());
-    }
-    let mappings = identity_mapping_indexes(&state.routing);
-
-    let candidates = collect_free_candidates(
-        &offerings,
-        &benchmark_map,
-        FreeCandidateContext {
-            providers: &state.config.providers,
-            runtimes: &state.providers,
-            cfg: &state.config.server,
-            provider_filter,
-            mappings: &mappings,
-            account_limits: &account_limits,
-        },
-    );
-
-    let mut providers = BTreeMap::new();
-    let mut data = Vec::new();
-
-    for candidate in &candidates {
-        let Some(config) = state.config.providers.get(&candidate.offering.provider) else {
-            continue;
-        };
-
-        let reference = quota_reference(config, &candidate.offering.model);
-        let limits = reference
-            .as_ref()
-            .map(|r| r.rules.clone())
-            .unwrap_or_default();
-        let limit_kind = reference.as_ref().map(|r| r.as_of).unwrap_or("unknown");
-        let source_url = reference.as_ref().map(|r| r.source_url);
-
-        providers.entry(candidate.offering.provider.clone()).or_insert_with(|| {
-            json!({
-                "name": config.profile
-                    .map(|profile| profile.definition().display_name.to_owned())
-                    .unwrap_or_else(|| candidate.offering.provider.clone()),
-                "billing_mode": match config.billing_mode {
-                    BillingMode::Free => "free",
-                    BillingMode::Paid => "paid",
-                    BillingMode::Subscription => "subscription",
-                },
-                "limits": limits.iter().map(|limit| json!({
-                    "kind": serde_json::to_string(&limit.kind).unwrap_or_else(|_| "unknown".to_owned()).trim_matches('"'),
-                    "limit": limit.limit,
-                    "window_seconds": limit.window_seconds,
-                })).collect::<Vec<_>>(),
-                "limit_status": limit_kind,
-                "limit_reference": source_url,
-            })
-        });
-
-        data.push((
-            candidate
-                .benchmark
-                .as_ref()
-                .and_then(|benchmark| quality_for(benchmark, task)),
-            candidate.benchmark.clone(),
-            candidate.offering.clone(),
-            limit_kind,
-            source_url,
-            candidate.match_kind,
-        ));
-    }
-
-    // Auto-route models (kilo-auto/free, openrouter/free, orcarouter/free, etc.)
-    // can't be benchmarked individually. Assign them the best quality of any
-    // non-auto-route model from the same provider, so they rank at the top
-    // of their provider's offerings.
-    // Note: :free suffixed models (kat-coder-pro-v2.5:free) are regular free-tier
-    // models with benchmarks — they are NOT auto-routes.
-    let mut best_per_provider: BTreeMap<String, (f64, BenchmarkModel)> = BTreeMap::new();
-    for (quality, benchmark, offering, _, _, _) in &data {
-        if is_provider_auto_route(&offering.model) {
-            continue;
-        }
-        if let (Some(quality), Some(benchmark)) = (quality, benchmark) {
-            let entry = best_per_provider
-                .entry(offering.provider.clone())
-                .or_insert_with(|| (*quality, benchmark.clone()));
-            if *quality > entry.0 {
-                *entry = (*quality, benchmark.clone());
-            }
-        }
-    }
-    for entry in &mut data {
-        if entry.0.is_some() || !is_provider_auto_route(&entry.2.model) {
-            continue;
-        }
-        if let Some((best_q, best_bm)) = best_per_provider.get(&entry.2.provider) {
-            entry.0 = Some(*best_q);
-            entry.1 = Some(best_bm.clone());
-        }
-    }
-
-    data.sort_by(
-        |(left_q, _, left_o, left_kind, _, _), (right_q, _, right_o, right_kind, _, _)| {
-            let left_benchmarked = left_q.is_some();
-            let right_benchmarked = right_q.is_some();
-            right_benchmarked
-                .cmp(&left_benchmarked)
-                .then_with(|| right_q.unwrap_or(0.0).total_cmp(&left_q.unwrap_or(0.0)))
-                .then_with(|| {
-                    let left_known = *left_kind != "unknown";
-                    let right_known = *right_kind != "unknown";
-                    right_known.cmp(&left_known)
-                })
-                .then_with(|| left_o.provider.cmp(&right_o.provider))
-                .then_with(|| left_o.model.cmp(&right_o.model))
-        },
-    );
-
-    // Keep the highest-ranked benchmark variant per provider offering while
-    // preserving alternatives from providers with different limits.
-    let mut seen = std::collections::HashSet::new();
-    data.retain(|(_, _, offering, _, _, _)| {
-        seen.insert((
-            offering.provider.clone(),
-            normalize_identifier(&offering.model),
-        ))
-    });
-
-    let ranked = data
-        .into_iter()
-        .take(limit)
-        .enumerate()
-        .map(
-            |(index, (_quality, benchmark, offering, _limit_kind, _source_url, match_kind))| {
-                let composite_quality = benchmark.as_ref().and_then(composite_quality);
-                let effort_level = benchmark
-                    .as_ref()
-                    .and_then(|b| b.reasoning_effort.as_deref());
-                catalog_model_json(&CatalogModelEntry {
-                    offering: &offering,
-                    benchmark: benchmark.as_ref(),
-                    price: None,
-                    composite_quality,
-                    rank: index + 1,
-                    effort_level,
-                    parameters: None,
-                    match_kind,
-                    account_limit: account_limits.get(&offering.provider).copied(),
-                })
-            },
-        )
-        .collect::<Vec<_>>();
-
-    Json(json!({
-        "object": "free-models",
-        "task": task.as_str(),
-        "provider": provider_filter,
-        "catalog_max_age_seconds": max_age,
-        "benchmark_max_age_seconds": benchmark_max_age,
-        "providers": providers,
-        "data": ranked
-    }))
-    .into_response()
-}
-
-async fn list_paid_models(
-    State(state): State<AppState>,
-    Query(query): Query<PaidModelsQuery>,
-) -> Response {
-    let provider_filter = match query.provider.as_deref() {
-        None | Some("all") => None,
-        Some(provider) => Some(provider),
-    };
-    if let Some(provider) = provider_filter {
-        if !state.config.providers.contains_key(provider) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": format!("unknown provider '{provider}'"),
-                        "type": "invalid_request_error",
-                        "code": "invalid_provider"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    }
-    let task = match query.task.as_deref().unwrap_or("general") {
-        "general" => TaskKind::General,
-        "coding" => TaskKind::Coding,
-        "agentic" => TaskKind::Agentic,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": "task must be one of general, coding, agentic",
-                        "type": "invalid_request_error",
-                        "code": "invalid_task"
-                    }
-                })),
-            )
-                .into_response();
-        }
+    let task = match parse_catalog_task(query.task.as_deref()) {
+        Ok(task) => task,
+        Err(response) => return *response,
     };
     let limit = query.limit.unwrap_or(25).clamp(1, 100);
-    let page = query.page.unwrap_or(1).max(1);
     let view = query.view.unwrap_or_default();
-    let max_age = state.config.server.catalog_max_age_seconds;
-    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
-    let candidates = match load_paid_candidates(&state, provider_filter).await {
-        Ok(candidates) => candidates,
+    let snapshot = match load_catalog_snapshot(&state, access, provider_filter, task).await {
+        Ok(snapshot) => snapshot,
         Err(()) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "error": {
-                        "message": "routing state is unavailable",
+                        "message": "catalog state is unavailable",
                         "type": "server_error",
-                        "code": "routing_state_unavailable"
+                        "code": "catalog_state_unavailable"
                     }
                 })),
             )
                 .into_response();
         }
     };
-    let ranked = ranked_paid_candidates(candidates, task);
-
-    let mut providers = BTreeMap::new();
-    for candidate in &ranked {
-        let Some(config) = state.config.providers.get(&candidate.offering.provider) else {
-            continue;
-        };
-
-        providers
-            .entry(candidate.offering.provider.clone())
-            .or_insert_with(|| {
-                let billing_label = match config.billing_mode {
-                    BillingMode::Paid => "paid",
-                    BillingMode::Subscription => "subscription",
-                    BillingMode::Free => "free",
-                };
-                json!({
-                    "name": config.profile
-                        .map(|profile| profile.definition().display_name.to_owned())
-                        .unwrap_or_else(|| candidate.offering.provider.clone()),
-                    "billing_mode": billing_label,
-                })
-            });
-    }
-
-    let total = ranked.len();
-    let pages = total.div_ceil(limit).max(1);
-    let start = page.saturating_sub(1).saturating_mul(limit);
-    let data = if start >= total {
-        Vec::new()
-    } else {
-        ranked
-            .iter()
-            .skip(start)
-            .take(limit)
-            .enumerate()
-            .map(|(index, candidate)| catalog_model_response(candidate, start + index + 1, view))
-            .collect::<Vec<_>>()
+    let offset = match query.cursor.as_deref() {
+        None => 0,
+        Some(cursor) => {
+            let Some((token, offset)) = cursor.split_once(':') else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "message": "cursor is invalid",
+                            "type": "invalid_request_error",
+                            "code": "invalid_cursor"
+                        }
+                    })),
+                )
+                    .into_response();
+            };
+            if token != snapshot.token {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": {
+                            "message": "catalog changed; restart pagination from the first page",
+                            "type": "invalid_request_error",
+                            "code": "stale_cursor"
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+            match offset.parse::<usize>() {
+                Ok(offset) => offset,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": {
+                                "message": "cursor is invalid",
+                                "type": "invalid_request_error",
+                                "code": "invalid_cursor"
+                            }
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
     };
-
-    Json(json!({
-        "object": "paid-models",
-        "task": task.as_str(),
-        "provider": provider_filter,
-        "view": if view.is_full() { "full" } else { "summary" },
-        "page": page,
-        "per_page": limit,
-        "total": total,
-        "pages": pages,
-        "links": paged_links(&query, page, pages),
-        "catalog_max_age_seconds": max_age,
-        "benchmark_max_age_seconds": benchmark_max_age,
-        "providers": providers,
-        "data": data
-    }))
-    .into_response()
+    let total = snapshot.candidates.len();
+    let data = snapshot
+        .candidates
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .enumerate()
+        .map(|(index, candidate)| {
+            catalog_model_response(
+                candidate,
+                offset + index + 1,
+                snapshot
+                    .account_limits
+                    .get(&candidate.offering.provider)
+                    .copied(),
+                view,
+            )
+        })
+        .collect::<Vec<_>>();
+    cached_json_response(
+        json!({
+            "object": "model.collection",
+            "view": if view.is_full() { "full" } else { "summary" },
+            "access": catalog_access_name(access),
+            "task": task.as_str(),
+            "meta": {
+                "snapshot": snapshot.token,
+                "total": total,
+                "limit": limit,
+                "returned": data.len(),
+            },
+            "links": catalog_links(&query, access, &snapshot.token, offset, limit, total),
+            "data": data,
+        }),
+        &headers,
+        snapshot.last_modified,
+    )
 }
 
-async fn get_model(State(state): State<AppState>, Path(model_id): Path<String>) -> Response {
+async fn get_catalog_model(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(model_id): Path<String>,
+) -> Response {
     let Some((provider, model)) = model_id.split_once('/') else {
         return (
             StatusCode::BAD_REQUEST,
@@ -2793,25 +2880,34 @@ async fn get_model(State(state): State<AppState>, Path(model_id): Path<String>) 
         )
             .into_response();
     }
-    let candidates = match load_paid_candidates(&state, Some(provider)).await {
-        Ok(candidates) => candidates,
+    let snapshot = match load_catalog_snapshot(
+        &state,
+        CatalogAccess::All,
+        Some(provider),
+        TaskKind::General,
+    )
+    .await
+    {
+        Ok(snapshot) => snapshot,
         Err(()) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "error": {
-                        "message": "routing state is unavailable",
+                        "message": "catalog state is unavailable",
                         "type": "server_error",
-                        "code": "routing_state_unavailable"
+                        "code": "catalog_state_unavailable"
                     }
                 })),
             )
                 .into_response();
         }
     };
-    let Some(candidate) = ranked_paid_candidates(candidates, TaskKind::General)
-        .into_iter()
-        .find(|candidate| candidate.offering.model == model)
+    let Some((rank, candidate)) = snapshot
+        .candidates
+        .iter()
+        .enumerate()
+        .find(|(_, candidate)| candidate.offering.model == model)
     else {
         return (
             StatusCode::NOT_FOUND,
@@ -2825,27 +2921,23 @@ async fn get_model(State(state): State<AppState>, Path(model_id): Path<String>) 
         )
             .into_response();
     };
-    let resource = catalog_model_json(&CatalogModelEntry {
-        offering: &candidate.offering,
-        benchmark: candidate.benchmark.as_ref(),
-        price: candidate.price,
-        composite_quality: candidate.benchmark.as_ref().and_then(composite_quality),
-        rank: 1,
-        effort_level: candidate
-            .benchmark
-            .as_ref()
-            .and_then(|benchmark| benchmark.reasoning_effort.as_deref()),
-        parameters: None,
-        match_kind: candidate.match_kind,
-        account_limit: None,
-    });
-    Json(json!({
-        "object": "model",
-        "id": model_id,
-        "links": {"self": model_detail_path(&candidate.offering)},
-        "data": resource,
-    }))
-    .into_response()
+    let resource = catalog_model_response(
+        candidate,
+        rank + 1,
+        snapshot.account_limits.get(provider).copied(),
+        ModelView::Full,
+    );
+    cached_json_response(
+        json!({
+            "object": "model",
+            "id": model_resource_id(&candidate.offering),
+            "links": {"self": catalog_model_link(&candidate.offering)},
+            "data": resource,
+            "meta": {"snapshot": snapshot.token},
+        }),
+        &headers,
+        snapshot.last_modified,
+    )
 }
 
 async fn chat_completions(
@@ -5451,14 +5543,15 @@ mod tests {
         BenchmarkIdentityIndex, ModelMatchKind, ModelMetadata, RequestRequirements,
         SelectionMetadata, StreamChoice, add_model_headers, benchmark_ids_match,
         benchmark_price_for_model, benchmarks_for_effort, copy_safe_headers,
-        decorate_json_response, estimate_request_tokens, expected_cost_microusd,
-        find_all_matching_benchmarks, find_benchmark, find_exact_matching_benchmarks,
-        find_exact_matching_benchmarks_indexed, find_suggested_benchmark, footer_sse_event,
-        has_dynamic_or_release_suffix, header_value, identity_mapping_indexes, is_fallback_status,
-        is_model_denied, is_provider_auto_route, is_reasoning_effort, log_request,
-        malformed_sse_event, parse_json_usage, parse_sse_usage, parse_usage_value,
-        rank_benchmark_models, rate_limit_reset_delay, request_id, request_id_from_response,
-        session_material, sse_model, strip_model_noise, take_sse_event, transform_sse_event,
+        decorate_json_response, encode_uri_component, estimate_request_tokens,
+        expected_cost_microusd, find_all_matching_benchmarks, find_benchmark,
+        find_exact_matching_benchmarks, find_exact_matching_benchmarks_indexed,
+        find_suggested_benchmark, footer_sse_event, has_dynamic_or_release_suffix, header_value,
+        identity_mapping_indexes, is_fallback_status, is_model_denied, is_provider_auto_route,
+        is_reasoning_effort, log_request, malformed_sse_event, parse_json_usage, parse_sse_usage,
+        parse_usage_value, rank_benchmark_models, rate_limit_reset_delay, request_id,
+        request_id_from_response, session_material, sse_model, strip_model_noise, take_sse_event,
+        transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
     use crate::identity::{
@@ -5491,6 +5584,16 @@ mod tests {
         fn make_writer(&'a self) -> Self::Writer {
             TestGuard(self.0.clone())
         }
+    }
+
+    #[test]
+    fn catalog_links_percent_encode_path_and_query_delimiters() {
+        assert_eq!(
+            encode_uri_component("model/name?x=y", false),
+            "model%2Fname%3Fx%3Dy"
+        );
+        assert_eq!(encode_uri_component("model/name", true), "model/name");
+        assert_eq!(encode_uri_component("coding task", false), "coding%20task");
     }
 
     fn resolves_single(catalog_id: &str, benchmark_id: &str) -> bool {

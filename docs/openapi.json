@@ -1,0 +1,202 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Model Gateway Catalog API",
+    "version": "0.11.0",
+    "description": "Discovery and metadata resources for models available through Model Gateway."
+  },
+  "paths": {
+    "/v1/models": {
+      "get": {
+        "summary": "List routable model IDs",
+        "responses": {
+          "200": { "$ref": "#/components/responses/ModelList" }
+        }
+      }
+    },
+    "/v1/catalog/models": {
+      "get": {
+        "summary": "List catalog model resources",
+        "parameters": [
+          { "$ref": "#/components/parameters/Access" },
+          { "$ref": "#/components/parameters/Task" },
+          { "$ref": "#/components/parameters/Provider" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Cursor" },
+          { "$ref": "#/components/parameters/View" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/CatalogCollection" },
+          "304": { "$ref": "#/components/responses/NotModified" }
+        }
+      }
+    },
+    "/v1/catalog/models/{provider}/{model}": {
+      "get": {
+        "summary": "Fetch complete catalog model metadata",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Provider namespace returned by the catalog collection."
+          },
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "URI-encoded model identifier returned by the catalog collection."
+          }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/ModelResource" },
+          "304": { "$ref": "#/components/responses/NotModified" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Access": {
+        "name": "access",
+        "in": "query",
+        "schema": { "type": "string", "enum": ["free", "paid", "all"], "default": "all" }
+      },
+      "Task": {
+        "name": "task",
+        "in": "query",
+        "schema": { "type": "string", "enum": ["general", "coding", "agentic"], "default": "general" }
+      },
+      "Provider": {
+        "name": "provider",
+        "in": "query",
+        "schema": { "type": "string" }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "schema": { "type": "string" }
+      },
+      "View": {
+        "name": "view",
+        "in": "query",
+        "schema": { "type": "string", "enum": ["summary", "full"], "default": "summary" }
+      }
+    },
+    "responses": {
+      "ModelList": {
+        "description": "OpenAI-compatible list of routable model IDs.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelList" } } }
+      },
+      "CatalogCollection": {
+        "description": "Snapshot-consistent catalog collection.",
+        "headers": {
+          "ETag": { "$ref": "#/components/headers/ETag" },
+          "Last-Modified": { "$ref": "#/components/headers/LastModified" }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CatalogCollection" } } }
+      },
+      "ModelResource": {
+        "description": "Complete catalog model resource.",
+        "headers": {
+          "ETag": { "$ref": "#/components/headers/ETag" },
+          "Last-Modified": { "$ref": "#/components/headers/LastModified" }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelResourceResponse" } } }
+      },
+      "NotModified": { "description": "The representation has not changed." },
+      "Error": {
+        "description": "Typed API error.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      }
+    },
+    "headers": {
+      "ETag": { "description": "Strong representation validator.", "schema": { "type": "string" } },
+      "LastModified": { "description": "Catalog data modification time.", "schema": { "type": "string", "format": "http-date" } }
+    },
+    "schemas": {
+      "ModelList": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": { "const": "list" },
+          "data": { "type": "array", "items": { "$ref": "#/components/schemas/ModelIdentifier" } }
+        }
+      },
+      "ModelIdentifier": {
+        "type": "object",
+        "required": ["id", "object"],
+        "properties": {
+          "id": { "type": "string" },
+          "object": { "const": "model" },
+          "owned_by": { "type": "string" }
+        }
+      },
+      "ModelResource": {
+        "type": "object",
+        "required": ["id", "object", "links"],
+        "properties": {
+          "id": { "type": "string" },
+          "object": { "const": "model" },
+          "links": { "$ref": "#/components/schemas/Links" },
+          "model": { "type": "object" },
+          "capabilities": { "type": "object" },
+          "price_per_million": { "type": "object" },
+          "access": { "type": "object" }
+        }
+      },
+      "ModelResourceResponse": {
+        "type": "object",
+        "required": ["id", "object", "links", "data"],
+        "properties": {
+          "id": { "type": "string" },
+          "object": { "const": "model" },
+          "links": { "$ref": "#/components/schemas/Links" },
+          "data": { "$ref": "#/components/schemas/ModelResource" },
+          "meta": { "type": "object" }
+        }
+      },
+      "CatalogCollection": {
+        "type": "object",
+        "required": ["object", "data", "meta", "links"],
+        "properties": {
+          "object": { "const": "model.collection" },
+          "data": { "type": "array", "items": { "$ref": "#/components/schemas/ModelResource" } },
+          "meta": { "type": "object" },
+          "links": { "$ref": "#/components/schemas/Links" }
+        }
+      },
+      "Links": {
+        "type": "object",
+        "properties": {
+          "self": { "type": "string", "format": "uri-reference" },
+          "prev": { "type": "string", "format": "uri-reference" },
+          "next": { "type": "string", "format": "uri-reference" }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["type", "message"],
+            "properties": {
+              "type": { "type": "string" },
+              "message": { "type": "string" },
+              "code": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,4 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
-repo_root="$(git rev-parse --show-toplevel)"
-exec bash "$repo_root/.github/scripts/pre-commit.sh" "$@"
+git diff --cached --check
