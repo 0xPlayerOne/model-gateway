@@ -64,6 +64,8 @@ jobs:
 
   dependency-audit-javascript:
     name: Dependency Audit (JavaScript)
+    needs: profile
+    if: ${{ needs.profile.result == 'success' && needs.profile.outputs.javascript == 'true' }}
     runs-on: ubuntu-slim
     timeout-minutes: 20
     steps:
@@ -86,20 +88,17 @@ jobs:
             **/yarn.lock
             **/package-lock.json
           sparse-checkout-cone-mode: false
-      - name: Detect
-        id: applicability
-        run: bash .github/scripts/security.sh should_run javascript >> "$GITHUB_OUTPUT"
       - name: Setup
-        if: steps.applicability.outputs.applicable == 'true'
         uses: ./.github/actions/setup
         with:
           mise-scope: javascript
       - name: Audit dependencies
-        if: steps.applicability.outputs.applicable == 'true'
         run: bash .github/scripts/security.sh audit javascript
 
   dependency-audit-rust:
     name: Dependency Audit (Rust)
+    needs: profile
+    if: ${{ needs.profile.result == 'success' && needs.profile.outputs.rust == 'true' }}
     runs-on: ubuntu-slim
     timeout-minutes: 20
     steps:
@@ -116,26 +115,21 @@ jobs:
             **/Cargo.lock
             **/.cargo/**
           sparse-checkout-cone-mode: false
-      - name: Detect
-        id: applicability
-        run: bash .github/scripts/security.sh should_run rust >> "$GITHUB_OUTPUT"
       - name: Setup
-        if: steps.applicability.outputs.applicable == 'true'
         uses: ./.github/actions/setup
         with:
           mise-scope: rust
       - name: Install cargo-audit
-        if: steps.applicability.outputs.applicable == 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
       - name: Audit dependencies
-        if: steps.applicability.outputs.applicable == 'true'
         run: bash .github/scripts/security.sh audit rust
 
   dependency-audit-python:
     name: Dependency Audit (Python) / ${{ matrix.requirement }}
     needs: profile
+    if: ${{ needs.profile.result == 'success' && needs.profile.outputs.python == 'true' }}
     strategy:
       fail-fast: false
       max-parallel: 8
@@ -147,7 +141,6 @@ jobs:
       REPO_FOUNDRY_PYTHON_REQUIREMENT: ${{ matrix.requirement }}
     steps:
       - name: Checkout
-        if: matrix.requirement != 'none'
         uses: actions/checkout@v7
         with:
           # Python audits only need manifests, lockfiles, and audit config.
@@ -165,33 +158,12 @@ jobs:
             **/poetry.lock
             **/uv.lock
           sparse-checkout-cone-mode: false
-      - name: Detect
-        if: matrix.requirement != 'none'
-        id: applicability
-        run: bash .github/scripts/security.sh should_run python >> "$GITHUB_OUTPUT"
       - name: Setup
-        if: matrix.requirement != 'none' && steps.applicability.outputs.applicable == 'true'
         uses: ./.github/actions/setup
         with:
           mise-scope: python
       - name: Audit dependencies
-        if: matrix.requirement != 'none' && steps.applicability.outputs.applicable == 'true'
         run: bash .github/scripts/security.sh audit python
-      - name: Skip
-        if: matrix.requirement == 'none'
-        run: echo 'Skipping Python audit (no applicable Python dependencies)'
-
-  dependency-audit-python-result:
-    name: Dependency Audit (Python)
-    needs: dependency-audit-python
-    if: ${{ always() }}
-    runs-on: ubuntu-slim
-    timeout-minutes: 5
-    steps:
-      - name: Require successful Python audits
-        env:
-          RESULT: ${{ needs.dependency-audit-python.result }}
-        run: test "$RESULT" = success
 
   dependency-review:
     name: Dependency Review
