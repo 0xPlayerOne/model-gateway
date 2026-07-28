@@ -1147,6 +1147,74 @@ impl RoutingStore {
             .and_then(|observation| EffectivePrice::from_observation(observation, true)))
     }
 
+    pub fn has_incomplete_price_observation(
+        &self,
+        runtime_provider: &str,
+        profile_key: Option<&str>,
+        model: &str,
+        canonical_model: Option<&str>,
+        max_age_seconds: u64,
+    ) -> Result<bool, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let now = epoch_seconds();
+        let cutoff = now.saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX));
+        let canonical_provider =
+            canonical_model.and_then(|value| value.split_once('/').map(|(provider, _)| provider));
+        let mut statement = connection.prepare(
+            "SELECT o.scope, o.provider_key, o.input_price, o.output_price
+             FROM price_observations o
+             JOIN pricing_snapshots s ON s.id = o.snapshot_id
+             WHERE s.active = 1 AND (s.source_kind = 'manual' OR s.fetched_at >= ?1)
+               AND lower(o.model_id) = ?2
+               AND (o.valid_from IS NULL OR o.valid_from <= ?3)
+               AND (o.valid_until IS NULL OR o.valid_until > ?3)",
+        )?;
+
+        let mut has_incomplete = |model_id: &str| -> Result<bool, RoutingError> {
+            let rows = statement.query_map(params![cutoff, model_id, now], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                    row.get::<_, Option<f64>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (scope, provider_key, input, output) = row?;
+                let applies = match scope.as_str() {
+                    "runtime_provider" => provider_key
+                        .as_deref()
+                        .is_some_and(|key| key.eq_ignore_ascii_case(runtime_provider)),
+                    "provider_profile" => profile_key.is_some_and(|profile| {
+                        provider_key
+                            .as_deref()
+                            .is_some_and(|key| key.eq_ignore_ascii_case(profile))
+                    }),
+                    "canonical" => canonical_provider.is_some_and(|provider| {
+                        provider_key
+                            .as_deref()
+                            .is_some_and(|key| key.eq_ignore_ascii_case(provider))
+                    }),
+                    _ => false,
+                };
+                if applies && (input.is_none() || output.is_none()) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+
+        if has_incomplete(&normalize_price_id(model))? {
+            return Ok(true);
+        }
+        if let Some((_, canonical_id)) = canonical_model.and_then(|value| value.split_once('/')) {
+            if has_incomplete(&normalize_price_id(canonical_id))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn replace_catalog(
         &self,
         provider: &str,

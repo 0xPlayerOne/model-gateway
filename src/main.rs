@@ -21,7 +21,8 @@ use model_gateway::config::{
     QuotaKind, QuotaLimit, TargetConfig,
 };
 use model_gateway::gateway::{
-    ModelMatchKind, is_exact_model_identity, reconcile_model_matches, run_server,
+    ModelMatchKind, is_exact_model_identity, reconcile_model_matches, report_pricing_coverage,
+    run_server,
 };
 use model_gateway::identity::fetch_identity_sources;
 use model_gateway::pricing::{ManualPriceImport, PriceSourceKind, fetch_models_dev};
@@ -142,6 +143,12 @@ enum PricingCommand {
         file: PathBuf,
     },
     Status,
+    Coverage {
+        #[arg(long, help = "Report only one configured provider")]
+        provider: Option<String>,
+        #[arg(long, help = "Emit machine-readable JSON")]
+        json: bool,
+    },
     Explain {
         provider: String,
         model: String,
@@ -507,6 +514,43 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
                 println!(
                     "{source}: kind={kind}, {count} observations, fetched_at={fetched_at}, attribution={attribution}"
                 );
+            }
+        }
+        PricingCommand::Coverage { provider, json } => {
+            if provider
+                .as_ref()
+                .is_some_and(|name| !config.providers.contains_key(name))
+            {
+                return Err(format!("unknown provider '{}'", provider.unwrap()).into());
+            }
+            let report = report_pricing_coverage(&config, &store, provider.as_deref())?;
+            let mut summary = BTreeMap::<&str, usize>::new();
+            for entry in &report {
+                *summary.entry(entry.status.as_str()).or_default() += 1;
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "summary": summary,
+                        "models": report,
+                    }))?
+                );
+            } else {
+                for entry in &report {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        entry.status.as_str(),
+                        entry.provider,
+                        entry.catalog_model,
+                        entry.effective_source.as_deref().unwrap_or("-"),
+                        entry.effective_scope.map_or("-", |scope| scope.as_str()),
+                    );
+                }
+                println!("Summary:");
+                for (status, count) in summary {
+                    println!("  {status}: {count}");
+                }
             }
         }
         PricingCommand::Explain { provider, model } => {

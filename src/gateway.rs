@@ -27,6 +27,7 @@ use crate::config::{
     BillingMode, Config, ProviderConfig, ProviderProfileId, ServerConfig, TargetConfig,
 };
 use crate::pricing::{EffectivePrice, PriceScope, PriceSourceKind, normalize_price_id};
+use crate::providers::BuiltinProvider;
 use crate::providers::prepare_request;
 use crate::routing::{
     AccessKind, AccountLimitSnapshot, CatalogOffering, IdentityAliasEvidence, ReservationOutcome,
@@ -244,6 +245,113 @@ pub struct ModelMatchReport {
     pub alternatives: Vec<String>,
     pub source: Option<String>,
     pub identity_evidence: Vec<IdentityAliasEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PricingCoverageKind {
+    Complete,
+    Incomplete,
+    Missing,
+}
+
+impl PricingCoverageKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Incomplete => "incomplete",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PricingCoverageReport {
+    pub provider: String,
+    pub catalog_model: String,
+    pub status: PricingCoverageKind,
+    pub catalog_input_price_per_million: Option<f64>,
+    pub catalog_output_price_per_million: Option<f64>,
+    pub effective_input_price_per_million: Option<f64>,
+    pub effective_output_price_per_million: Option<f64>,
+    pub effective_source: Option<String>,
+    pub effective_scope: Option<PriceScope>,
+    pub estimated: Option<bool>,
+}
+
+pub fn report_pricing_coverage(
+    config: &Config,
+    routing: &RoutingStore,
+    provider_filter: Option<&str>,
+) -> Result<Vec<PricingCoverageReport>, RoutingError> {
+    let offerings = routing.all_candidates(config.server.catalog_max_age_seconds)?;
+    offerings
+        .into_iter()
+        .filter(|offering| {
+            provider_filter.is_none_or(|provider| provider == offering.provider)
+                && !is_provider_auto_route(&offering.model)
+        })
+        .map(|offering| {
+            let provider_config = config.providers.get(&offering.provider);
+            let profile_key = provider_config.and_then(|provider| {
+                provider
+                    .pricing_profile
+                    .as_deref()
+                    .or_else(|| provider.profile.and_then(BuiltinProvider::models_dev_key))
+            });
+            let canonical = provider_config.and_then(|provider| {
+                provider
+                    .model_mappings
+                    .get(&offering.model)
+                    .map(String::as_str)
+            });
+            let effective = routing.effective_price(
+                &offering.provider,
+                profile_key,
+                &offering.model,
+                canonical,
+                config.server.pricing_max_age_seconds,
+            )?;
+            let incomplete_observation = if effective.is_none() {
+                routing.has_incomplete_price_observation(
+                    &offering.provider,
+                    profile_key,
+                    &offering.model,
+                    canonical,
+                    config.server.pricing_max_age_seconds,
+                )?
+            } else {
+                false
+            };
+            let direct_complete = offering.input_price_per_million.is_some()
+                && offering.output_price_per_million.is_some();
+            let direct_incomplete = offering.input_price_per_million.is_some()
+                || offering.output_price_per_million.is_some();
+            let status = if effective.is_some() || direct_complete {
+                PricingCoverageKind::Complete
+            } else if direct_incomplete || incomplete_observation {
+                PricingCoverageKind::Incomplete
+            } else {
+                PricingCoverageKind::Missing
+            };
+            Ok(PricingCoverageReport {
+                provider: offering.provider,
+                catalog_model: offering.model,
+                status,
+                catalog_input_price_per_million: offering.input_price_per_million,
+                catalog_output_price_per_million: offering.output_price_per_million,
+                effective_input_price_per_million: effective
+                    .as_ref()
+                    .map(|price| price.input_price_per_million),
+                effective_output_price_per_million: effective
+                    .as_ref()
+                    .map(|price| price.output_price_per_million),
+                effective_source: effective.as_ref().map(|price| price.source.clone()),
+                effective_scope: effective.as_ref().map(|price| price.scope),
+                estimated: effective.as_ref().map(|price| price.estimated),
+            })
+        })
+        .collect()
 }
 
 enum BenchmarkResolution<'a> {

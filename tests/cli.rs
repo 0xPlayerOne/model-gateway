@@ -4,6 +4,7 @@ use model_gateway::benchmarks::BenchmarkModel;
 use model_gateway::identity::{
     IdentityAliasRecord, IdentityConfidence, IdentityEntityRecord, IdentityImport,
 };
+use model_gateway::pricing::{PriceObservation, PriceRates, PriceScope, PriceSourceKind};
 use model_gateway::routing::{AccessKind, CatalogRecord, RoutingStore};
 
 /// Strip environment variables that would trigger automatic provider discovery
@@ -411,6 +412,150 @@ billing_mode = "paid"
     assert!(stdout.contains("1.2"));
     assert!(stdout.contains("3.4"));
     assert!(stdout.contains("manual-overrides"));
+}
+
+#[test]
+fn pricing_coverage_reports_direct_profile_and_missing_prices() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let config_path = directory.path().join("config.toml");
+    let state_path = directory.path().join("routing.sqlite3");
+    std::fs::write(
+        &config_path,
+        r#"
+[providers.fixture]
+adapter = "openai_chat"
+base_url = "http://localhost:8000/v1"
+pricing_profile = "fixture"
+"#,
+    )
+    .expect("write config");
+    let store = RoutingStore::open(Some(&state_path)).expect("store");
+    store
+        .replace_catalog(
+            "fixture",
+            &[
+                CatalogRecord {
+                    model: "direct-complete".to_owned(),
+                    access_kind: AccessKind::Paid,
+                    context_length: None,
+                    supports_tools: None,
+                    supports_vision: None,
+                    supports_structured_output: None,
+                    input_price_per_million: Some(1.0),
+                    output_price_per_million: Some(2.0),
+                },
+                CatalogRecord {
+                    model: "direct-incomplete".to_owned(),
+                    access_kind: AccessKind::Paid,
+                    context_length: None,
+                    supports_tools: None,
+                    supports_vision: None,
+                    supports_structured_output: None,
+                    input_price_per_million: Some(1.0),
+                    output_price_per_million: None,
+                },
+                CatalogRecord {
+                    model: "profile-covered".to_owned(),
+                    access_kind: AccessKind::Paid,
+                    context_length: None,
+                    supports_tools: None,
+                    supports_vision: None,
+                    supports_structured_output: None,
+                    input_price_per_million: None,
+                    output_price_per_million: None,
+                },
+                CatalogRecord {
+                    model: "missing".to_owned(),
+                    access_kind: AccessKind::Paid,
+                    context_length: None,
+                    supports_tools: None,
+                    supports_vision: None,
+                    supports_structured_output: None,
+                    input_price_per_million: None,
+                    output_price_per_million: None,
+                },
+                CatalogRecord {
+                    model: "profile-incomplete".to_owned(),
+                    access_kind: AccessKind::Paid,
+                    context_length: None,
+                    supports_tools: None,
+                    supports_vision: None,
+                    supports_structured_output: None,
+                    input_price_per_million: None,
+                    output_price_per_million: None,
+                },
+            ],
+        )
+        .expect("catalog");
+    store
+        .replace_pricing(
+            "models.dev",
+            PriceSourceKind::ModelsDev,
+            "Fixture",
+            &[
+                PriceObservation {
+                    source: "models.dev".to_owned(),
+                    source_kind: PriceSourceKind::ModelsDev,
+                    scope: PriceScope::ProviderProfile,
+                    provider_key: Some("fixture".to_owned()),
+                    model_id: "profile-covered".to_owned(),
+                    rates: PriceRates {
+                        input_price_per_million: Some(3.0),
+                        output_price_per_million: Some(4.0),
+                        ..PriceRates::default()
+                    },
+                    fetched_at: Some(1),
+                    as_of: None,
+                    valid_from: None,
+                    valid_until: None,
+                    attribution: None,
+                },
+                PriceObservation {
+                    source: "models.dev".to_owned(),
+                    source_kind: PriceSourceKind::ModelsDev,
+                    scope: PriceScope::ProviderProfile,
+                    provider_key: Some("fixture".to_owned()),
+                    model_id: "profile-incomplete".to_owned(),
+                    rates: PriceRates {
+                        input_price_per_million: Some(3.0),
+                        ..PriceRates::default()
+                    },
+                    fetched_at: Some(1),
+                    as_of: None,
+                    valid_from: None,
+                    valid_until: None,
+                    attribution: None,
+                },
+            ],
+        )
+        .expect("profile pricing");
+    drop(store);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_model-gateway"))
+        .args(["pricing", "coverage", "--provider", "fixture", "--json"])
+        .env("MODEL_GATEWAY_CONFIG", &config_path)
+        .env("MODEL_GATEWAY_STATE_PATH", &state_path)
+        .env("MODEL_GATEWAY_SECRET_STORE", "environment")
+        .output()
+        .expect("pricing coverage");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+    assert_eq!(report["summary"]["complete"], 2);
+    assert_eq!(report["summary"]["incomplete"], 2);
+    assert_eq!(report["summary"]["missing"], 1);
+    let models = report["models"].as_array().expect("models");
+    let profile = models
+        .iter()
+        .find(|model| model["catalog_model"] == "profile-covered")
+        .expect("profile-covered model");
+    assert_eq!(profile["status"], "complete");
+    assert_eq!(profile["effective_source"], "models.dev");
+    assert_eq!(profile["effective_scope"], "provider_profile");
+    assert_eq!(profile["estimated"], false);
 }
 
 #[test]
