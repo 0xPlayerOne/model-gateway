@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.8.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.7.0...v0.8.0) (2026-07-28)
+
+
+### Features
+
+* distinguish free-tier access from zero pricing ([dc886bb](https://github.com/0xPlayerOne/model-gateway/commit/dc886bbbd4c2eb71bbf7909310fbf995274fa5a9))
+
+
+### Bug Fixes
+
+* **security:** skip unchanged ecosystem audits ([5f61fac](https://github.com/0xPlayerOne/model-gateway/commit/5f61fac3f8a8f19d31797bf0689ff2bcfb4f1827))
+
+
+### Performance Improvements
+
+* **ci:** avoid formatter probe overhead ([a67c708](https://github.com/0xPlayerOne/model-gateway/commit/a67c708cfea80a32f69c5dd7f97c74c40bb214ba))
+* **ci:** bootstrap direct prettier ([7be371a](https://github.com/0xPlayerOne/model-gateway/commit/7be371a15b3db87a9c4cf84ed302823d378f3ef0))
+* **ci:** skip Bun cache archives for workspaces ([2a3052b](https://github.com/0xPlayerOne/model-gateway/commit/2a3052b44e34214b17f5b5710117ee19cec5508a))
+* **ci:** skip installs on turbo cache hits ([c5eb8f4](https://github.com/0xPlayerOne/model-gateway/commit/c5eb8f466b03d1ac2f5cf212190eef43770a3127))
+* **security:** guard empty Python audit matrix ([65d09e6](https://github.com/0xPlayerOne/model-gateway/commit/65d09e6f000d83c9c4169d72af75d9471885831c))
+* **template:** speed up CodeQL detection ([5d2c0d2](https://github.com/0xPlayerOne/model-gateway/commit/5d2c0d215ad9f08fd6cbecbea9f9a6b373cb6144))
+* **template:** use current Turbo remote cache mode ([36ab7d5](https://github.com/0xPlayerOne/model-gateway/commit/36ab7d5b883a774e583ec7c0413c8dccd99354f9))
+
 ## [0.7.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.6.0...v0.7.0) (2026-07-28)
 
 
