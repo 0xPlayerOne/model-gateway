@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.10.1...v0.11.0) (2026-07-28)
+
+
+### Features
+
+* preserve cache pricing metadata ([402d818](https://github.com/0xPlayerOne/model-gateway/commit/402d8182ecbae4b18f74baf6fa14dd49abcd05a2))
+
 ## [0.10.1](https://github.com/0xPlayerOne/model-gateway/compare/v0.10.0...v0.10.1) (2026-07-28)
 
 
