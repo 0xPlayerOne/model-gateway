@@ -1,5 +1,5 @@
-# Copy this file to .github/code-foundry.yml, edit the values you need, and run:
-#   npx code-foundry init --config .github/code-foundry.yml
+# `npx code-foundry init` creates this file automatically. Edit it and run
+# `npx code-foundry sync` whenever you want to change the baseline.
 # Omitted keys use automatic detection and the standard defaults. See
 # docs/CONFIGURATION.md for the complete visual reference.
 

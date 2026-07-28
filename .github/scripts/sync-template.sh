@@ -13,7 +13,6 @@ Options:
   --languages LIST  auto or comma-separated: typescript,rust,python,solidity
   --features LIST   all or comma-separated standard features
   --package-manager NAME  auto, bun, pnpm, yarn, or npm
-  --config PATH  Use a .github/code-foundry.yml configuration file
   --runtime-repository OWNER/REPO  Reusable workflow runtime repository
   --runtime-ref REF  Reusable workflow runtime tag or branch
   --license NAME     preserve, agpl-3.0-or-later, mit, or none
@@ -28,7 +27,6 @@ EOF
 source_ref="main"
 mode="check"
 source=""
-config_file="${REPO_FOUNDRY_CONFIG:-}"
 temp_dir=""
 profile="${REPO_FOUNDRY_PROFILE:-auto}"
 languages="${REPO_FOUNDRY_LANGUAGES:-auto}"
@@ -51,7 +49,6 @@ runtime_repository_set=false
 [ -n "${REPO_FOUNDRY_RUNTIME_REPOSITORY:-}" ] && runtime_repository_set=true
 runtime_ref_set=false
 [ -n "${REPO_FOUNDRY_RUNTIME_REF:-}" ] && runtime_ref_set=true
-template_ref=""
 release_type="${REPO_FOUNDRY_RELEASE_TYPE:-auto}"
 npm_publish="${REPO_FOUNDRY_NPM_PUBLISH:-false}"
 prune_standard="${REPO_FOUNDRY_PRUNE_STANDARD:-false}"
@@ -127,7 +124,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --source) source="${2:?missing source path or URL}"; shift 2 ;;
     --ref) source_ref="${2:?missing ref}"; shift 2 ;;
-    --config) config_file="${2:?missing config path}"; shift 2 ;;
     --profile) profile="${2:?missing profile}"; profile_set=true; shift 2 ;;
     --languages) languages="${2:?missing language list}"; languages_set=true; shift 2 ;;
     --features) features="${2:?missing feature list}"; features_set=true; shift 2 ;;
@@ -146,15 +142,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$source" ] || { usage >&2; exit 2; }
-if [ -n "$config_file" ]; then
-  [ -f "$config_file" ] || { printf 'Configuration file not found: %s\n' "$config_file" >&2; exit 1; }
-  mkdir -p .github
-  if [ "$(cd -- "$(dirname -- "$config_file")" && pwd)/$(basename -- "$config_file")" != "$(pwd)/.github/code-foundry.yml" ]; then
-    cp "$config_file" .github/code-foundry.yml
-  fi
-fi
 config_path=.github/code-foundry.yml
-[ -f "$config_path" ] || config_path=.github/template.yml
+[ -f "$config_path" ] || [ "${REPO_FOUNDRY_INIT:-false}" = true ] || {
+  printf '%s\n' 'Missing .github/code-foundry.yml; run `npx code-foundry init` first.' >&2
+  exit 1
+}
 if [ -f "$config_path" ]; then
   config_value() {
     awk -F': ' -v key="$1" '$1 == key { value=$2; sub(/[[:space:]]+#.*/, "", value); gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); print value; exit }' "$config_path"
@@ -180,7 +172,6 @@ if [ -f "$config_path" ]; then
   if [ "$runtime_ref_set" = false ]; then
     runtime_ref="$(config_value runtime_ref)"
   fi
-  template_ref="$(config_value template)"
   if [ "$release_type_set" != true ]; then
     configured_release_type="$(config_value release_type)"
     [ -n "$configured_release_type" ] && release_type="$configured_release_type"
@@ -244,7 +235,7 @@ case "$runtime_repository" in
   *) printf 'Runtime repository must be OWNER/REPO: %s\n' "$runtime_repository" >&2; exit 2 ;;
 esac
 case "$package_manager" in
-  auto|bun|pnpm|yarn|npm) ;;
+  auto|none|bun|pnpm|yarn|npm) ;;
   *) printf 'Unsupported package manager: %s\n' "$package_manager" >&2; exit 2 ;;
 esac
 validate_list language "$languages" "$valid_languages"
@@ -280,7 +271,6 @@ fi
 # Prefer an explicit CLI/environment value, then the target's saved contract,
 # then the source template's contract, and finally the stable public runtime.
 source_config="$template_root/.github/code-foundry.yml"
-[ -f "$source_config" ] || source_config="$template_root/.github/template.yml"
 if [ -z "$runtime_ref" ] && [ -f "$source_config" ]; then
   runtime_ref="$(awk -F': ' '/^runtime_ref:/ {print $2; exit}' "$source_config")"
 fi
@@ -309,11 +299,6 @@ if [ -f "$template_root/.github/scripts/profile.sh" ]; then
   package_manager="$(printf '%s\n' "$profile_output" | awk -F= '$1 == "package_manager" {print substr($0, index($0, "=") + 1)}')"
   release_type="$(printf '%s\n' "$profile_output" | awk -F= '$1 == "release_type" {print substr($0, index($0, "=") + 1)}')"
   npm_publish="$(printf '%s\n' "$profile_output" | awk -F= '$1 == "npm_publish" {print substr($0, index($0, "=") + 1)}')"
-fi
-
-if [ -f "$template_root/package.json" ]; then
-  template_version="$(awk -F'"' '/"version"[[:space:]]*:/ {print $4; exit}' "$template_root/package.json")"
-  [ -n "$template_version" ] && template_ref="code-foundry@$template_version"
 fi
 
 files=(
@@ -472,7 +457,6 @@ done
 source_runtime_repository=""
 source_runtime_ref=""
 source_config="$template_root/.github/code-foundry.yml"
-[ -f "$source_config" ] || source_config="$template_root/.github/template.yml"
 if [ -f "$source_config" ]; then
   source_runtime_repository="$(awk -F': ' '/^runtime_repository:/ {print $2; exit}' "$source_config")"
   source_runtime_ref="$(awk -F': ' '/^runtime_ref:/ {print $2; exit}' "$source_config")"
@@ -671,9 +655,6 @@ if [ "$mode" = "apply" ]; then
   mkdir -p .github
   {
     printf 'version: 1\n'
-    if [ -n "$template_ref" ]; then
-      printf 'template: %s\n' "$template_ref"
-    fi
     printf 'profile: %s\n' "$profile"
     printf 'languages: %s\n' "$languages"
     printf 'features: %s\n' "$features"
@@ -702,10 +683,6 @@ if [ "$mode" = "apply" ]; then
       printf 'license_file: %s\n' "$license_file"
     fi
   } > .github/code-foundry.yml
-  if [ "$config_path" = .github/template.yml ] && [ -f .github/template.yml ]; then
-    rm .github/template.yml
-    printf '%s\n' 'Migrated .github/template.yml to .github/code-foundry.yml.'
-  fi
 fi
 
 if [ "$prune" = true ]; then

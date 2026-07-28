@@ -72,7 +72,7 @@ repo_foundry_pr_dependencies_unchanged() {
   while IFS= read -r file; do
     case "$file" in
       .github/workflows/security.yml|.github/scripts/security.sh|.github/scripts/changed-files.sh|\
-      .github/actions/setup/action.yml|.github/code-foundry.yml|.github/template.yml|.mise.toml|mise.lock|\
+      .github/actions/setup/action.yml|.github/code-foundry.yml|.mise.toml|mise.lock|\
       .github/security-audit-allowlist.txt)
         return 1
         ;;

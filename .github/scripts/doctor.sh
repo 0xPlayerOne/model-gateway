@@ -5,7 +5,6 @@ errors=0
 
 configured_features="all"
 config_file=.github/code-foundry.yml
-[ -f "$config_file" ] || config_file=.github/template.yml
 if [ -f "$config_file" ]; then
   configured_features="$(awk -F': ' '/^features:/ {print $2; exit}' "$config_file")"
   [ -n "$configured_features" ] || configured_features="all"
