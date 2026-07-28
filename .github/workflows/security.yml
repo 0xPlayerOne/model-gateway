@@ -138,7 +138,10 @@ jobs:
   dependency-audit-python:
     name: Dependency Audit (Python) / ${{ matrix.requirement }}
     needs: profile
-    if: ${{ needs.profile.result == 'success' && needs.profile.outputs.python == 'true' }}
+    if: >-
+      ${{ needs.profile.result == 'success' &&
+      needs.profile.outputs.python == 'true' &&
+      needs.profile.outputs.python_requirements != '["none"]' }}
     strategy:
       fail-fast: false
       max-parallel: 8
