@@ -14,6 +14,23 @@ set_output hit false
 [ -f package.json ] || exit 0
 [ -f bun.lock ] || [ -f bun.lockb ] || exit 0
 
+project_profile="$(node <<'NODE'
+const fs = require('node:fs');
+const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+process.stdout.write(Array.isArray(packageJson.workspaces) ||
+  (packageJson.workspaces && typeof packageJson.workspaces === 'object') ? 'workspace' : 'standalone');
+NODE
+)"
+lock_file='bun.lock'
+[ -f "$lock_file" ] || lock_file='bun.lockb'
+lock_bytes="$(wc -c < "$lock_file")"
+# A temporary npm formatter install has fixed overhead. For small standalone
+# projects, the normal Bun install is usually faster; workspace graphs and
+# larger lockfiles still benefit materially from avoiding their full tree.
+if [ "$project_profile" = standalone ] && [ "$lock_bytes" -le 524288 ]; then
+  exit 0
+fi
+
 format_script="$(node <<'NODE'
 const fs = require('node:fs');
 const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
