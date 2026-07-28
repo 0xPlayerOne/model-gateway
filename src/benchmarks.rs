@@ -411,7 +411,12 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                     &[
                         ("artificial_analysis_intelligence_index", 1.0),
                         ("mmlu_pro", 100.0),
+                        ("mmlu", 100.0),
                         ("gpqa", 100.0),
+                        ("gpqa_diamond", 100.0),
+                        ("aime_25", 100.0),
+                        ("aime_2025", 100.0),
+                        ("math_500", 100.0),
                     ],
                 ),
                 coding_quality: scaled_number(
@@ -420,6 +425,8 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                         ("artificial_analysis_coding_index", 1.0),
                         ("livecodebench", 100.0),
                         ("scicode", 100.0),
+                        ("swe_bench_verified", 100.0),
+                        ("swe_bench", 100.0),
                     ],
                 ),
                 agentic_quality: scaled_number(
@@ -431,6 +438,8 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                         ("terminalbench_hard", 100.0),
                         ("lcr", 100.0),
                         ("tau_banking", 100.0),
+                        ("bfcl", 100.0),
+                        ("browsecomp", 100.0),
                     ],
                 ),
                 input_price_per_million: number(pricing, "price_1m_input_tokens"),
@@ -457,16 +466,22 @@ fn contains_any(text: &str, terms: &[&str]) -> bool {
 }
 
 fn number(value: &Value, key: &str) -> Option<f64> {
-    value.get(key).and_then(Value::as_f64)
+    value.get(key).and_then(parse_number)
 }
 
 fn scaled_number(value: &Value, keys: &[(&str, f64)]) -> Option<f64> {
     for (key, multiplier) in keys {
-        if let Some(n) = value.get(*key).and_then(Value::as_f64) {
+        if let Some(n) = value.get(*key).and_then(parse_number) {
             return Some((n * multiplier * 100.0).round() / 100.0);
         }
     }
     None
+}
+
+fn parse_number(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
 }
 
 // Howard Hinnant / public-domain civil calendar helper
@@ -567,6 +582,42 @@ mod tests {
         assert_eq!(models[0].coding_quality, Some(75.0));
         assert_eq!(models[0].agentic_quality, Some(45.0));
         assert_eq!(models[0].intelligence, Some(78.0));
+    }
+
+    #[test]
+    fn aa_parser_accepts_string_scores_and_expanded_metric_fallbacks() {
+        let models = parse_artificial_analysis(&json!({"data": [{
+            "slug": "string-values",
+            "evaluations": {
+                "swe_bench_verified": "0.81",
+                "aime_2025": "0.72",
+                "browsecomp": "0.64"
+            },
+            "pricing": {
+                "price_1m_input_tokens": "1.25",
+                "price_1m_output_tokens": "4.5"
+            },
+            "performance": {"median_time_to_first_token_seconds": "0.4"}
+        }]}))
+        .expect("string-valued Artificial Analysis fixture");
+        assert_eq!(models[0].coding_quality, Some(81.0));
+        assert_eq!(models[0].intelligence, Some(72.0));
+        assert_eq!(models[0].agentic_quality, Some(64.0));
+        assert_eq!(models[0].input_price_per_million, Some(1.25));
+        assert_eq!(models[0].latency_seconds, Some(0.4));
+    }
+
+    #[test]
+    fn aa_parser_rejects_missing_ids_and_invalid_shapes() {
+        assert!(parse_artificial_analysis(&json!({"data": [{"evaluations": {}}]})).is_err());
+        assert!(
+            parse_artificial_analysis(&json!({"data": [{
+                "slug": "invalid-score",
+                "evaluations": {"gpqa": 101.0}
+            }]}))
+            .is_err()
+        );
+        assert!(parse_artificial_analysis(&json!({"data": {}})).is_err());
     }
 
     #[test]
