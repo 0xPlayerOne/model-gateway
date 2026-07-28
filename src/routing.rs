@@ -702,7 +702,12 @@ impl RoutingStore {
         )?;
         Ok(statement
             .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?.try_into().unwrap_or(0),
+                    row.get::<_, String>(3)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?)
     }
@@ -922,11 +927,11 @@ impl RoutingStore {
         Ok(statement
             .query_map([], |row| {
                 Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?.try_into().unwrap_or(0),
+                    row.get::<_, String>(4)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?)
@@ -1170,7 +1175,7 @@ impl RoutingStore {
                     model.model,
                     i64::from(model.access_kind.is_free()),
                     now,
-                    model.context_length,
+                    model.context_length.map(|v| v as i64),
                     optional_bool(model.supports_tools),
                     optional_bool(model.supports_vision),
                     optional_bool(model.supports_structured_output),
@@ -1233,7 +1238,7 @@ impl RoutingStore {
                         model: row.get(1)?,
                         refreshed_at: row.get(2)?,
                         access_kind: AccessKind::from_database(&row.get::<_, String>(3)?),
-                        context_length: row.get(4)?,
+                        context_length: row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
                         supports_tools: database_bool(row.get(5)?),
                         supports_vision: database_bool(row.get(6)?),
                         supports_structured_output: database_bool(row.get(7)?),
@@ -1266,7 +1271,7 @@ impl RoutingStore {
                         model: row.get(1)?,
                         refreshed_at: row.get(2)?,
                         access_kind: AccessKind::from_database(&row.get::<_, String>(3)?),
-                        context_length: row.get(4)?,
+                        context_length: row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
                         supports_tools: database_bool(row.get(5)?),
                         supports_vision: database_bool(row.get(6)?),
                         supports_structured_output: database_bool(row.get(7)?),
@@ -1334,7 +1339,7 @@ impl RoutingStore {
                     model.input_price_per_million,
                     model.output_price_per_million,
                     model.latency_seconds,
-                    model.output_tokens_per_task,
+                    model.output_tokens_per_task.map(|v| v as i64),
                     model.reasoning_effort.as_deref().unwrap_or(""),
                     model.as_of,
                     model.release_date,
@@ -1406,7 +1411,7 @@ impl RoutingStore {
                         input_price_per_million: row.get(5)?,
                         output_price_per_million: row.get(6)?,
                         latency_seconds: row.get(7)?,
-                        output_tokens_per_task: row.get(8)?,
+                        output_tokens_per_task: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
                         reasoning_effort: row.get(9)?,
                         as_of: row.get(10)?,
                         release_date: row.get(11)?,
@@ -1428,7 +1433,12 @@ impl RoutingStore {
         )?;
         Ok(statement
             .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?.try_into().unwrap_or(0),
+                    row.get::<_, String>(3)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?)
     }
@@ -1472,7 +1482,13 @@ impl RoutingStore {
              FROM catalog_models GROUP BY provider ORDER BY provider",
         )?;
         Ok(statement
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?.try_into().unwrap_or(0),
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()?)
     }
 
