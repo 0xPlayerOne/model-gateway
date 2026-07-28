@@ -24,8 +24,7 @@ should_run() {
     return 0
   fi
   if repo_foundry_pr_dependencies_unchanged "${1:-all}"; then
-    printf '%s\n' 'applicable=false'
-    return 0
+    return 1
   fi
   case "${1:-all}" in
     javascript) has_javascript_dependencies || return 1 ;;

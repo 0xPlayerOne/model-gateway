@@ -1,0 +1,29 @@
+name: CodeQL Analyze
+description: Initialize and analyze one CodeQL language using the repository baseline.
+
+inputs:
+  language:
+    description: CodeQL language identifier.
+    required: true
+  build-mode:
+    description: CodeQL build mode.
+    required: false
+    default: none
+  category:
+    description: CodeQL analysis category.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Initialize
+      uses: github/codeql-action/init@v4
+      with:
+        languages: ${{ inputs.language }}
+        build-mode: ${{ inputs.build-mode }}
+    - name: Analyze
+      uses: github/codeql-action/analyze@v4
+      with:
+        category: ${{ inputs.category }}
+        upload-database: false
+        wait-for-processing: false

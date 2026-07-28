@@ -94,6 +94,7 @@ jobs:
         uses: ./.github/actions/setup
         with:
           mise-scope: javascript
+          cache-save: ${{ github.event_name != 'pull_request' }}
       - name: Audit dependencies
         if: steps.applicability.outputs.applicable == 'true'
         run: bash .github/scripts/security.sh audit javascript
@@ -124,6 +125,7 @@ jobs:
         uses: ./.github/actions/setup
         with:
           mise-scope: rust
+          cache-save: ${{ github.event_name != 'pull_request' }}
       - name: Install cargo-audit
         if: steps.applicability.outputs.applicable == 'true'
         uses: taiki-e/install-action@v2
@@ -136,7 +138,10 @@ jobs:
   dependency-audit-python:
     name: Dependency Audit (Python) / ${{ matrix.requirement }}
     needs: profile
-    if: ${{ needs.profile.result == 'success' && needs.profile.outputs.python == 'true' }}
+    if: >-
+      ${{ needs.profile.result == 'success' &&
+      needs.profile.outputs.python == 'true' &&
+      needs.profile.outputs.python_requirements != '["none"]' }}
     strategy:
       fail-fast: false
       max-parallel: 8
@@ -169,6 +174,7 @@ jobs:
         uses: ./.github/actions/setup
         with:
           mise-scope: python
+          cache-save: ${{ github.event_name != 'pull_request' }}
       - name: Audit dependencies
         run: bash .github/scripts/security.sh audit python
 

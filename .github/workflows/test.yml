@@ -91,7 +91,7 @@ jobs:
           install-rust: ${{ steps.applicability.outputs.rust == 'true' }}
           cache-build: ${{ steps.applicability.outputs.rust == 'true' }}
           cache-environment: false
-          cache-save: false
+          cache-save: ${{ github.event_name == 'push' }}
           task: integration
           task-javascript: ${{ steps.applicability.outputs.javascript }}
           task-python: ${{ steps.applicability.outputs.python }}
@@ -114,8 +114,9 @@ jobs:
         run: bash .github/scripts/ci.sh task_profile e2e >> "$GITHUB_OUTPUT"
       - name: Cache browser binaries
         if: steps.applicability.outputs.applicable == 'true' && steps.applicability.outputs.browser == 'true'
-        uses: actions/cache@v5
+        uses: ./.github/actions/cache
         with:
+          save: ${{ github.event_name == 'push' }}
           path: |
             ~/.cache/ms-playwright
             ~/.cache/Cypress
@@ -133,7 +134,7 @@ jobs:
           install-rust: ${{ steps.applicability.outputs.rust == 'true' }}
           cache-build: false
           cache-environment: false
-          cache-save: false
+          cache-save: ${{ github.event_name == 'push' }}
           task: e2e
           task-javascript: ${{ steps.applicability.outputs.javascript }}
           task-python: ${{ steps.applicability.outputs.python }}
@@ -164,7 +165,7 @@ jobs:
           install-rust: ${{ steps.applicability.outputs.rust == 'true' }}
           cache-build: false
           cache-environment: false
-          cache-save: false
+          cache-save: ${{ github.event_name == 'push' }}
           task: smoke
           task-javascript: ${{ steps.applicability.outputs.javascript }}
           task-python: ${{ steps.applicability.outputs.python }}

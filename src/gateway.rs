@@ -29,8 +29,9 @@ use crate::config::{
 use crate::pricing::{EffectivePrice, PriceScope, PriceSourceKind, normalize_price_id};
 use crate::providers::prepare_request;
 use crate::routing::{
-    CatalogOffering, IdentityAliasEvidence, ReservationOutcome, ReservationRelease,
-    ReservationToken, RoutingError, RoutingStore, is_verified_free, quota_reference,
+    AccessKind, AccountLimitSnapshot, CatalogOffering, IdentityAliasEvidence, ReservationOutcome,
+    ReservationRelease, ReservationToken, RoutingError, RoutingStore, classify_access,
+    quota_reference,
 };
 use crate::secrets::{SecretError, SecretResolver};
 
@@ -171,14 +172,15 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
     let routing = Arc::new(RoutingStore::open(config.server.state_path.as_deref())?);
     for (provider_name, provider) in &config.providers {
         for model in &provider.free_models {
-            routing.upsert_offering(provider_name, model, true)?;
+            routing.upsert_offering(provider_name, model, AccessKind::ZeroPrice)?;
         }
     }
     for model in config.models.values() {
         for target in &model.targets {
             if let Some(provider) = config.providers.get(&target.provider) {
-                if is_verified_free(provider, &target.model, false) {
-                    routing.upsert_offering(&target.provider, &target.model, true)?;
+                let access_kind = classify_access(provider, &target.model, false);
+                if access_kind.is_free() {
+                    routing.upsert_offering(&target.provider, &target.model, access_kind)?;
                 }
             }
         }
@@ -763,16 +765,29 @@ async fn list_providers(
     Query(query): Query<ProvidersQuery>,
 ) -> Response {
     let mut model_counts = BTreeMap::new();
+    let account_limits = state.routing.account_limits().unwrap_or_default();
     if let Ok(offerings) = state
         .routing
         .all_candidates(state.config.server.catalog_max_age_seconds)
     {
         for offering in offerings {
+            let is_free = state
+                .config
+                .providers
+                .get(&offering.provider)
+                .is_some_and(|provider| {
+                    let access_kind = effective_access_kind(provider, &offering);
+                    access_kind.is_free()
+                        && account_allows_free_access(
+                            access_kind,
+                            account_limits.get(&offering.provider),
+                        )
+                });
             let counts = model_counts
                 .entry(offering.provider)
                 .or_insert((0usize, 0usize));
             counts.0 += 1;
-            if offering.is_free {
+            if is_free {
                 counts.1 += 1;
             }
         }
@@ -949,10 +964,10 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
         std::collections::HashSet::new();
     if let Ok(ref offerings) = catalog_offerings {
         for offering in offerings {
-            if offering.is_free {
-                continue;
-            }
             if let Some(config) = state.config.providers.get(&offering.provider) {
+                if effective_access_kind(config, offering).is_free() {
+                    continue;
+                }
                 if matches!(
                     config.billing_mode,
                     BillingMode::Paid | BillingMode::Subscription
@@ -996,12 +1011,12 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
         let alias_names: std::collections::HashSet<String> =
             state.config.models.keys().cloned().collect();
         for offering in &offerings {
-            if offering.is_free {
-                continue;
-            }
             let Some(config) = state.config.providers.get(&offering.provider) else {
                 continue;
             };
+            if effective_access_kind(config, offering).is_free() {
+                continue;
+            }
             if !matches!(
                 config.billing_mode,
                 BillingMode::Paid | BillingMode::Subscription
@@ -1197,10 +1212,29 @@ struct CatalogModelEntry<'a> {
     effort_level: Option<&'a str>,
     parameters: Option<String>,
     match_kind: Option<ModelMatchKind>,
+    account_limit: Option<AccountLimitSnapshot>,
 }
 
 fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
-    let input_price = if entry.offering.is_free {
+    let is_free = entry.offering.access_kind.is_free();
+    let reference_input = entry
+        .offering
+        .input_price_per_million
+        .or_else(|| entry.benchmark.and_then(|b| b.input_price_per_million));
+    let reference_output = entry
+        .offering
+        .output_price_per_million
+        .or_else(|| entry.benchmark.and_then(|b| b.output_price_per_million));
+    let reference_source = if entry.offering.input_price_per_million.is_some()
+        || entry.offering.output_price_per_million.is_some()
+    {
+        Some("provider_catalog")
+    } else if reference_input.is_some() || reference_output.is_some() {
+        Some("benchmark")
+    } else {
+        None
+    };
+    let input_price = if is_free {
         Some(0.0)
     } else {
         entry
@@ -1210,7 +1244,7 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
             .or(entry.offering.input_price_per_million)
             .or_else(|| entry.benchmark.and_then(|b| b.input_price_per_million))
     };
-    let output_price = if entry.offering.is_free {
+    let output_price = if is_free {
         Some(0.0)
     } else {
         entry
@@ -1245,17 +1279,33 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
         "price_per_million": {
             "input": input_price,
             "output": output_price,
-            "source": if entry.offering.is_free {
-                Some("provider_free")
+            "source": if is_free {
+                Some(match entry.offering.access_kind {
+                    AccessKind::ZeroPrice => "provider_free",
+                    AccessKind::QuotaLimitedFreeTier => "free_tier",
+                    AccessKind::Paid | AccessKind::Unknown => "unknown",
+                })
             } else {
                 entry.price.as_ref().map(|price| price.source.as_str())
             },
-            "estimated": if entry.offering.is_free {
+            "estimated": if is_free {
                 Some(false)
             } else {
                 entry.price.as_ref().map(|price| price.estimated)
             },
             "pricing_eligible": input_price.is_some() && output_price.is_some(),
+        },
+        "reference_price_per_million": {
+            "input": reference_input,
+            "output": reference_output,
+            "source": reference_source,
+        },
+        "access": {
+            "kind": entry.offering.access_kind,
+            "overage": if is_free { "gateway_blocked" } else { "paid" },
+            "remaining": entry.account_limit.and_then(|account| account.remaining),
+            "is_free_tier": entry.account_limit.and_then(|account| account.is_free_tier),
+            "account_status_fetched_at": entry.account_limit.map(|account| account.fetched_at),
         },
         "benchmark_match": entry.match_kind.map(ModelMatchKind::as_str),
         "benchmark_id": entry.benchmark.map(|benchmark| benchmark.id.clone()),
@@ -1396,6 +1446,15 @@ struct PaidCandidateContext<'a> {
     mappings: &'a IdentityMappingIndexes,
 }
 
+struct FreeCandidateContext<'a> {
+    providers: &'a BTreeMap<String, ProviderConfig>,
+    runtimes: &'a BTreeMap<String, ProviderRuntime>,
+    cfg: &'a ServerConfig,
+    provider_filter: Option<&'a str>,
+    mappings: &'a IdentityMappingIndexes,
+    account_limits: &'a BTreeMap<String, AccountLimitSnapshot>,
+}
+
 #[derive(Clone, Copy)]
 struct ModeModelValue<'a> {
     model: &'a str,
@@ -1403,27 +1462,58 @@ struct ModeModelValue<'a> {
     price: Option<&'a EffectivePrice>,
     pricing_eligible: bool,
     match_kind: Option<ModelMatchKind>,
-    is_free: bool,
+    access_kind: AccessKind,
+    reference_input_price: Option<f64>,
+    reference_output_price: Option<f64>,
+}
+
+fn effective_access_kind(provider: &ProviderConfig, offering: &CatalogOffering) -> AccessKind {
+    let zero_priced = offering.input_price_per_million == Some(0.0)
+        && offering.output_price_per_million == Some(0.0);
+    classify_access(provider, &offering.model, zero_priced)
+}
+
+fn account_allows_free_access(
+    access_kind: AccessKind,
+    account: Option<&AccountLimitSnapshot>,
+) -> bool {
+    if access_kind != AccessKind::QuotaLimitedFreeTier {
+        return true;
+    }
+    account.is_none_or(|account| {
+        account.is_free_tier != Some(false)
+            && account.remaining.is_none_or(|remaining| remaining > 0.0)
+    })
 }
 
 fn collect_free_candidates(
     offerings: &[CatalogOffering],
     benchmark_by_model: &BTreeMap<String, Vec<BenchmarkModel>>,
-    providers: &BTreeMap<String, ProviderConfig>,
-    runtimes: &BTreeMap<String, ProviderRuntime>,
-    cfg: &ServerConfig,
-    provider_filter: Option<&str>,
-    mappings: &IdentityMappingIndexes,
+    context: FreeCandidateContext<'_>,
 ) -> Vec<ModelCandidate> {
     let mut candidates = Vec::new();
     for offering in offerings {
-        if provider_filter.is_some_and(|p| p != offering.provider) {
+        if context
+            .provider_filter
+            .is_some_and(|p| p != offering.provider)
+        {
             continue;
         }
-        let Some(provider) = providers.get(&offering.provider) else {
+        let Some(provider) = context.providers.get(&offering.provider) else {
             continue;
         };
-        let Some(runtime) = runtimes.get(&offering.provider) else {
+        let access_kind = effective_access_kind(provider, offering);
+        if !access_kind.is_free()
+            || !account_allows_free_access(
+                access_kind,
+                context.account_limits.get(&offering.provider),
+            )
+        {
+            continue;
+        }
+        let mut offering = offering.clone();
+        offering.access_kind = access_kind;
+        let Some(runtime) = context.runtimes.get(&offering.provider) else {
             continue;
         };
         if !runtime.available
@@ -1436,14 +1526,19 @@ fn collect_free_candidates(
         {
             continue;
         }
-        if is_model_denied(&offering.model, &offering.provider, cfg) {
+        if is_model_denied(&offering.model, &offering.provider, context.cfg) {
             continue;
         }
-        let canonical = canonical_match(provider, &offering.provider, &offering.model, mappings);
+        let canonical = canonical_match(
+            provider,
+            &offering.provider,
+            &offering.model,
+            context.mappings,
+        );
         let matching =
             find_exact_matching_benchmarks(benchmark_by_model, &canonical.benchmark_model);
         if matching.is_empty() {
-            if cfg.free_models_quality.passes(
+            if context.cfg.free_models_quality.passes(
                 None,
                 offering.refreshed_at,
                 offering.input_price_per_million,
@@ -1466,7 +1561,7 @@ fn collect_free_candidates(
                     continue;
                 };
                 has_quality = true;
-                if !cfg.free_models_quality.passes(
+                if !context.cfg.free_models_quality.passes(
                     Some(benchmark),
                     offering.refreshed_at,
                     offering.input_price_per_million,
@@ -1485,7 +1580,7 @@ fn collect_free_candidates(
                 });
             }
             if !has_quality
-                && cfg.free_models_quality.passes(
+                && context.cfg.free_models_quality.passes(
                     None,
                     offering.refreshed_at,
                     offering.input_price_per_million,
@@ -1523,11 +1618,12 @@ fn collect_paid_candidates(
         let Some(provider) = context.providers.get(&offering.provider) else {
             continue;
         };
+        let access_kind = effective_access_kind(provider, offering);
         let Some(runtime) = context.runtimes.get(&offering.provider) else {
             continue;
         };
         if !runtime.available
-            || offering.is_free
+            || access_kind != AccessKind::Paid
             || !matches!(
                 provider.billing_mode,
                 BillingMode::Paid | BillingMode::Subscription
@@ -1541,6 +1637,8 @@ fn collect_paid_candidates(
         {
             continue;
         }
+        let mut offering = offering.clone();
+        offering.access_kind = access_kind;
         if is_model_denied(&offering.model, &offering.provider, context.cfg) {
             continue;
         }
@@ -1605,15 +1703,18 @@ async fn list_auto_models(
     let benchmark_max_age = cfg.benchmark_max_age_seconds;
     let catalog_max_age = cfg.catalog_max_age_seconds;
 
-    let (free_offerings, paid_offerings, benchmarks) = match tokio::try_join!(
+    let (free_offerings, paid_offerings, benchmarks, account_limits) = match tokio::try_join!(
         routing_operation(state.routing.clone(), move |routing| {
-            routing.free_candidates(catalog_max_age)
+            routing.all_candidates(catalog_max_age)
         }),
         routing_operation(state.routing.clone(), move |routing| {
             routing.all_candidates(catalog_max_age)
         }),
         routing_operation(state.routing.clone(), move |routing| {
             routing.benchmark_models(benchmark_max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.account_limits()
         }),
     ) {
         Ok(v) => v,
@@ -1638,11 +1739,14 @@ async fn list_auto_models(
     let free_candidates = collect_free_candidates(
         &free_offerings,
         &benchmark_by_model,
-        &state.config.providers,
-        &state.providers,
-        cfg,
-        None,
-        &mappings,
+        FreeCandidateContext {
+            providers: &state.config.providers,
+            runtimes: &state.providers,
+            cfg,
+            provider_filter: None,
+            mappings: &mappings,
+            account_limits: &account_limits,
+        },
     );
     let paid_candidates = collect_paid_candidates(
         &paid_offerings,
@@ -1669,6 +1773,7 @@ async fn list_auto_models(
                 "Auto-Free",
                 cfg.free_models_quality.min_composite_quality,
                 None,
+                Some(cfg.free_models_quality.max_quality_regret),
             ),
         );
     }
@@ -1682,6 +1787,7 @@ async fn list_auto_models(
                 "Auto-Efficient",
                 cfg.efficient_quality_floor,
                 Some(cfg.balanced_quality_floor),
+                None,
             ),
         );
     }
@@ -1695,6 +1801,7 @@ async fn list_auto_models(
                 "Auto-Balanced",
                 cfg.balanced_quality_floor,
                 Some(cfg.frontier_quality_floor_single),
+                None,
             ),
         );
     }
@@ -1707,6 +1814,7 @@ async fn list_auto_models(
                 "auto-frontier",
                 "Auto-Frontier",
                 cfg.frontier_quality_floor_single,
+                None,
                 None,
             ),
         );
@@ -1721,6 +1829,7 @@ fn select_mode_models(
     label: &str,
     quality_floor: f64,
     quality_ceiling: Option<f64>,
+    max_quality_regret: Option<f64>,
 ) -> Value {
     let mut scored: Vec<ScoredCandidate<ModeModelValue<'_>>> = Vec::new();
 
@@ -1738,10 +1847,31 @@ fn select_mode_models(
         let latency = benchmark
             .and_then(|b| b.latency_seconds)
             .unwrap_or(f64::MAX);
-        let expected_cost_microusd = if candidate.offering.is_free {
-            0
-        } else {
-            match candidate.price.as_ref() {
+        let reference_input_price = candidate
+            .offering
+            .input_price_per_million
+            .or_else(|| benchmark.and_then(|b| b.input_price_per_million));
+        let reference_output_price = candidate
+            .offering
+            .output_price_per_million
+            .or_else(|| benchmark.and_then(|b| b.output_price_per_million));
+        let expected_cost_microusd = match candidate.offering.access_kind {
+            AccessKind::ZeroPrice => 0,
+            AccessKind::QuotaLimitedFreeTier => {
+                match (reference_input_price, reference_output_price) {
+                    (Some(input), Some(output)) => expected_cost_microusd(
+                        256,
+                        benchmark
+                            .and_then(|b| b.output_tokens_per_task)
+                            .unwrap_or(256)
+                            .min(256),
+                        input,
+                        output,
+                    ),
+                    _ => u64::MAX,
+                }
+            }
+            AccessKind::Paid | AccessKind::Unknown => match candidate.price.as_ref() {
                 Some(price) => expected_cost_microusd(
                     256,
                     benchmark
@@ -1752,7 +1882,7 @@ fn select_mode_models(
                     price.output_price_per_million,
                 ),
                 _ => continue,
-            }
+            },
         };
         scored.push(ScoredCandidate {
             quality,
@@ -1762,13 +1892,25 @@ fn select_mode_models(
                 model: candidate.offering.model.as_str(),
                 provider: candidate.offering.provider.as_str(),
                 price: candidate.price.as_ref(),
-                pricing_eligible: candidate.offering.is_free || candidate.price.is_some(),
+                pricing_eligible: candidate.offering.access_kind.is_free()
+                    || candidate.price.is_some(),
                 match_kind: candidate.match_kind,
-                is_free: candidate.offering.is_free,
+                access_kind: candidate.offering.access_kind,
+                reference_input_price,
+                reference_output_price,
             },
         });
     }
 
+    if let Some(max_regret) = max_quality_regret {
+        if let Some(best_quality) = scored
+            .iter()
+            .map(|candidate| candidate.quality)
+            .reduce(f64::max)
+        {
+            scored.retain(|candidate| best_quality - candidate.quality <= max_regret);
+        }
+    }
     let eligible = scored;
     let mut ranked = pareto_rank(eligible.clone());
     let rank_order = |a: &ScoredCandidate<ModeModelValue<'_>>,
@@ -1801,6 +1943,7 @@ fn select_mode_models(
         "enabled": true,
         "mode": mode,
         "quality_floor": quality_floor,
+        "max_quality_regret": max_quality_regret,
         "primary": primary_entry,
         "fallbacks": fallbacks,
     })
@@ -1811,15 +1954,36 @@ fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
         "model": candidate.value.model,
         "provider": candidate.value.provider,
         "quality": candidate.quality,
-        "expected_cost_microusd": candidate.expected_cost_microusd,
+        "expected_cost_microusd": if candidate.value.access_kind.is_free() {
+            0
+        } else {
+            candidate.expected_cost_microusd
+        },
+        "reference_cost_microusd": if candidate.value.access_kind == AccessKind::QuotaLimitedFreeTier {
+            (candidate.expected_cost_microusd != u64::MAX).then_some(candidate.expected_cost_microusd)
+        } else {
+            None
+        },
         "latency_seconds": candidate.latency_seconds,
         "pricing_eligible": candidate.value.pricing_eligible,
         "benchmark_match": candidate.value.match_kind.map(ModelMatchKind::as_str),
-        "price_per_million": if candidate.value.is_free {
+        "access": {
+            "kind": candidate.value.access_kind,
+            "overage": if candidate.value.access_kind.is_free() { "gateway_blocked" } else { "paid" },
+        },
+        "reference_price_per_million": {
+            "input": candidate.value.reference_input_price,
+            "output": candidate.value.reference_output_price,
+        },
+        "price_per_million": if candidate.value.access_kind.is_free() {
             Some(json!({
                 "input": 0.0,
                 "output": 0.0,
-                "source": "provider_free",
+                "source": if candidate.value.access_kind == AccessKind::ZeroPrice {
+                    "provider_free"
+                } else {
+                    "free_tier"
+                },
                 "estimated": false,
             }))
         } else {
@@ -1878,12 +2042,15 @@ async fn list_free_models(
     let max_age = state.config.server.catalog_max_age_seconds;
     let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
 
-    let (offerings, benchmarks) = match tokio::try_join!(
+    let (offerings, benchmarks, account_limits) = match tokio::try_join!(
         routing_operation(state.routing.clone(), move |routing| {
-            routing.free_candidates(max_age)
+            routing.all_candidates(max_age)
         }),
         routing_operation(state.routing.clone(), move |routing| {
             routing.benchmark_models(benchmark_max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.account_limits()
         })
     ) {
         Ok(v) => v,
@@ -1914,11 +2081,14 @@ async fn list_free_models(
     let candidates = collect_free_candidates(
         &offerings,
         &benchmark_map,
-        &state.config.providers,
-        &state.providers,
-        &state.config.server,
-        provider_filter,
-        &mappings,
+        FreeCandidateContext {
+            providers: &state.config.providers,
+            runtimes: &state.providers,
+            cfg: &state.config.server,
+            provider_filter,
+            mappings: &mappings,
+            account_limits: &account_limits,
+        },
     );
 
     let mut providers = BTreeMap::new();
@@ -2046,6 +2216,7 @@ async fn list_free_models(
                     effort_level,
                     parameters: None,
                     match_kind,
+                    account_limit: account_limits.get(&offering.provider).copied(),
                 })
             },
         )
@@ -2231,6 +2402,7 @@ async fn list_paid_models(
                     effort_level,
                     parameters: None,
                     match_kind,
+                    account_limit: None,
                 })
             },
         )
@@ -2976,6 +3148,7 @@ struct FreeCandidate {
     target: SelectedTarget,
     quality: Option<f64>,
     latency_seconds: f64,
+    reference_cost_microusd: u64,
 }
 
 async fn resolve_auto_free_targets(
@@ -2985,15 +3158,18 @@ async fn resolve_auto_free_targets(
 ) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
     let max_age = state.config.server.catalog_max_age_seconds;
     let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
-    let (offerings, benchmarks, benchmark_snapshot) = tokio::try_join!(
+    let (offerings, benchmarks, benchmark_snapshot, account_limits) = tokio::try_join!(
         routing_operation(state.routing.clone(), move |routing| {
-            routing.free_candidates(max_age)
+            routing.all_candidates(max_age)
         }),
         routing_operation(state.routing.clone(), move |routing| {
             routing.benchmark_models(benchmark_max_age)
         }),
         routing_operation(state.routing.clone(), move |routing| {
             routing.active_benchmark_snapshot(benchmark_max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.account_limits()
         })
     )
     .map_err(|_| {
@@ -3016,8 +3192,15 @@ async fn resolve_auto_free_targets(
     let requirements = RequestRequirements::from_request(request);
     let candidates = offerings
         .into_iter()
-        .filter_map(|offering| {
+        .filter_map(|mut offering| {
             let provider = state.config.providers.get(&offering.provider)?;
+            let access_kind = effective_access_kind(provider, &offering);
+            if !access_kind.is_free()
+                || !account_allows_free_access(access_kind, account_limits.get(&offering.provider))
+            {
+                return None;
+            }
+            offering.access_kind = access_kind;
             let runtime = state.providers.get(&offering.provider)?;
             if !runtime.available
                 || (!provider.model_allowlist.is_empty()
@@ -3068,9 +3251,26 @@ async fn resolve_auto_free_targets(
             let latency = benchmark
                 .and_then(|b| b.latency_seconds)
                 .unwrap_or(f64::MAX);
+            let reference_cost_microusd = if access_kind == AccessKind::QuotaLimitedFreeTier {
+                match (effective_input, effective_output) {
+                    (Some(input), Some(output)) => expected_cost_microusd(
+                        requirements.estimated_input_tokens,
+                        benchmark
+                            .and_then(|b| b.output_tokens_per_task)
+                            .unwrap_or(requirements.estimated_output_tokens)
+                            .min(requirements.estimated_output_tokens),
+                        input,
+                        output,
+                    ),
+                    _ => u64::MAX,
+                }
+            } else {
+                0
+            };
             Some(FreeCandidate {
                 quality,
                 latency_seconds: latency,
+                reference_cost_microusd,
                 target: SelectedTarget {
                     runtime_provider: offering.provider.clone(),
                     provider: offering.provider.clone(),
@@ -3125,12 +3325,20 @@ async fn resolve_auto_free_targets(
         match c.quality {
             Some(quality) => scored.push(ScoredCandidate {
                 quality,
-                expected_cost_microusd: 0,
+                expected_cost_microusd: c.reference_cost_microusd,
                 latency_seconds: c.latency_seconds,
                 value: c,
             }),
             None => unbenchmarked.push(c),
         }
+    }
+    if let Some(best_quality) = scored
+        .iter()
+        .map(|candidate| candidate.quality)
+        .reduce(f64::max)
+    {
+        let max_regret = state.config.server.free_models_quality.max_quality_regret;
+        scored.retain(|candidate| best_quality - candidate.quality <= max_regret);
     }
     let mut ranked = pareto_rank(scored);
     ranked.sort_by(|left, right| {
@@ -3320,7 +3528,10 @@ async fn resolve_benchmark_targets(
         if model_benchmarks.is_empty() {
             continue;
         }
-        if !runtime.available || offering.is_free || provider.billing_mode == BillingMode::Free {
+        if !runtime.available
+            || effective_access_kind(provider, &offering) != AccessKind::Paid
+            || provider.billing_mode == BillingMode::Free
+        {
             continue;
         }
         let capability_mismatch = offering
@@ -3364,19 +3575,15 @@ async fn resolve_benchmark_targets(
             else {
                 continue;
             };
-            let expected_cost_microusd = if offering.is_free {
-                0
-            } else {
-                expected_cost_microusd(
-                    requirements.estimated_input_tokens,
-                    benchmark
-                        .output_tokens_per_task
-                        .unwrap_or(requirements.estimated_output_tokens)
-                        .min(requirements.estimated_output_tokens),
-                    effective_price.input_price_per_million,
-                    effective_price.output_price_per_million,
-                )
-            };
+            let expected_cost_microusd = expected_cost_microusd(
+                requirements.estimated_input_tokens,
+                benchmark
+                    .output_tokens_per_task
+                    .unwrap_or(requirements.estimated_output_tokens)
+                    .min(requirements.estimated_output_tokens),
+                effective_price.input_price_per_million,
+                effective_price.output_price_per_million,
+            );
             let reference = quota_reference(provider, &offering.model);
             candidates.push(ScoredCandidate {
                 value: SelectedTarget {

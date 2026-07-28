@@ -228,16 +228,30 @@ runs:
           auto)
             # Large Bun stores can take longer to transfer and extract than a
             # clean registry install. Keep normal projects cached, but avoid
-            # the expensive archive once the tracked Bun lockfiles exceed
-            # 512 KiB in total.
+            # the expensive archive for workspace graphs and once the tracked
+            # Bun lockfiles exceed 512 KiB in total. Workspace installs often
+            # resolve quickly from the registry, while their shared Bun store
+            # is expensive to archive. Set REPO_FOUNDRY_CACHE_PACKAGES=true
+            # when a repository has measured a cache win.
             if [ "$javascript_package_manager" = bun ]; then
+              bun_workspace=false
+              if [ -f package.json ] && node -e '
+                const p = require("./package.json");
+                const workspaces = p.workspaces;
+                process.exit(
+                  Array.isArray(workspaces) ||
+                  Boolean(workspaces && typeof workspaces === "object") ? 0 : 1,
+                );
+              ' 2>/dev/null; then
+                bun_workspace=true
+              fi
               bun_lock_bytes=0
               while IFS= read -r lockfile; do
                 [ -f "$lockfile" ] || continue
                 lock_bytes="$(wc -c < "$lockfile")"
                 bun_lock_bytes=$((bun_lock_bytes + lock_bytes))
               done < <(printf '%s\n' "$tracked_files" | awk '/(^|\/)bun\.lock(b)?$/')
-              if [ "$bun_lock_bytes" -gt 524288 ]; then
+              if [ "$bun_workspace" = true ] || [ "$bun_lock_bytes" -gt 524288 ]; then
                 javascript_packages_cache=false
               fi
             fi
@@ -690,6 +704,7 @@ runs:
     - name: Measure Bun dependencies
       id: javascript-bun-cache
       if: >-
+        inputs.cache-save == 'true' &&
         inputs.install == 'true' &&
         inputs.install-javascript == 'true' &&
         inputs.cache-installed != 'false' &&

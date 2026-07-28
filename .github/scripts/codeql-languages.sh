@@ -63,3 +63,24 @@ json=$(printf '%s\n' "${languages[@]}" | jq -Rsc --argjson changed "$changed_jso
     })
 ')
 printf 'languages=%s\n' "$json" >> "$GITHUB_OUTPUT"
+
+# Expose stable, shell-friendly outputs for explicit analyzer jobs. Keeping
+# these separate from the JSON matrix lets workflow-level conditions avoid
+# allocating a runner for languages that are absent or unchanged.
+for codeql_language in actions javascript-typescript python rust; do
+  output_prefix="$codeql_language"
+  case "$codeql_language" in
+    javascript-typescript) output_prefix="javascript" ;;
+  esac
+
+  entry="$(jq -c --arg language "$codeql_language" '.[] | select(.language == $language)' <<< "$json")"
+  if [ -n "$entry" ]; then
+    printf '%s_available=true\n' "$output_prefix" >> "$GITHUB_OUTPUT"
+    printf '%s_changed=%s\n' "$output_prefix" "$(jq -r '.changed' <<< "$entry")" >> "$GITHUB_OUTPUT"
+    printf '%s_build_mode=%s\n' "$output_prefix" "$(jq -r '."build-mode"' <<< "$entry")" >> "$GITHUB_OUTPUT"
+  else
+    printf '%s_available=false\n' "$output_prefix" >> "$GITHUB_OUTPUT"
+    printf '%s_changed=false\n' "$output_prefix" >> "$GITHUB_OUTPUT"
+    printf '%s_build_mode=none\n' "$output_prefix" >> "$GITHUB_OUTPUT"
+  fi
+done

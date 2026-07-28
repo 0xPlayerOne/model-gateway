@@ -37,13 +37,46 @@ pub struct CatalogOffering {
     pub provider: String,
     pub model: String,
     pub refreshed_at: i64,
-    pub is_free: bool,
+    pub access_kind: AccessKind,
     pub context_length: Option<u64>,
     pub supports_tools: Option<bool>,
     pub supports_vision: Option<bool>,
     pub supports_structured_output: Option<bool>,
     pub input_price_per_million: Option<f64>,
     pub output_price_per_million: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessKind {
+    ZeroPrice,
+    QuotaLimitedFreeTier,
+    Paid,
+    Unknown,
+}
+
+impl AccessKind {
+    pub const fn is_free(self) -> bool {
+        matches!(self, Self::ZeroPrice | Self::QuotaLimitedFreeTier)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ZeroPrice => "zero_price",
+            Self::QuotaLimitedFreeTier => "quota_limited_free_tier",
+            Self::Paid => "paid",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn from_database(value: &str) -> Self {
+        match value {
+            "zero_price" => Self::ZeroPrice,
+            "quota_limited_free_tier" => Self::QuotaLimitedFreeTier,
+            "paid" => Self::Paid,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +106,7 @@ pub type ApprovedIdentityReference = (String, String, String);
 #[derive(Debug, Clone)]
 pub struct CatalogRecord {
     pub model: String,
-    pub is_free: bool,
+    pub access_kind: AccessKind,
     pub context_length: Option<u64>,
     pub supports_tools: Option<bool>,
     pub supports_vision: Option<bool>,
@@ -105,6 +138,13 @@ pub type AccountLimitStatus = (
     Option<f64>,
     Option<bool>,
 );
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AccountLimitSnapshot {
+    pub fetched_at: i64,
+    pub remaining: Option<f64>,
+    pub is_free_tier: Option<bool>,
+}
 pub type PricingSnapshotStatus = (String, String, i64, u64, String);
 
 pub const PROVIDER_LIMIT_REFERENCES: &[ProviderLimitReference] = &[
@@ -266,7 +306,7 @@ impl RoutingStore {
         };
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 6 {
+        if version > 7 {
             return Err(RoutingError::UnsupportedSchema(version));
         }
         connection.execute_batch(
@@ -282,7 +322,8 @@ impl RoutingStore {
                  supports_vision INTEGER,
                   supports_structured_output INTEGER,
                   input_price_per_million REAL,
-                  output_price_per_million REAL,
+                 output_price_per_million REAL,
+                  access_kind TEXT NOT NULL DEFAULT 'unknown',
                   PRIMARY KEY (provider, model)
              );
              CREATE TABLE IF NOT EXISTS usage_counters (
@@ -460,12 +501,23 @@ impl RoutingStore {
                  );",
         )?;
         ensure_catalog_columns(&connection)?;
+        connection.execute(
+            "UPDATE catalog_models
+             SET access_kind = CASE
+                 WHEN is_free = 0 THEN 'paid'
+                 WHEN input_price_per_million = 0 AND output_price_per_million = 0
+                     THEN 'zero_price'
+                 ELSE 'quota_limited_free_tier'
+             END
+             WHERE access_kind = 'unknown'",
+            [],
+        )?;
         ensure_benchmark_columns(&connection)?;
         connection.execute(
             "DELETE FROM benchmark_snapshots WHERE source = 'pricing-overrides'",
             [],
         )?;
-        connection.pragma_update(None, "user_version", 6)?;
+        connection.pragma_update(None, "user_version", 7)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -1085,19 +1137,20 @@ impl RoutingStore {
                 "INSERT INTO catalog_models(
                     provider, model, is_free, refreshed_at, context_length,
                      supports_tools, supports_vision, supports_structured_output
-                     , input_price_per_million, output_price_per_million
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     , input_price_per_million, output_price_per_million, access_kind
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     provider,
                     model.model,
-                    i64::from(model.is_free),
+                    i64::from(model.access_kind.is_free()),
                     now,
                     model.context_length,
                     optional_bool(model.supports_tools),
                     optional_bool(model.supports_vision),
                     optional_bool(model.supports_structured_output),
                     model.input_price_per_million,
-                    model.output_price_per_million
+                    model.output_price_per_million,
+                    model.access_kind.as_str(),
                 ],
             )?;
         }
@@ -1109,16 +1162,23 @@ impl RoutingStore {
         &self,
         provider: &str,
         model: &str,
-        is_free: bool,
+        access_kind: AccessKind,
     ) -> Result<(), RoutingError> {
         let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         connection.execute(
-            "INSERT INTO catalog_models(provider, model, is_free, refreshed_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO catalog_models(provider, model, is_free, refreshed_at, access_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(provider, model) DO UPDATE SET
                  is_free = excluded.is_free,
+                 access_kind = excluded.access_kind,
                  refreshed_at = excluded.refreshed_at",
-            params![provider, model, i64::from(is_free), epoch_seconds()],
+            params![
+                provider,
+                model,
+                i64::from(access_kind.is_free()),
+                epoch_seconds(),
+                access_kind.as_str()
+            ],
         )?;
         Ok(())
     }
@@ -1129,11 +1189,12 @@ impl RoutingStore {
     ) -> Result<Vec<CatalogOffering>, RoutingError> {
         let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let mut statement = connection.prepare(
-            "SELECT provider, model, refreshed_at, is_free, context_length,
+            "SELECT provider, model, refreshed_at, access_kind, context_length,
                     supports_tools, supports_vision, supports_structured_output,
                     input_price_per_million, output_price_per_million
              FROM catalog_models
-             WHERE is_free = 1 AND refreshed_at >= ?1
+             WHERE access_kind IN ('zero_price', 'quota_limited_free_tier')
+                 AND refreshed_at >= ?1
              ORDER BY provider, model",
         )?;
         Ok(statement
@@ -1145,7 +1206,7 @@ impl RoutingStore {
                         provider: row.get(0)?,
                         model: row.get(1)?,
                         refreshed_at: row.get(2)?,
-                        is_free: row.get::<_, i64>(3)? != 0,
+                        access_kind: AccessKind::from_database(&row.get::<_, String>(3)?),
                         context_length: row.get(4)?,
                         supports_tools: database_bool(row.get(5)?),
                         supports_vision: database_bool(row.get(6)?),
@@ -1164,7 +1225,7 @@ impl RoutingStore {
     ) -> Result<Vec<CatalogOffering>, RoutingError> {
         let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let mut statement = connection.prepare(
-            "SELECT provider, model, refreshed_at, is_free, context_length,
+            "SELECT provider, model, refreshed_at, access_kind, context_length,
                     supports_tools, supports_vision, supports_structured_output
                      , input_price_per_million, output_price_per_million
               FROM catalog_models WHERE refreshed_at >= ?1 ORDER BY provider, model",
@@ -1178,7 +1239,7 @@ impl RoutingStore {
                         provider: row.get(0)?,
                         model: row.get(1)?,
                         refreshed_at: row.get(2)?,
-                        is_free: row.get::<_, i64>(3)? != 0,
+                        access_kind: AccessKind::from_database(&row.get::<_, String>(3)?),
                         context_length: row.get(4)?,
                         supports_tools: database_bool(row.get(5)?),
                         supports_vision: database_bool(row.get(6)?),
@@ -1435,6 +1496,26 @@ impl RoutingStore {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn account_limits(&self) -> Result<BTreeMap<String, AccountLimitSnapshot>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT provider, fetched_at, remaining, is_free_tier
+             FROM provider_account_limits",
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    AccountLimitSnapshot {
+                        fetched_at: row.get(1)?,
+                        remaining: row.get(2)?,
+                        is_free_tier: database_bool(row.get(3)?),
+                    },
+                ))
+            })?
+            .collect::<Result<BTreeMap<_, _>, _>>()?)
     }
 
     pub fn reserve(
@@ -1797,35 +1878,43 @@ impl RoutingStore {
     }
 }
 
-pub fn is_verified_free(provider: &ProviderConfig, model: &str, zero_priced: bool) -> bool {
+pub fn classify_access(provider: &ProviderConfig, model: &str, zero_priced: bool) -> AccessKind {
     let explicitly_free = provider.free_models.iter().any(|free| free == model);
     let lower = model.to_ascii_lowercase();
     if provider.profile == Some(ProviderProfileId::OpenCodeGo) {
-        return explicitly_free;
+        return if explicitly_free {
+            AccessKind::ZeroPrice
+        } else {
+            AccessKind::Paid
+        };
     }
     if provider.profile == Some(ProviderProfileId::KiloCode) {
-        return explicitly_free || lower.contains("free");
+        return if explicitly_free || lower.contains("free") {
+            AccessKind::ZeroPrice
+        } else {
+            AccessKind::Paid
+        };
     }
     if zero_priced || explicitly_free {
-        return true;
+        return AccessKind::ZeroPrice;
     }
     match provider.profile {
         Some(ProviderProfileId::OpenRouter)
         | Some(ProviderProfileId::NousPortal)
         | Some(ProviderProfileId::OrcaRouter) => {
             if lower.contains("free") {
-                return true;
+                return AccessKind::ZeroPrice;
             }
         }
         Some(ProviderProfileId::OpenCode) if lower.contains("free") || lower == "big-pickle" => {
-            return true;
+            return AccessKind::ZeroPrice;
         }
         _ => {}
     }
     if provider.billing_mode != BillingMode::Free {
-        return false;
+        return AccessKind::Paid;
     }
-    matches!(
+    if matches!(
         provider.profile,
         Some(ProviderProfileId::GoogleGemini)
             | Some(ProviderProfileId::Groq)
@@ -1833,7 +1922,15 @@ pub fn is_verified_free(provider: &ProviderConfig, model: &str, zero_priced: boo
             | Some(ProviderProfileId::NvidiaNim)
             | Some(ProviderProfileId::OllamaCloud)
             | Some(ProviderProfileId::SiliconFlow)
-    )
+    ) {
+        AccessKind::QuotaLimitedFreeTier
+    } else {
+        AccessKind::Paid
+    }
+}
+
+pub fn is_verified_free(provider: &ProviderConfig, model: &str, zero_priced: bool) -> bool {
+    classify_access(provider, model, zero_priced).is_free()
 }
 
 pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaReference> {
@@ -2183,6 +2280,7 @@ fn ensure_catalog_columns(connection: &Connection) -> Result<(), rusqlite::Error
         ("supports_structured_output", "INTEGER"),
         ("input_price_per_million", "REAL"),
         ("output_price_per_million", "REAL"),
+        ("access_kind", "TEXT NOT NULL DEFAULT 'unknown'"),
     ] {
         if !columns.iter().any(|column| column == name) {
             connection.execute(
@@ -2313,6 +2411,7 @@ fn set_unix_mode(path: &Path, mode: u32) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::sync::Arc;
 
@@ -2327,7 +2426,7 @@ mod tests {
     use crate::pricing::{PriceObservation, PriceRates, PriceScope, PriceSourceKind};
     use crate::providers::AccountLimit;
 
-    use super::{CatalogRecord, ReservationOutcome, RoutingStore};
+    use super::{AccessKind, CatalogRecord, ReservationOutcome, RoutingStore};
 
     #[test]
     fn catalog_replacement_is_atomic_per_provider() {
@@ -2344,6 +2443,51 @@ mod tests {
                 .expect("candidates")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn schema_v7_backfills_free_access_kinds() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("routing.sqlite3");
+        let connection = rusqlite::Connection::open(&path).expect("legacy database");
+        connection
+            .execute_batch(
+                "CREATE TABLE catalog_models (
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    is_free INTEGER NOT NULL,
+                    refreshed_at INTEGER NOT NULL,
+                    context_length INTEGER,
+                    supports_tools INTEGER,
+                    supports_vision INTEGER,
+                    supports_structured_output INTEGER,
+                    input_price_per_million REAL,
+                    output_price_per_million REAL,
+                    PRIMARY KEY (provider, model)
+                );
+                INSERT INTO catalog_models VALUES
+                    ('p', 'zero', 1, 9999999999, NULL, NULL, NULL, NULL, 0, 0),
+                    ('p', 'quota', 1, 9999999999, NULL, NULL, NULL, NULL, 1, 5),
+                    ('p', 'paid', 0, 9999999999, NULL, NULL, NULL, NULL, 1, 5);
+                PRAGMA user_version = 6;",
+            )
+            .expect("legacy schema");
+        drop(connection);
+
+        let store = RoutingStore::open(Some(&path)).expect("migrated store");
+        let offerings = store.all_candidates(u64::MAX).expect("offerings");
+        let access = offerings
+            .into_iter()
+            .map(|offering| (offering.model, offering.access_kind))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(access["zero"], AccessKind::ZeroPrice);
+        assert_eq!(access["quota"], AccessKind::QuotaLimitedFreeTier);
+        assert_eq!(access["paid"], AccessKind::Paid);
+        let connection = rusqlite::Connection::open(path).expect("migrated database");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(version, 7);
     }
 
     #[test]
@@ -2387,9 +2531,15 @@ mod tests {
     #[test]
     fn configured_free_override_is_required_for_custom_provider() {
         let mut provider = ProviderConfig::default();
-        assert!(!super::is_verified_free(&provider, "model", false));
+        assert_eq!(
+            super::classify_access(&provider, "model", false),
+            AccessKind::Paid
+        );
         provider.free_models.push("model".to_owned());
-        assert!(super::is_verified_free(&provider, "model", false));
+        assert_eq!(
+            super::classify_access(&provider, "model", false),
+            AccessKind::ZeroPrice
+        );
     }
 
     #[test]
@@ -2416,17 +2566,15 @@ mod tests {
 
         provider.profile = Some(ProviderProfileId::Mistral);
         provider.billing_mode = BillingMode::Free;
-        assert!(super::is_verified_free(
-            &provider,
-            "mistral-small-latest",
-            false
-        ));
+        assert_eq!(
+            super::classify_access(&provider, "mistral-small-latest", false),
+            AccessKind::QuotaLimitedFreeTier
+        );
         provider.billing_mode = BillingMode::Paid;
-        assert!(!super::is_verified_free(
-            &provider,
-            "mistral-small-latest",
-            false
-        ));
+        assert_eq!(
+            super::classify_access(&provider, "mistral-small-latest", false),
+            AccessKind::Paid
+        );
 
         provider.profile = Some(ProviderProfileId::Zai);
         provider.billing_mode = BillingMode::Free;
@@ -2436,7 +2584,11 @@ mod tests {
     fn catalog(model: &str, is_free: bool) -> CatalogRecord {
         CatalogRecord {
             model: model.to_owned(),
-            is_free,
+            access_kind: if is_free {
+                AccessKind::ZeroPrice
+            } else {
+                AccessKind::Paid
+            },
             context_length: None,
             supports_tools: None,
             supports_vision: None,
@@ -2626,7 +2778,7 @@ mod tests {
                 "kilocode",
                 &[CatalogRecord {
                     model: "mimo-v2-pro".to_owned(),
-                    is_free: false,
+                    access_kind: AccessKind::Paid,
                     context_length: None,
                     supports_tools: None,
                     supports_vision: None,

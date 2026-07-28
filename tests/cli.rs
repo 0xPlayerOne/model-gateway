@@ -4,7 +4,7 @@ use model_gateway::benchmarks::BenchmarkModel;
 use model_gateway::identity::{
     IdentityAliasRecord, IdentityConfidence, IdentityEntityRecord, IdentityImport,
 };
-use model_gateway::routing::{CatalogRecord, RoutingStore};
+use model_gateway::routing::{AccessKind, CatalogRecord, RoutingStore};
 
 /// Strip environment variables that would trigger automatic provider discovery
 /// via `discover_environment_providers` in the gateway's config loader.
@@ -334,7 +334,7 @@ pricing_profile = "fixture"
             "fixture",
             &[CatalogRecord {
                 model: "model-family".to_owned(),
-                is_free: false,
+                access_kind: AccessKind::Paid,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(false),
