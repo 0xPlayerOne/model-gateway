@@ -381,8 +381,7 @@ mod tests {
 
     use super::{
         ManualPriceImport, PriceObservation, PriceRates, PriceScope, PriceSourceKind,
-        parse_models_dev,
-        summarize_pricing,
+        parse_models_dev, summarize_pricing,
     };
 
     #[test]
