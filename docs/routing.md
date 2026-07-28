@@ -169,7 +169,15 @@ Returns all currently eligible free models filtered by the quality bar. Supports
 
 ### `/v1/paid-models`
 
-Returns all non-free models from paid/subscription providers. Supports `?task=`, `?limit=`, `?provider=` query parameters.
+Returns a compact, paginated summary of non-free models from paid/subscription providers. Supports `?task=`, `?limit=`, `?page=`, and `?provider=` query parameters. `limit` defaults to 25 and is capped at 100. Every result includes a `links.self` URL for its complete resource.
+
+Use `?view=full` when a collection response must include the complete pricing, benchmark, capability, access, and provenance fields. Prefer the individual resource for one model:
+
+### `/v1/models/{provider}/{model}`
+
+Returns the complete model resource, including benchmark matching, cache pricing, reference pricing, access limits, freshness, and provenance. The `{model}` portion may contain additional path segments; the resource ID is the exact `provider/model` identifier returned by `/v1/paid-models`.
+
+Collection responses include `page`, `per_page`, `total`, `pages`, and `links.self`/`links.prev`/`links.next` metadata. Links preserve the active filters and view, so clients can follow them without reconstructing request parameters.
 
 ### `/v1/auto-models`
 
