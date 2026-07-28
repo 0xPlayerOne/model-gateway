@@ -418,10 +418,15 @@ fn set_executable(_path: &Path) -> Result<(), CliProxyError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use super::{
-        CliProxyError, CliProxyPaths, OAuthProvider, VERSION, generated_config, hex, initialize,
-        install, login_command, release_asset,
+        CliProxyError, CliProxyPaths, OAuthProvider, VERSION, ensure_private_dir, generate_api_key,
+        generated_config, hex, initialize, install, login_command, random_bytes, release_asset,
+        set_executable, set_private_dir, set_private_file, validate_paths, write_private_file,
     };
+    use std::path::Path;
 
     #[test]
     fn generated_config_is_loopback_only_and_disables_management() {
@@ -560,5 +565,195 @@ mod tests {
             auth_dir: auth_link,
         };
         assert!(initialize(&auth_paths, "secret", false).is_err());
+    }
+
+    #[test]
+    fn random_bytes_returns_correct_length() {
+        let bytes = random_bytes::<16>().expect("16 bytes");
+        assert_eq!(bytes.len(), 16);
+
+        let bytes = random_bytes::<32>().expect("32 bytes");
+        assert_eq!(bytes.len(), 32);
+
+        // Verify it's not all zeros (astronomically unlikely to fail)
+        let bytes = random_bytes::<32>().expect("32 bytes");
+        assert!(bytes.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn generate_api_key_uses_correct_format() {
+        let key = generate_api_key().expect("api key");
+        // "mg-cpa-" prefix + 64 hex chars (32 bytes)
+        assert!(key.starts_with("mg-cpa-"));
+        assert_eq!(key.len(), 71);
+        // Every character after the prefix must be a hex digit
+        let hex_part = &key["mg-cpa-".len()..];
+        assert!(hex_part.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn validate_paths_rejects_missing_binary() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let paths = CliProxyPaths {
+            root: directory.path().to_path_buf(),
+            binary: directory.path().join("missing-binary"),
+            config: directory.path().join("config.yaml"),
+            auth_dir: directory.path().join("auth"),
+        };
+        std::fs::write(&paths.config, b"config").expect("write config");
+        assert!(matches!(
+            validate_paths(&paths),
+            Err(CliProxyError::BinaryMissing(_))
+        ));
+    }
+
+    #[test]
+    fn validate_paths_rejects_missing_config() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary_path = directory.path().join("cli-proxy-api");
+        std::fs::write(&binary_path, b"binary").expect("write binary");
+        std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o700))
+            .expect("set executable");
+        let paths = CliProxyPaths {
+            root: directory.path().to_path_buf(),
+            binary: binary_path,
+            config: directory.path().join("missing-config.yaml"),
+            auth_dir: directory.path().join("auth"),
+        };
+        assert!(matches!(
+            validate_paths(&paths),
+            Err(CliProxyError::ConfigMissing(_))
+        ));
+    }
+
+    #[test]
+    fn validate_paths_accepts_existing_binary_and_config() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary_path = directory.path().join("cli-proxy-api");
+        let config_path = directory.path().join("config.yaml");
+        std::fs::write(&binary_path, b"binary").expect("write binary");
+        std::fs::write(&config_path, b"config").expect("write config");
+        std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o700))
+            .expect("set executable");
+        let paths = CliProxyPaths {
+            root: directory.path().to_path_buf(),
+            binary: binary_path,
+            config: config_path,
+            auth_dir: directory.path().join("auth"),
+        };
+        assert!(validate_paths(&paths).is_ok());
+    }
+
+    #[test]
+    fn write_private_file_creates_file_with_content() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("secret.txt");
+        write_private_file(&path, b"secret content").expect("write");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "secret content"
+        );
+    }
+
+    #[test]
+    fn ensure_private_dir_creates_missing_directory() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let new_dir = directory.path().join("new-dir");
+        assert!(!new_dir.exists());
+        ensure_private_dir(&new_dir).expect("create dir");
+        assert!(new_dir.is_dir());
+    }
+
+    #[test]
+    fn ensure_private_dir_accepts_existing_directory() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        ensure_private_dir(directory.path()).expect("existing dir");
+        assert!(directory.path().is_dir());
+    }
+
+    #[test]
+    fn ensure_private_dir_rejects_file_path() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let file_path = directory.path().join("not-a-dir");
+        std::fs::write(&file_path, b"content").expect("write file");
+        assert!(ensure_private_dir(&file_path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_private_dir_sets_correct_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("private-dir");
+        std::fs::create_dir(&target).expect("create dir");
+        // Set a permissive mode first
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("set permissive");
+        set_private_dir(&target).expect("set private");
+        let meta = std::fs::symlink_metadata(&target).expect("metadata");
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o700,
+            "expected 0700 permissions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_private_file_and_set_executable_set_correct_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let file_path = directory.path().join("private-file");
+        std::fs::write(&file_path, b"data").expect("write file");
+        // Set a permissive mode first
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o644))
+            .expect("set permissive");
+        set_private_file(&file_path).expect("set private");
+        let meta = std::fs::symlink_metadata(&file_path).expect("metadata");
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o600,
+            "expected 0600 permissions"
+        );
+
+        // Now set executable
+        set_executable(&file_path).expect("set executable");
+        let meta = std::fs::symlink_metadata(&file_path).expect("metadata");
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o700,
+            "expected 0700 permissions after executable"
+        );
+    }
+
+    #[test]
+    fn cli_proxy_paths_discover_uses_defaults_when_no_env_vars() {
+        let paths = CliProxyPaths::discover(Path::new("/tmp/model-gateway/config.toml"));
+        assert_eq!(paths.root, Path::new("/tmp/model-gateway/cli-proxy"));
+        assert_eq!(
+            paths.binary,
+            Path::new("/tmp/model-gateway/cli-proxy/bin")
+                .join(VERSION)
+                .join("cli-proxy-api")
+        );
+        assert_eq!(
+            paths.config,
+            Path::new("/tmp/model-gateway/cli-proxy/config.yaml")
+        );
+        assert_eq!(
+            paths.auth_dir,
+            Path::new("/tmp/model-gateway/cli-proxy/auth")
+        );
+    }
+
+    #[test]
+    fn hex_handles_empty_and_single_bytes() {
+        assert_eq!(hex(&[]), "");
+        assert_eq!(hex(&[0x00]), "00");
+        assert_eq!(hex(&[0x01]), "01");
+        assert_eq!(hex(&[0xff]), "ff");
+        assert_eq!(hex(&[0xab, 0xcd, 0xef]), "abcdef");
     }
 }
