@@ -59,11 +59,11 @@ fi
 
 tmp_file="$(mktemp)"
 {
-  printf '%s\n' '# Managed by repo-foundry. Repository owners/admins are discovered during initialization.'
+  printf '%s\n' '# Managed by code-foundry. Repository owners/admins are discovered during initialization.'
   printf '* %s\n' "$owner_line"
   if [ -n "$existing_file" ]; then
     awk '
-      /^# Managed by repo-foundry\./ { managed=1; next }
+      /^# Managed by code-foundry\./ { managed=1; next }
       managed && /^\* / { managed=0; next }
       managed { next }
       /^\* @(OWNER|[^[:space:]]+)/ { next }
