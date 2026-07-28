@@ -151,6 +151,7 @@ Or per-provider: `MODEL_GATEWAY_OPENAI_API_BILLING_MODE=paid`. See [docs/configu
 | `pricing refresh` | Fetch provider-scoped public pricing from models.dev |
 | `pricing import --file <path>` | Import exact provider/model pricing overrides |
 | `pricing status` | Inspect active pricing snapshots |
+| `pricing coverage [--provider <name>] [--json]` | Report complete, incomplete, and missing pricing per catalog model |
 | `pricing explain <provider> <model>` | Show the selected effective price source |
 | `matching reconcile [--provider <name>] [--json] [--check]` | Report identity coverage; fail on mapping drift or ambiguity |
 | `matching refresh` | Refresh source-backed model identities from models.dev and OpenRouter |

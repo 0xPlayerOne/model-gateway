@@ -21,7 +21,8 @@ use model_gateway::config::{
     QuotaKind, QuotaLimit, TargetConfig,
 };
 use model_gateway::gateway::{
-    ModelMatchKind, is_exact_model_identity, reconcile_model_matches, run_server,
+    ModelMatchKind, is_exact_model_identity, reconcile_model_matches, report_pricing_coverage,
+    run_server,
 };
 use model_gateway::identity::fetch_identity_sources;
 use model_gateway::pricing::{ManualPriceImport, PriceSourceKind, fetch_models_dev};
@@ -142,6 +143,12 @@ enum PricingCommand {
         file: PathBuf,
     },
     Status,
+    Coverage {
+        #[arg(long, help = "Report only one configured provider")]
+        provider: Option<String>,
+        #[arg(long, help = "Emit machine-readable JSON")]
+        json: bool,
+    },
     Explain {
         provider: String,
         model: String,
@@ -485,22 +492,8 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
         PricingCommand::Import { file } => {
             let fetched_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             let fetched_at = i64::try_from(fetched_at)?;
-            let observations = std::fs::read_to_string(&file)?
-                .lines()
-                .enumerate()
-                .filter(|(_, line)| !line.trim().is_empty())
-                .map(|(line_number, line)| {
-                    serde_json::from_str::<ManualPriceImport>(line)
-                        .map(|record| record.observation(fetched_at))
-                        .map_err(|error| {
-                            format!(
-                                "{}:{}: invalid pricing override: {error}",
-                                file.display(),
-                                line_number + 1
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let contents = std::fs::read_to_string(&file)?;
+            let observations = parse_manual_price_imports(&contents, &file, fetched_at)?;
             let snapshot = store.replace_pricing(
                 "manual-overrides",
                 PriceSourceKind::Manual,
@@ -521,6 +514,43 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
                 println!(
                     "{source}: kind={kind}, {count} observations, fetched_at={fetched_at}, attribution={attribution}"
                 );
+            }
+        }
+        PricingCommand::Coverage { provider, json } => {
+            if provider
+                .as_ref()
+                .is_some_and(|name| !config.providers.contains_key(name))
+            {
+                return Err(format!("unknown provider '{}'", provider.unwrap()).into());
+            }
+            let report = report_pricing_coverage(&config, &store, provider.as_deref())?;
+            let mut summary = BTreeMap::<&str, usize>::new();
+            for entry in &report {
+                *summary.entry(entry.status.as_str()).or_default() += 1;
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "summary": summary,
+                        "models": report,
+                    }))?
+                );
+            } else {
+                for entry in &report {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        entry.status.as_str(),
+                        entry.provider,
+                        entry.catalog_model,
+                        entry.effective_source.as_deref().unwrap_or("-"),
+                        entry.effective_scope.map_or("-", |scope| scope.as_str()),
+                    );
+                }
+                println!("Summary:");
+                for (status, count) in summary {
+                    println!("  {status}: {count}");
+                }
             }
         }
         PricingCommand::Explain { provider, model } => {
@@ -562,6 +592,29 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn parse_manual_price_imports(
+    contents: &str,
+    file: &std::path::Path,
+    fetched_at: i64,
+) -> Result<Vec<model_gateway::pricing::PriceObservation>, String> {
+    contents
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(line_number, line)| {
+            serde_json::from_str::<ManualPriceImport>(line)
+                .map(|record| record.observation(fetched_at))
+                .map_err(|error| {
+                    format!(
+                        "{}:{}: invalid pricing override: {error}",
+                        file.display(),
+                        line_number + 1
+                    )
+                })
+        })
+        .collect()
 }
 
 fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
@@ -1458,7 +1511,9 @@ fn credentials(command: CredentialCommand) -> Result<(), Box<dyn Error>> {
 mod tests {
     use model_gateway::config::{Config, ModelConfig, TargetConfig};
 
-    use super::config_diff;
+    use clap::Parser;
+
+    use super::{Cli, config_diff, parse_manual_price_imports};
 
     #[test]
     fn config_diff_contains_no_secret_values() {
@@ -1476,5 +1531,50 @@ mod tests {
         assert!(diff.contains("public-alias"));
         assert!(!diff.contains("password"));
         assert!(!diff.contains("Bearer"));
+    }
+
+    #[test]
+    fn manual_price_import_parser_ignores_blank_lines_and_normalizes_provider() {
+        let input = r#"
+{"provider":" KiloCode ","model":"model","input_price_per_million":1.25,"output_price_per_million":4.5}
+
+"#;
+        let observations =
+            parse_manual_price_imports(input, std::path::Path::new("prices.jsonl"), 123)
+                .expect("pricing overrides");
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].provider_key.as_deref(), Some("kilocode"));
+        assert_eq!(observations[0].fetched_at, Some(123));
+    }
+
+    #[test]
+    fn manual_price_import_parser_reports_the_failing_line() {
+        let error = parse_manual_price_imports(
+            "{\"provider\":\"p\",\"model\":\"m\",\"input_price_per_million\":1,\"output_price_per_million\":2}\nnot-json\n",
+            std::path::Path::new("prices.jsonl"),
+            123,
+        )
+        .expect_err("invalid JSONL should fail");
+        assert!(error.contains("prices.jsonl:2: invalid pricing override"));
+    }
+
+    #[test]
+    fn cli_rejects_missing_required_pricing_import_file() {
+        let error = Cli::try_parse_from(["model-gateway", "pricing", "import"])
+            .expect_err("pricing import requires a file");
+        assert!(
+            error
+                .to_string()
+                .contains("the following required arguments")
+        );
+        assert!(error.to_string().contains("--file"));
+    }
+
+    #[test]
+    fn cli_rejects_unknown_nested_subcommands() {
+        let error =
+            Cli::try_parse_from(["model-gateway", "matching", "reconcile", "--json", "--nope"])
+                .expect_err("unknown flags should fail parsing");
+        assert!(error.to_string().contains("unexpected argument '--nope'"));
     }
 }

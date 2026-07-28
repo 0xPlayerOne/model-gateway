@@ -27,6 +27,7 @@ use crate::config::{
     BillingMode, Config, ProviderConfig, ProviderProfileId, ServerConfig, TargetConfig,
 };
 use crate::pricing::{EffectivePrice, PriceScope, PriceSourceKind, normalize_price_id};
+use crate::providers::BuiltinProvider;
 use crate::providers::prepare_request;
 use crate::routing::{
     AccessKind, AccountLimitSnapshot, CatalogOffering, IdentityAliasEvidence, ReservationOutcome,
@@ -246,11 +247,157 @@ pub struct ModelMatchReport {
     pub identity_evidence: Vec<IdentityAliasEvidence>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PricingCoverageKind {
+    Complete,
+    Incomplete,
+    Missing,
+}
+
+impl PricingCoverageKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Incomplete => "incomplete",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PricingCoverageReport {
+    pub provider: String,
+    pub catalog_model: String,
+    pub status: PricingCoverageKind,
+    pub catalog_input_price_per_million: Option<f64>,
+    pub catalog_output_price_per_million: Option<f64>,
+    pub effective_input_price_per_million: Option<f64>,
+    pub effective_output_price_per_million: Option<f64>,
+    pub effective_source: Option<String>,
+    pub effective_scope: Option<PriceScope>,
+    pub estimated: Option<bool>,
+}
+
+pub fn report_pricing_coverage(
+    config: &Config,
+    routing: &RoutingStore,
+    provider_filter: Option<&str>,
+) -> Result<Vec<PricingCoverageReport>, RoutingError> {
+    let offerings = routing.all_candidates(config.server.catalog_max_age_seconds)?;
+    offerings
+        .into_iter()
+        .filter(|offering| {
+            provider_filter.is_none_or(|provider| provider == offering.provider)
+                && !is_provider_auto_route(&offering.model)
+        })
+        .map(|offering| {
+            let provider_config = config.providers.get(&offering.provider);
+            let profile_key = provider_config.and_then(|provider| {
+                provider
+                    .pricing_profile
+                    .as_deref()
+                    .or_else(|| provider.profile.and_then(BuiltinProvider::models_dev_key))
+            });
+            let canonical = provider_config.and_then(|provider| {
+                provider
+                    .model_mappings
+                    .get(&offering.model)
+                    .map(String::as_str)
+            });
+            let effective = routing.effective_price(
+                &offering.provider,
+                profile_key,
+                &offering.model,
+                canonical,
+                config.server.pricing_max_age_seconds,
+            )?;
+            let incomplete_observation = if effective.is_none() {
+                routing.has_incomplete_price_observation(
+                    &offering.provider,
+                    profile_key,
+                    &offering.model,
+                    canonical,
+                    config.server.pricing_max_age_seconds,
+                )?
+            } else {
+                false
+            };
+            let direct_complete = offering.input_price_per_million.is_some()
+                && offering.output_price_per_million.is_some();
+            let direct_incomplete = offering.input_price_per_million.is_some()
+                || offering.output_price_per_million.is_some();
+            let status = if effective.is_some() || direct_complete {
+                PricingCoverageKind::Complete
+            } else if direct_incomplete || incomplete_observation {
+                PricingCoverageKind::Incomplete
+            } else {
+                PricingCoverageKind::Missing
+            };
+            Ok(PricingCoverageReport {
+                provider: offering.provider,
+                catalog_model: offering.model,
+                status,
+                catalog_input_price_per_million: offering.input_price_per_million,
+                catalog_output_price_per_million: offering.output_price_per_million,
+                effective_input_price_per_million: effective
+                    .as_ref()
+                    .map(|price| price.input_price_per_million),
+                effective_output_price_per_million: effective
+                    .as_ref()
+                    .map(|price| price.output_price_per_million),
+                effective_source: effective.as_ref().map(|price| price.source.clone()),
+                effective_scope: effective.as_ref().map(|price| price.scope),
+                estimated: effective.as_ref().map(|price| price.estimated),
+            })
+        })
+        .collect()
+}
+
 enum BenchmarkResolution<'a> {
     Exact(Vec<&'a BenchmarkModel>),
     Suggested(Vec<&'a BenchmarkModel>),
     Ambiguous(Vec<String>),
     Unmatched,
+}
+
+struct BenchmarkIdentityIndex {
+    models: Vec<BenchmarkModel>,
+    raw: BTreeMap<String, Vec<usize>>,
+    identities: BTreeMap<String, Vec<usize>>,
+}
+
+impl BenchmarkIdentityIndex {
+    fn new(models: Vec<BenchmarkModel>) -> Self {
+        let mut index = Self {
+            models,
+            raw: BTreeMap::new(),
+            identities: BTreeMap::new(),
+        };
+        for (position, benchmark) in index.models.iter().enumerate() {
+            for variant in normalized_identifier_variants(&benchmark.id) {
+                index.raw.entry(variant).or_default().push(position);
+            }
+            for variant in normalized_identifier_variants(&benchmark_identity_id(benchmark)) {
+                index.identities.entry(variant).or_default().push(position);
+            }
+        }
+        index
+    }
+
+    fn exact_matches(&self, model: &str, raw: bool) -> Vec<&BenchmarkModel> {
+        let lookup = if raw { &self.raw } else { &self.identities };
+        let mut positions = BTreeSet::new();
+        for variant in normalized_identifier_variants(model) {
+            if let Some(matches) = lookup.get(&variant) {
+                positions.extend(matches.iter().copied());
+            }
+        }
+        positions
+            .into_iter()
+            .map(|position| &self.models[position])
+            .collect()
+    }
 }
 
 pub fn reconcile_model_matches(
@@ -259,14 +406,9 @@ pub fn reconcile_model_matches(
     provider_filter: Option<&str>,
 ) -> Result<Vec<ModelMatchReport>, RoutingError> {
     let offerings = routing.all_candidates(config.server.catalog_max_age_seconds)?;
-    let benchmarks = routing.benchmark_models(config.server.benchmark_max_age_seconds)?;
-    let mut benchmark_map = BTreeMap::<String, Vec<BenchmarkModel>>::new();
-    for benchmark in benchmarks {
-        benchmark_map
-            .entry(benchmark.id.clone())
-            .or_default()
-            .push(benchmark);
-    }
+    let benchmark_index = BenchmarkIdentityIndex::new(
+        routing.benchmark_models(config.server.benchmark_max_age_seconds)?,
+    );
     let mappings = identity_mapping_indexes(routing);
     let identity_aliases = routing.active_identity_aliases().unwrap_or_default();
     let mut report = Vec::new();
@@ -293,7 +435,10 @@ pub fn reconcile_model_matches(
             })
             .unwrap_or_default();
         if canonical.kind != ModelMatchKind::Exact {
-            let exact = find_exact_matching_benchmarks(&benchmark_map, &canonical.benchmark_model);
+            let exact = find_exact_matching_benchmarks_indexed(
+                &benchmark_index,
+                &canonical.benchmark_model,
+            );
             report.push(ModelMatchReport {
                 provider: offering.provider,
                 catalog_model: offering.model,
@@ -310,7 +455,7 @@ pub fn reconcile_model_matches(
             continue;
         }
 
-        let resolution = resolve_benchmark_identity(&benchmark_map, &offering.model);
+        let resolution = resolve_benchmark_identity_indexed(&benchmark_index, &offering.model);
         let identity_conflict = identity_provider_key(provider).and_then(|provider_key| {
             mappings
                 .conflicts
@@ -372,6 +517,68 @@ pub fn reconcile_model_matches(
         report.push(entry);
     }
     Ok(report)
+}
+
+fn find_exact_matching_benchmarks_indexed<'a>(
+    benchmarks: &'a BenchmarkIdentityIndex,
+    model: &str,
+) -> Vec<&'a BenchmarkModel> {
+    match resolve_benchmark_identity_indexed(benchmarks, model) {
+        BenchmarkResolution::Exact(models) => models,
+        BenchmarkResolution::Suggested(_)
+        | BenchmarkResolution::Ambiguous(_)
+        | BenchmarkResolution::Unmatched => Vec::new(),
+    }
+}
+
+fn resolve_benchmark_identity_indexed<'a>(
+    benchmarks: &'a BenchmarkIdentityIndex,
+    model: &str,
+) -> BenchmarkResolution<'a> {
+    let normalized = normalize_identifier(model);
+    let stripped = strip_model_noise(model);
+    let mut lookups = vec![model.to_owned()];
+    if normalize_identifier(&stripped) != normalized {
+        lookups.push(stripped);
+    }
+
+    if has_explicit_effort_suffix(model) {
+        let exact = benchmarks.exact_matches(model, true);
+        if !exact.is_empty() {
+            return BenchmarkResolution::Exact(exact);
+        }
+    }
+
+    for lookup in &lookups {
+        let exact = benchmarks.exact_matches(lookup, false);
+        if !exact.is_empty() {
+            return BenchmarkResolution::Exact(exact);
+        }
+    }
+
+    if has_dynamic_or_release_suffix(model) {
+        return BenchmarkResolution::Unmatched;
+    }
+
+    for lookup in &lookups {
+        let mut groups = BTreeMap::<String, Vec<&BenchmarkModel>>::new();
+        for benchmark in &benchmarks.models {
+            let identity = benchmark_identity_id(benchmark);
+            if benchmark_ids_match(lookup, &identity) {
+                groups
+                    .entry(normalize_identifier(&identity))
+                    .or_default()
+                    .push(benchmark);
+            }
+        }
+        if groups.len() == 1 {
+            return BenchmarkResolution::Suggested(groups.into_values().next().unwrap_or_default());
+        }
+        if groups.len() > 1 {
+            return BenchmarkResolution::Ambiguous(groups.into_keys().collect());
+        }
+    }
+    BenchmarkResolution::Unmatched
 }
 
 fn find_benchmark<'a>(
@@ -5028,16 +5235,17 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        ModelMatchKind, ModelMetadata, RequestRequirements, SelectionMetadata, StreamChoice,
-        add_model_headers, benchmark_ids_match, benchmark_price_for_model, benchmarks_for_effort,
-        copy_safe_headers, decorate_json_response, estimate_request_tokens, expected_cost_microusd,
+        BenchmarkIdentityIndex, ModelMatchKind, ModelMetadata, RequestRequirements,
+        SelectionMetadata, StreamChoice, add_model_headers, benchmark_ids_match,
+        benchmark_price_for_model, benchmarks_for_effort, copy_safe_headers,
+        decorate_json_response, estimate_request_tokens, expected_cost_microusd,
         find_all_matching_benchmarks, find_benchmark, find_exact_matching_benchmarks,
-        find_suggested_benchmark, footer_sse_event, has_dynamic_or_release_suffix, header_value,
-        identity_mapping_indexes, is_fallback_status, is_model_denied, is_provider_auto_route,
-        is_reasoning_effort, log_request, malformed_sse_event, parse_json_usage, parse_sse_usage,
-        parse_usage_value, rank_benchmark_models, rate_limit_reset_delay, request_id,
-        request_id_from_response, session_material, sse_model, strip_model_noise, take_sse_event,
-        transform_sse_event,
+        find_exact_matching_benchmarks_indexed, find_suggested_benchmark, footer_sse_event,
+        has_dynamic_or_release_suffix, header_value, identity_mapping_indexes, is_fallback_status,
+        is_model_denied, is_provider_auto_route, is_reasoning_effort, log_request,
+        malformed_sse_event, parse_json_usage, parse_sse_usage, parse_usage_value,
+        rank_benchmark_models, rate_limit_reset_delay, request_id, request_id_from_response,
+        session_material, sse_model, strip_model_noise, take_sse_event, transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
     use crate::identity::{
@@ -5085,6 +5293,45 @@ mod tests {
             )],
         )]);
         find_all_matching_benchmarks(&benchmarks, catalog_id).len() == 1
+    }
+
+    #[test]
+    fn indexed_exact_matching_preserves_strict_identity_results() {
+        let models = vec![
+            BenchmarkModel::fixture("gpt-4o-2024-08-06", 50.0, 50.0, 50.0, 1.0, 1.0),
+            BenchmarkModel::fixture("gemini-2-5-flash", 50.0, 50.0, 50.0, 1.0, 1.0),
+            BenchmarkModel::fixture("model-family-40k", 50.0, 50.0, 50.0, 1.0, 1.0),
+            BenchmarkModel::fixture("model-family-80k", 50.0, 50.0, 50.0, 1.0, 1.0),
+        ];
+        let map: BTreeMap<String, Vec<BenchmarkModel>> =
+            models
+                .iter()
+                .cloned()
+                .fold(BTreeMap::new(), |mut map, model| {
+                    map.entry(model.id.clone()).or_default().push(model);
+                    map
+                });
+        let index = BenchmarkIdentityIndex::new(models);
+
+        for catalog_id in [
+            "openai/gpt-4o-2024-08-06",
+            "gemini-2.5-flash",
+            "provider/model-family-40k",
+            "model-family",
+        ] {
+            let indexed = find_exact_matching_benchmarks_indexed(&index, catalog_id)
+                .into_iter()
+                .map(|model| model.id.clone())
+                .collect::<Vec<_>>();
+            let scanned = find_exact_matching_benchmarks(&map, catalog_id)
+                .into_iter()
+                .map(|model| model.id.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                indexed, scanned,
+                "identity behavior changed for {catalog_id}"
+            );
+        }
     }
 
     fn resolves_exact_single(catalog_id: &str, benchmark_id: &str) -> bool {

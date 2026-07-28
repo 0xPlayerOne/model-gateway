@@ -42,6 +42,7 @@ model-gateway matching reconcile --check
 model-gateway matching refresh
 model-gateway matching explain opencode-go mimo-v2.5
 model-gateway matching approve opencode-go mimo-v2.5 mimo-v2-5-0424
+model-gateway pricing coverage --json
 ```
 
 Reconciliation classifies fresh offerings as `exact`, `configured`,
@@ -53,6 +54,12 @@ unmatched and runtime routing excludes it.
 Identity mappings affect benchmark quality only. Provider-scoped pricing is
 resolved independently, so approving a benchmark identity never overwrites a
 gateway's direct, promotional, or aggregate price.
+
+`pricing coverage` reports every fresh catalog offering as `complete`,
+`incomplete`, or `missing`. It includes direct catalog rates and, when
+available, the effective provider-profile or canonical fallback source. A
+profile fallback can make a model complete even when its catalog record has no
+direct rates; partial direct rates remain visible in the report.
 
 `matching refresh` stores source-backed entities and provider aliases from
 models.dev and OpenRouter. Exact Hugging Face repository IDs form canonical

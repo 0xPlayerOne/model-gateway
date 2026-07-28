@@ -387,4 +387,56 @@ mod tests {
         };
         assert!(super::EffectivePrice::from_observation(&observation, true).is_none());
     }
+
+    #[test]
+    fn validity_windows_are_half_open() {
+        let observation = PriceObservation {
+            source: "fixture".to_owned(),
+            source_kind: PriceSourceKind::Manual,
+            scope: PriceScope::RuntimeProvider,
+            provider_key: Some("provider".to_owned()),
+            model_id: "model".to_owned(),
+            rates: PriceRates {
+                input_price_per_million: Some(1.0),
+                output_price_per_million: Some(2.0),
+                ..PriceRates::default()
+            },
+            fetched_at: Some(100),
+            as_of: None,
+            valid_from: Some(10),
+            valid_until: Some(20),
+            attribution: None,
+        };
+        assert!(!observation.is_valid_at(9));
+        assert!(observation.is_valid_at(10));
+        assert!(observation.is_valid_at(19));
+        assert!(!observation.is_valid_at(20));
+    }
+
+    #[test]
+    fn validation_rejects_invalid_windows_and_non_finite_rates() {
+        let mut observation = PriceObservation {
+            source: "fixture".to_owned(),
+            source_kind: PriceSourceKind::Manual,
+            scope: PriceScope::RuntimeProvider,
+            provider_key: Some("provider".to_owned()),
+            model_id: "model".to_owned(),
+            rates: PriceRates {
+                input_price_per_million: Some(f64::NAN),
+                output_price_per_million: Some(2.0),
+                ..PriceRates::default()
+            },
+            fetched_at: Some(100),
+            as_of: None,
+            valid_from: Some(20),
+            valid_until: Some(20),
+            attribution: None,
+        };
+        assert!(observation.validate().is_err());
+        observation.valid_from = Some(10);
+        observation.valid_until = Some(20);
+        assert!(observation.validate().is_err());
+        observation.rates.input_price_per_million = Some(1.0);
+        assert!(observation.validate().is_ok());
+    }
 }
