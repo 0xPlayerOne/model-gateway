@@ -455,8 +455,6 @@ runs:
         path: |
           **/node_modules
         key: ${{ runner.os }}-javascript-installed-v4-bun-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/.npmrc', '.github/template.yml', '.mise.toml', 'mise.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-javascript-installed-v4-bun-
     - name: Detect Bun dependencies
       id: javascript-bun-dependencies
       if: >-
