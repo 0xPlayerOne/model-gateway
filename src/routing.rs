@@ -2435,7 +2435,14 @@ fn extract_model_family_version(normalized: &str) -> Option<(String, u64)> {
                     version_end += 1;
                 }
                 let version_str = std::str::from_utf8(&bytes[i + 1..version_end]).ok()?;
-                let version: u64 = version_str.parse().ok()?;
+                // Legacy GPT IDs such as `gpt35-turbo` encode 3.5 without
+                // a separator. Treat the leading digit as the generation so
+                // they cannot make every `gpt-5.x` model appear stale.
+                let version: u64 = if family == "gpt" && version_str.len() == 2 {
+                    version_str[..1].parse().ok()?
+                } else {
+                    version_str.parse().ok()?
+                };
                 return Some((family, version));
             }
         }
@@ -2450,7 +2457,13 @@ fn extract_model_family_version(normalized: &str) -> Option<(String, u64)> {
             continue;
         }
         if i + 1 < tokens.len() {
-            if let Ok(version) = tokens[i + 1].parse::<u64>() {
+            let version_token = tokens[i + 1];
+            let version = if token == "gpt" && version_token.len() == 2 {
+                version_token[..1].parse().ok()
+            } else {
+                version_token.parse().ok()
+            };
+            if let Some(version) = version {
                 return Some((token.to_lowercase(), version));
             }
         }
@@ -3577,5 +3590,18 @@ mod tests {
             &versions
         ));
         assert!(!is_stale_generation("kilo-auto/free", &versions));
+    }
+
+    #[test]
+    fn legacy_gpt35_ids_do_not_hide_newer_gpt5_models() {
+        use super::is_stale_generation;
+        use std::collections::BTreeMap;
+
+        let mut versions = BTreeMap::new();
+        versions.insert("gpt".to_owned(), 5u64);
+
+        assert!(is_stale_generation("gpt35-turbo", &versions));
+        assert!(is_stale_generation("gpt-35-turbo", &versions));
+        assert!(!is_stale_generation("gpt-5.6-sol", &versions));
     }
 }
