@@ -702,7 +702,12 @@ impl RoutingStore {
         )?;
         Ok(statement
             .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?.try_into().unwrap_or(0),
+                    row.get::<_, String>(3)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?)
     }
@@ -922,11 +927,11 @@ impl RoutingStore {
         Ok(statement
             .query_map([], |row| {
                 Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?.try_into().unwrap_or(0),
+                    row.get::<_, String>(4)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?)
@@ -1142,6 +1147,74 @@ impl RoutingStore {
             .and_then(|observation| EffectivePrice::from_observation(observation, true)))
     }
 
+    pub fn has_incomplete_price_observation(
+        &self,
+        runtime_provider: &str,
+        profile_key: Option<&str>,
+        model: &str,
+        canonical_model: Option<&str>,
+        max_age_seconds: u64,
+    ) -> Result<bool, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let now = epoch_seconds();
+        let cutoff = now.saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX));
+        let canonical_provider =
+            canonical_model.and_then(|value| value.split_once('/').map(|(provider, _)| provider));
+        let mut statement = connection.prepare(
+            "SELECT o.scope, o.provider_key, o.input_price, o.output_price
+             FROM price_observations o
+             JOIN pricing_snapshots s ON s.id = o.snapshot_id
+             WHERE s.active = 1 AND (s.source_kind = 'manual' OR s.fetched_at >= ?1)
+               AND lower(o.model_id) = ?2
+               AND (o.valid_from IS NULL OR o.valid_from <= ?3)
+               AND (o.valid_until IS NULL OR o.valid_until > ?3)",
+        )?;
+
+        let mut has_incomplete = |model_id: &str| -> Result<bool, RoutingError> {
+            let rows = statement.query_map(params![cutoff, model_id, now], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                    row.get::<_, Option<f64>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (scope, provider_key, input, output) = row?;
+                let applies = match scope.as_str() {
+                    "runtime_provider" => provider_key
+                        .as_deref()
+                        .is_some_and(|key| key.eq_ignore_ascii_case(runtime_provider)),
+                    "provider_profile" => profile_key.is_some_and(|profile| {
+                        provider_key
+                            .as_deref()
+                            .is_some_and(|key| key.eq_ignore_ascii_case(profile))
+                    }),
+                    "canonical" => canonical_provider.is_some_and(|provider| {
+                        provider_key
+                            .as_deref()
+                            .is_some_and(|key| key.eq_ignore_ascii_case(provider))
+                    }),
+                    _ => false,
+                };
+                if applies && (input.is_none() || output.is_none()) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+
+        if has_incomplete(&normalize_price_id(model))? {
+            return Ok(true);
+        }
+        if let Some((_, canonical_id)) = canonical_model.and_then(|value| value.split_once('/')) {
+            if has_incomplete(&normalize_price_id(canonical_id))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn replace_catalog(
         &self,
         provider: &str,
@@ -1170,7 +1243,7 @@ impl RoutingStore {
                     model.model,
                     i64::from(model.access_kind.is_free()),
                     now,
-                    model.context_length,
+                    model.context_length.map(|v| v as i64),
                     optional_bool(model.supports_tools),
                     optional_bool(model.supports_vision),
                     optional_bool(model.supports_structured_output),
@@ -1233,7 +1306,7 @@ impl RoutingStore {
                         model: row.get(1)?,
                         refreshed_at: row.get(2)?,
                         access_kind: AccessKind::from_database(&row.get::<_, String>(3)?),
-                        context_length: row.get(4)?,
+                        context_length: row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
                         supports_tools: database_bool(row.get(5)?),
                         supports_vision: database_bool(row.get(6)?),
                         supports_structured_output: database_bool(row.get(7)?),
@@ -1266,7 +1339,7 @@ impl RoutingStore {
                         model: row.get(1)?,
                         refreshed_at: row.get(2)?,
                         access_kind: AccessKind::from_database(&row.get::<_, String>(3)?),
-                        context_length: row.get(4)?,
+                        context_length: row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
                         supports_tools: database_bool(row.get(5)?),
                         supports_vision: database_bool(row.get(6)?),
                         supports_structured_output: database_bool(row.get(7)?),
@@ -1334,7 +1407,7 @@ impl RoutingStore {
                     model.input_price_per_million,
                     model.output_price_per_million,
                     model.latency_seconds,
-                    model.output_tokens_per_task,
+                    model.output_tokens_per_task.map(|v| v as i64),
                     model.reasoning_effort.as_deref().unwrap_or(""),
                     model.as_of,
                     model.release_date,
@@ -1406,7 +1479,7 @@ impl RoutingStore {
                         input_price_per_million: row.get(5)?,
                         output_price_per_million: row.get(6)?,
                         latency_seconds: row.get(7)?,
-                        output_tokens_per_task: row.get(8)?,
+                        output_tokens_per_task: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
                         reasoning_effort: row.get(9)?,
                         as_of: row.get(10)?,
                         release_date: row.get(11)?,
@@ -1428,7 +1501,12 @@ impl RoutingStore {
         )?;
         Ok(statement
             .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?.try_into().unwrap_or(0),
+                    row.get::<_, String>(3)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?)
     }
@@ -1472,7 +1550,13 @@ impl RoutingStore {
              FROM catalog_models GROUP BY provider ORDER BY provider",
         )?;
         Ok(statement
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?.try_into().unwrap_or(0),
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -1578,12 +1662,14 @@ impl RoutingStore {
                         provider,
                         model,
                         quota_kind(quota.kind),
-                        quota.window_seconds,
+                        quota.window_seconds as i64,
                         window_start
                     ],
-                    |row| row.get(0),
+                    |row| row.get::<_, i64>(0),
                 )
                 .optional()?
+                .unwrap_or(0)
+                .try_into()
                 .unwrap_or(0);
             if used.saturating_add(amount) > quota.limit {
                 return Ok(ReservationOutcome::QuotaExceeded(quota.kind));
@@ -1602,9 +1688,9 @@ impl RoutingStore {
                     provider,
                     model,
                     quota_kind(quota.kind),
-                    quota.window_seconds,
+                    quota.window_seconds as i64,
                     window_start,
-                    amount
+                    amount as i64
                 ],
             )?;
         }
@@ -1624,9 +1710,9 @@ impl RoutingStore {
                 params![
                     reservation_id,
                     quota_kind(quota.kind),
-                    quota.window_seconds,
+                    quota.window_seconds as i64,
                     window_start,
-                    quota_amount(quota.kind, estimated_tokens, expected_cost_microusd)
+                    quota_amount(quota.kind, estimated_tokens, expected_cost_microusd) as i64
                 ],
             )?;
         }
@@ -1712,9 +1798,9 @@ impl RoutingStore {
                 .query_map([token.id], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, u64>(1)?,
+                        row.get::<_, i64>(1)?.try_into().unwrap_or(0),
                         row.get::<_, i64>(2)?,
-                        row.get::<_, u64>(3)?,
+                        row.get::<_, i64>(3)?.try_into().unwrap_or(0),
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -1769,9 +1855,9 @@ impl RoutingStore {
                 .query_map([token.id], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, u64>(1)?,
+                        row.get::<_, i64>(1)?.try_into().unwrap_or(0),
                         row.get::<_, i64>(2)?,
-                        row.get::<_, u64>(3)?,
+                        row.get::<_, i64>(3)?.try_into().unwrap_or(0),
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -2226,9 +2312,9 @@ fn expire_reservations(
                 .query_map([id], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, u64>(1)?,
+                        row.get::<_, i64>(1)?.try_into().unwrap_or(0),
                         row.get::<_, i64>(2)?,
-                        row.get::<_, u64>(3)?,
+                        row.get::<_, i64>(3)?.try_into().unwrap_or(0),
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -2262,7 +2348,14 @@ fn decrement_counter_at(
         "UPDATE usage_counters SET used = MAX(0, used - ?1)
          WHERE provider = ?2 AND model = ?3 AND kind = ?4
            AND window_seconds = ?5 AND window_start = ?6",
-        params![amount, provider, model, kind, window_seconds, window_start],
+        params![
+            amount as i64,
+            provider,
+            model,
+            kind,
+            window_seconds as i64,
+            window_start
+        ],
     )?;
     Ok(())
 }
@@ -2284,11 +2377,11 @@ fn adjust_counter_at(
              WHERE provider = ?2 AND model = ?3 AND kind = ?4
                AND window_seconds = ?5 AND window_start = ?6",
             params![
-                actual - reserved,
+                (actual - reserved) as i64,
                 provider,
                 model,
                 kind,
-                window_seconds,
+                window_seconds as i64,
                 window_start
             ],
         )?;
@@ -2955,6 +3048,114 @@ mod tests {
         assert_eq!(price.input_price_per_million, 1.0);
         assert_eq!(price.output_price_per_million, 3.0);
         assert!(!price.estimated);
+    }
+
+    #[test]
+    fn expired_target_price_falls_back_to_fresh_canonical_price() {
+        let store = RoutingStore::open(None).expect("store");
+        let now = super::epoch_seconds();
+        store
+            .replace_pricing(
+                "manual-target",
+                PriceSourceKind::Manual,
+                "fixture",
+                &[PriceObservation {
+                    source: "manual-target".to_owned(),
+                    source_kind: PriceSourceKind::Manual,
+                    scope: PriceScope::RuntimeProvider,
+                    provider_key: Some("runtime".to_owned()),
+                    model_id: "alias".to_owned(),
+                    rates: PriceRates {
+                        input_price_per_million: Some(1.0),
+                        output_price_per_million: Some(2.0),
+                        ..PriceRates::default()
+                    },
+                    fetched_at: Some(now),
+                    as_of: None,
+                    valid_from: None,
+                    valid_until: Some(now),
+                    attribution: None,
+                }],
+            )
+            .expect("target pricing");
+        store
+            .replace_pricing(
+                "manual-canonical",
+                PriceSourceKind::Manual,
+                "fixture",
+                &[PriceObservation {
+                    source: "manual-canonical".to_owned(),
+                    source_kind: PriceSourceKind::Manual,
+                    scope: PriceScope::Canonical,
+                    provider_key: Some("canonical".to_owned()),
+                    model_id: "model".to_owned(),
+                    rates: PriceRates {
+                        input_price_per_million: Some(3.0),
+                        output_price_per_million: Some(4.0),
+                        ..PriceRates::default()
+                    },
+                    fetched_at: Some(now),
+                    as_of: None,
+                    valid_from: None,
+                    valid_until: None,
+                    attribution: None,
+                }],
+            )
+            .expect("canonical pricing");
+        let price = store
+            .effective_price("runtime", None, "alias", Some("canonical/model"), 60)
+            .expect("resolve")
+            .expect("canonical fallback");
+        assert_eq!(price.source, "manual-canonical");
+        assert_eq!(price.input_price_per_million, 3.0);
+        assert!(price.estimated);
+    }
+
+    #[test]
+    fn future_target_price_is_not_effective() {
+        let store = RoutingStore::open(None).expect("store");
+        let now = super::epoch_seconds();
+        let mut observation = profile_price("profile", "model", 1.0, 2.0);
+        observation.valid_from = Some(now + 60);
+        store
+            .replace_pricing(
+                "fixture",
+                PriceSourceKind::ModelsDev,
+                "fixture",
+                &[observation],
+            )
+            .expect("pricing");
+        assert!(
+            store
+                .effective_price("runtime", Some("profile"), "model", None, 60)
+                .expect("resolve")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn invalid_pricing_snapshot_is_rejected_without_replacing_active_data() {
+        let store = RoutingStore::open(None).expect("store");
+        store
+            .replace_pricing(
+                "fixture",
+                PriceSourceKind::ModelsDev,
+                "fixture",
+                &[profile_price("profile", "model", 1.0, 2.0)],
+            )
+            .expect("valid pricing");
+        let mut invalid = profile_price("profile", "model", 1.0, 2.0);
+        invalid.rates.output_price_per_million = Some(-1.0);
+        assert!(
+            store
+                .replace_pricing("fixture", PriceSourceKind::ModelsDev, "fixture", &[invalid],)
+                .is_err()
+        );
+        let price = store
+            .effective_price("runtime", Some("profile"), "model", None, 60)
+            .expect("resolve")
+            .expect("active pricing preserved");
+        assert_eq!(price.output_price_per_million, 2.0);
     }
 
     #[test]
