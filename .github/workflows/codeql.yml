@@ -16,29 +16,18 @@ permissions:
   security-events: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   detect:
     name: Detect
     runs-on: ubuntu-slim
+    timeout-minutes: 10
     outputs:
       languages: ${{ steps.languages.outputs.languages }}
       code_security: ${{ steps.security.outputs.status }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 2
-          # Detection only reads Git trees, paths, and small profile files;
-          # defer source blob transfer until the analyzer jobs.
-          filter: blob:none
-      - id: languages
-        name: Detect languages
-        env:
-          CODEQL_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-        run: bash .github/scripts/codeql-languages.sh
       - name: Detect Code Security
         id: security
         env:
@@ -51,6 +40,26 @@ jobs:
             status="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.security_and_analysis.code_security.status // "disabled"' 2>/dev/null || printf 'disabled')"
           fi
           printf 'status=%s\n' "$status" >> "$GITHUB_OUTPUT"
+      - name: Checkout
+        if: ${{ !github.event.repository.private || steps.security.outputs.status == 'enabled' }}
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          # Detection only reads Git trees, paths, and small profile files;
+          # defer source blob transfer until the analyzer jobs.
+          filter: blob:none
+      - id: languages
+        name: Detect languages
+        env:
+          CODEQL_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          REPO_FOUNDRY_CODE_SECURITY: ${{ steps.security.outputs.status }}
+          REPO_FOUNDRY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [ "$REPO_FOUNDRY_PRIVATE" = "true" ] && [ "$REPO_FOUNDRY_CODE_SECURITY" != "enabled" ]; then
+            echo 'languages=[]' >> "$GITHUB_OUTPUT"
+          else
+            bash .github/scripts/codeql-languages.sh
+          fi
 
   analyze:
     name: Analyze (${{ matrix.name }})
@@ -59,6 +68,7 @@ jobs:
     # Unchanged matrix entries only complete skipped steps; reserve a full
     # runner for analyzers that actually initialize and scan source.
     runs-on: ${{ matrix.changed && 'ubuntu-latest' || 'ubuntu-slim' }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       max-parallel: 4

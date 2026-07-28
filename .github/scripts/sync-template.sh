@@ -158,6 +158,7 @@ files=(
   .github/ISSUE_TEMPLATE/config.yml
   .github/ISSUE_TEMPLATE/feature_request.yml
   .github/actions/setup/action.yml
+  .github/actions/cache/action.yml
   .github/scripts/bootstrap.sh
   .github/scripts/changed-files.sh
   .github/scripts/ci.sh

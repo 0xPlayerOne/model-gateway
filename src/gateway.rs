@@ -29,8 +29,8 @@ use crate::config::{
 use crate::pricing::{EffectivePrice, PriceScope, PriceSourceKind, normalize_price_id};
 use crate::providers::prepare_request;
 use crate::routing::{
-    CatalogOffering, ReservationOutcome, ReservationRelease, ReservationToken, RoutingError,
-    RoutingStore, is_verified_free, quota_reference,
+    CatalogOffering, IdentityAliasEvidence, ReservationOutcome, ReservationRelease,
+    ReservationToken, RoutingError, RoutingStore, is_verified_free, quota_reference,
 };
 use crate::secrets::{SecretError, SecretResolver};
 
@@ -209,116 +209,355 @@ struct ProvidersQuery {
     available: Option<bool>,
 }
 
-fn find_benchmark<'a>(
-    benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
-    model: &str,
-    task: TaskKind,
-) -> Option<&'a BenchmarkModel> {
-    // Try original model first
-    if let Some(result) = find_benchmark_raw(benchmarks, model, task) {
-        return Some(result);
-    }
-    // Fall back to noise-stripped model (strip quantization, date codes, -latest)
-    let stripped = strip_model_noise(model);
-    if stripped != normalize_identifier(model) {
-        find_benchmark_raw(benchmarks, &stripped, task)
-    } else {
-        None
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelMatchKind {
+    Exact,
+    Configured,
+    Approved,
+    Suggested,
+    Ambiguous,
+    Unmatched,
+}
+
+impl ModelMatchKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Configured => "configured",
+            Self::Approved => "approved",
+            Self::Suggested => "suggested",
+            Self::Ambiguous => "ambiguous",
+            Self::Unmatched => "unmatched",
+        }
     }
 }
 
-fn find_benchmark_raw<'a>(
-    benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
-    model: &str,
-    task: TaskKind,
-) -> Option<&'a BenchmarkModel> {
-    let mut best_exact: Option<(&BenchmarkModel, f64, usize)> = None;
-    let mut best_fallback: Option<(&BenchmarkModel, f64, usize)> = None;
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelMatchReport {
+    pub provider: String,
+    pub catalog_model: String,
+    pub status: ModelMatchKind,
+    pub benchmark_model: Option<String>,
+    pub alternatives: Vec<String>,
+    pub source: Option<String>,
+    pub identity_evidence: Vec<IdentityAliasEvidence>,
+}
 
-    for (benchmark_id, models) in benchmarks {
-        let is_exact = is_exact_benchmark_match(model, benchmark_id);
-        let matches = is_exact || benchmark_ids_match(model, benchmark_id);
-        if !matches {
+enum BenchmarkResolution<'a> {
+    Exact(Vec<&'a BenchmarkModel>),
+    Suggested(Vec<&'a BenchmarkModel>),
+    Ambiguous(Vec<String>),
+    Unmatched,
+}
+
+pub fn reconcile_model_matches(
+    config: &Config,
+    routing: &RoutingStore,
+    provider_filter: Option<&str>,
+) -> Result<Vec<ModelMatchReport>, RoutingError> {
+    let offerings = routing.all_candidates(config.server.catalog_max_age_seconds)?;
+    let benchmarks = routing.benchmark_models(config.server.benchmark_max_age_seconds)?;
+    let mut benchmark_map = BTreeMap::<String, Vec<BenchmarkModel>>::new();
+    for benchmark in benchmarks {
+        benchmark_map
+            .entry(benchmark.id.clone())
+            .or_default()
+            .push(benchmark);
+    }
+    let mappings = identity_mapping_indexes(routing);
+    let identity_aliases = routing.active_identity_aliases().unwrap_or_default();
+    let mut report = Vec::new();
+    for offering in offerings {
+        if provider_filter.is_some_and(|provider| provider != offering.provider)
+            || is_provider_auto_route(&offering.model)
+        {
+            continue;
+        }
+        let Some(provider) = config.providers.get(&offering.provider) else {
+            continue;
+        };
+        let canonical = canonical_match(provider, &offering.provider, &offering.model, &mappings);
+        let identity_evidence = identity_provider_key(provider)
+            .map(|provider_key| {
+                identity_aliases
+                    .iter()
+                    .filter(|alias| {
+                        alias.provider_key == provider_key
+                            && is_exact_model_identity(&alias.provider_model_id, &offering.model)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if canonical.kind != ModelMatchKind::Exact {
+            let exact = find_exact_matching_benchmarks(&benchmark_map, &canonical.benchmark_model);
+            report.push(ModelMatchReport {
+                provider: offering.provider,
+                catalog_model: offering.model,
+                status: if exact.is_empty() {
+                    ModelMatchKind::Unmatched
+                } else {
+                    canonical.kind
+                },
+                benchmark_model: (!exact.is_empty()).then_some(canonical.benchmark_model),
+                alternatives: exact.into_iter().map(|model| model.id.clone()).collect(),
+                source: Some(canonical.source.to_owned()),
+                identity_evidence,
+            });
             continue;
         }
 
-        for benchmark in models {
-            let Some(score) = quality_for(benchmark, task) else {
+        let resolution = resolve_benchmark_identity(&benchmark_map, &offering.model);
+        let identity_conflict = identity_provider_key(provider).and_then(|provider_key| {
+            mappings
+                .conflicts
+                .get(&(provider_key.to_owned(), offering.model.clone()))
+                .cloned()
+        });
+        if !matches!(resolution, BenchmarkResolution::Exact(_)) {
+            if let Some(alternatives) = identity_conflict {
+                report.push(ModelMatchReport {
+                    provider: offering.provider,
+                    catalog_model: offering.model,
+                    status: ModelMatchKind::Ambiguous,
+                    benchmark_model: None,
+                    alternatives,
+                    source: Some("canonical_entity_conflict".to_owned()),
+                    identity_evidence,
+                });
                 continue;
-            };
-
-            let mut effective_score = score;
-            let non_null_count = [
-                benchmark.intelligence,
-                benchmark.coding_quality,
-                benchmark.agentic_quality,
-            ]
-            .iter()
-            .flatten()
-            .count();
-
-            if !is_exact {
-                effective_score -= variant_prefix_penalty(model, benchmark_id);
-            }
-
-            let target = if is_exact {
-                &mut best_exact
-            } else {
-                &mut best_fallback
-            };
-
-            let should_update = match target {
-                None => true,
-                Some((_, best_score, best_count)) => {
-                    effective_score > *best_score
-                        || (effective_score == *best_score && non_null_count > *best_count)
-                }
-            };
-            if should_update {
-                *target = Some((benchmark, effective_score, non_null_count));
             }
         }
+        let entry = match resolution {
+            BenchmarkResolution::Exact(models) => ModelMatchReport {
+                provider: offering.provider,
+                catalog_model: offering.model,
+                status: ModelMatchKind::Exact,
+                benchmark_model: models.first().map(|model| benchmark_identity_id(model)),
+                alternatives: models.into_iter().map(|model| model.id.clone()).collect(),
+                source: Some("normalized_exact".to_owned()),
+                identity_evidence,
+            },
+            BenchmarkResolution::Suggested(models) => ModelMatchReport {
+                provider: offering.provider,
+                catalog_model: offering.model,
+                status: ModelMatchKind::Suggested,
+                benchmark_model: models.first().map(|model| benchmark_identity_id(model)),
+                alternatives: models.into_iter().map(|model| model.id.clone()).collect(),
+                source: Some("offline_heuristic".to_owned()),
+                identity_evidence,
+            },
+            BenchmarkResolution::Ambiguous(alternatives) => ModelMatchReport {
+                provider: offering.provider,
+                catalog_model: offering.model,
+                status: ModelMatchKind::Ambiguous,
+                benchmark_model: None,
+                alternatives,
+                source: Some("offline_heuristic".to_owned()),
+                identity_evidence,
+            },
+            BenchmarkResolution::Unmatched => ModelMatchReport {
+                provider: offering.provider,
+                catalog_model: offering.model,
+                status: ModelMatchKind::Unmatched,
+                benchmark_model: None,
+                alternatives: Vec::new(),
+                source: None,
+                identity_evidence,
+            },
+        };
+        report.push(entry);
     }
-
-    best_exact.or(best_fallback).map(|(b, _, _)| b)
+    Ok(report)
 }
 
+fn find_benchmark<'a>(
+    benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
+    model: &str,
+) -> Option<&'a BenchmarkModel> {
+    best_benchmark(find_exact_matching_benchmarks(benchmarks, model))
+}
+
+#[cfg(test)]
+fn find_suggested_benchmark<'a>(
+    benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
+    model: &str,
+) -> Option<&'a BenchmarkModel> {
+    best_benchmark(find_all_matching_benchmarks(benchmarks, model))
+}
+
+fn best_benchmark(benchmarks: Vec<&BenchmarkModel>) -> Option<&BenchmarkModel> {
+    benchmarks
+        .into_iter()
+        .filter_map(|benchmark| Some((benchmark, composite_quality(benchmark)?)))
+        .max_by(|(left, left_quality), (right, right_quality)| {
+            left_quality
+                .total_cmp(right_quality)
+                .then_with(|| right.id.cmp(&left.id))
+        })
+        .map(|(benchmark, _)| benchmark)
+}
+
+#[cfg(test)]
 fn find_all_matching_benchmarks<'a>(
     benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
     model: &str,
 ) -> Vec<&'a BenchmarkModel> {
-    let mut exact: Vec<&'a BenchmarkModel> = Vec::new();
-    let mut fuzzy: Vec<&'a BenchmarkModel> = Vec::new();
-    for (benchmark_id, models) in benchmarks {
-        if is_exact_benchmark_match(model, benchmark_id) {
-            exact.extend(models);
-        } else if benchmark_ids_match(model, benchmark_id) {
-            fuzzy.extend(models);
-        }
+    match resolve_benchmark_identity(benchmarks, model) {
+        BenchmarkResolution::Exact(models) | BenchmarkResolution::Suggested(models) => models,
+        BenchmarkResolution::Ambiguous(_) | BenchmarkResolution::Unmatched => Vec::new(),
     }
-    if !exact.is_empty() {
-        return exact;
+}
+
+fn find_exact_matching_benchmarks<'a>(
+    benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
+    model: &str,
+) -> Vec<&'a BenchmarkModel> {
+    match resolve_benchmark_identity(benchmarks, model) {
+        BenchmarkResolution::Exact(models) => models,
+        BenchmarkResolution::Suggested(_)
+        | BenchmarkResolution::Ambiguous(_)
+        | BenchmarkResolution::Unmatched => Vec::new(),
     }
-    if !fuzzy.is_empty() {
-        return fuzzy;
-    }
+}
+
+fn resolve_benchmark_identity<'a>(
+    benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
+    model: &str,
+) -> BenchmarkResolution<'a> {
+    let normalized = normalize_identifier(model);
     let stripped = strip_model_noise(model);
-    if stripped != normalize_identifier(model) {
+    let mut lookups = vec![model.to_owned()];
+    if normalize_identifier(&stripped) != normalized {
+        lookups.push(stripped);
+    }
+
+    if has_explicit_effort_suffix(model) {
+        let mut exact = Vec::new();
         for (benchmark_id, models) in benchmarks {
-            if is_exact_benchmark_match(&stripped, benchmark_id) {
+            if is_exact_benchmark_match(model, benchmark_id) {
                 exact.extend(models);
-            } else if benchmark_ids_match(&stripped, benchmark_id) {
-                fuzzy.extend(models);
             }
         }
         if !exact.is_empty() {
-            return exact;
-        }
-        if !fuzzy.is_empty() {
-            return fuzzy;
+            return BenchmarkResolution::Exact(exact);
         }
     }
-    Vec::new()
+
+    for lookup in &lookups {
+        let mut exact = Vec::new();
+        for models in benchmarks.values() {
+            for benchmark in models {
+                if is_exact_benchmark_match(lookup, &benchmark_identity_id(benchmark)) {
+                    exact.push(benchmark);
+                }
+            }
+        }
+        if !exact.is_empty() {
+            return BenchmarkResolution::Exact(exact);
+        }
+    }
+
+    if has_dynamic_or_release_suffix(model) {
+        return BenchmarkResolution::Unmatched;
+    }
+
+    for lookup in &lookups {
+        let mut groups = BTreeMap::<String, Vec<&BenchmarkModel>>::new();
+        for models in benchmarks.values() {
+            for benchmark in models {
+                let identity = benchmark_identity_id(benchmark);
+                if benchmark_ids_match(lookup, &identity) {
+                    groups
+                        .entry(normalize_identifier(&identity))
+                        .or_default()
+                        .push(benchmark);
+                }
+            }
+        }
+        if groups.len() == 1 {
+            return BenchmarkResolution::Suggested(groups.into_values().next().unwrap_or_default());
+        }
+        if groups.len() > 1 {
+            return BenchmarkResolution::Ambiguous(groups.into_keys().collect());
+        }
+    }
+    BenchmarkResolution::Unmatched
+}
+
+fn benchmarks_for_effort<'a>(
+    benchmarks: Vec<&'a BenchmarkModel>,
+    requested_effort: Option<&str>,
+) -> Vec<&'a BenchmarkModel> {
+    let Some(requested_effort) = requested_effort else {
+        return benchmarks;
+    };
+    if !benchmarks
+        .iter()
+        .any(|benchmark| benchmark.reasoning_effort.is_some())
+    {
+        return benchmarks;
+    }
+    benchmarks
+        .into_iter()
+        .filter(|benchmark| benchmark.reasoning_effort.as_deref() == Some(requested_effort))
+        .collect()
+}
+
+const REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+fn has_explicit_effort_suffix(model: &str) -> bool {
+    let normalized = normalize_identifier(model);
+    REASONING_EFFORTS.iter().any(|effort| {
+        normalized.ends_with(&format!("-{effort}"))
+            || normalized.ends_with(&format!("-{effort}-effort"))
+    })
+}
+
+fn benchmark_identity_id(benchmark: &BenchmarkModel) -> String {
+    let normalized = normalize_identifier(&benchmark.id);
+    let Some(effort) = benchmark.reasoning_effort.as_deref() else {
+        return normalized;
+    };
+    normalized
+        .strip_suffix(&format!("-{effort}-effort"))
+        .or_else(|| normalized.strip_suffix(&format!("-{effort}")))
+        .unwrap_or(&normalized)
+        .to_owned()
+}
+
+fn has_dynamic_or_release_suffix(model: &str) -> bool {
+    let normalized = normalize_identifier(model);
+    let tokens = normalized.split('-').collect::<Vec<_>>();
+    let iso_month_suffix = tokens.len() >= 2
+        && tokens[tokens.len() - 2].len() == 4
+        && tokens[tokens.len() - 2]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        && tokens[tokens.len() - 1].len() == 2
+        && tokens[tokens.len() - 1]
+            .chars()
+            .all(|character| character.is_ascii_digit());
+    let iso_day_suffix = tokens.len() >= 3
+        && tokens[tokens.len() - 3].len() == 4
+        && tokens[tokens.len() - 3]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        && tokens[tokens.len() - 2].len() == 2
+        && tokens[tokens.len() - 2]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        && tokens[tokens.len() - 1].len() == 2
+        && tokens[tokens.len() - 1]
+            .chars()
+            .all(|character| character.is_ascii_digit());
+    tokens.contains(&"latest")
+        || tokens.last().is_some_and(|token| {
+            token.len() == 4 && token.chars().all(|character| character.is_ascii_digit())
+        })
+        || iso_month_suffix
+        || iso_day_suffix
 }
 
 fn is_exact_benchmark_match(catalog_id: &str, benchmark_id: &str) -> bool {
@@ -334,41 +573,55 @@ fn is_exact_benchmark_match(catalog_id: &str, benchmark_id: &str) -> bool {
     false
 }
 
-const VARIANT_KEYWORDS: &[&str] = &[
-    "free",
-    "pro",
-    "flash",
-    "lite",
-    "reasoning",
-    "non-reasoning",
-    "preview",
-    "medium",
-    "thinking",
-    "deep-think",
-    "max",
-    "mini",
-    "highspeed",
-    "omni",
-];
+pub fn is_exact_model_identity(left: &str, right: &str) -> bool {
+    is_exact_benchmark_match(left, right)
+}
+
+fn is_exact_runtime_model_identity(left: &str, right: &str) -> bool {
+    is_exact_benchmark_match(left, right)
+        || is_exact_benchmark_match(&strip_model_noise(left), right)
+}
 
 const IDENTITY_VARIANT_TOKENS: &[&str] = &[
-    "pro",
+    "audio",
+    "base",
+    "chat",
+    "coder",
+    "discounted",
+    "distill",
+    "embed",
+    "embedding",
     "flash",
-    "lite",
-    "reasoning",
-    "non",
-    "preview",
-    "medium",
-    "thinking",
-    "max",
-    "mini",
     "highspeed",
+    "image",
+    "instruct",
+    "large",
+    "lite",
+    "max",
+    "medium",
+    "mini",
+    "nano",
+    "next",
+    "non",
+    "ocr",
     "omni",
+    "plus",
+    "preview",
+    "pro",
+    "realtime",
+    "reasoning",
+    "rerank",
+    "research",
+    "small",
+    "super",
+    "thinking",
+    "turbo",
+    "ultra",
+    "vision",
+    "vl",
 ];
 
-const NOISE_TOKENS: &[&str] = &[
-    "fp8", "fp16", "bf16", "int4", "int8", "latest", "thinking", "free",
-];
+const NOISE_TOKENS: &[&str] = &["fp8", "fp16", "bf16", "int4", "int8", "free"];
 
 fn strip_model_noise(model: &str) -> String {
     let segments: Vec<&str> = model.split(['/', ':']).collect();
@@ -378,43 +631,13 @@ fn strip_model_noise(model: &str) -> String {
             let normalized = normalize_identifier(segment);
             let mut tokens: Vec<&str> = normalized.split('-').collect();
 
-            // Remove known quantization/version tokens
+            // Remove transport/billing decorations, never semantic variants.
             tokens.retain(|t| !NOISE_TOKENS.contains(t));
-
-            // Remove trailing date codes (4 consecutive digits, e.g. 2512, 2407)
-            // Only from the LAST segment of a multi-segment ID
-            while let Some(last) = tokens.last() {
-                if last.len() == 4 && last.chars().all(|c| c.is_ascii_digit()) {
-                    tokens.pop();
-                } else {
-                    break;
-                }
-            }
 
             tokens.join("-")
         })
         .collect();
     stripped.join("/")
-}
-
-fn variant_prefix_penalty(catalog_id: &str, benchmark_id: &str) -> f64 {
-    let catalog_normalized = normalize_identifier(catalog_id);
-    let benchmark_normalized = normalize_identifier(benchmark_id);
-    let catalog_tokens = catalog_normalized
-        .split('-')
-        .collect::<std::collections::BTreeSet<_>>();
-    let benchmark_tokens = benchmark_normalized
-        .split('-')
-        .collect::<std::collections::BTreeSet<_>>();
-
-    let additional: Vec<_> = benchmark_tokens.difference(&catalog_tokens).collect();
-    let mut penalty = 0.0;
-    for token in additional {
-        if VARIANT_KEYWORDS.contains(token) {
-            penalty += 100.0;
-        }
-    }
-    penalty
 }
 
 fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
@@ -430,10 +653,7 @@ fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
             }
             let catalog_tokens = catalog.split('-').collect::<BTreeSet<_>>();
             let benchmark_tokens = benchmark.split('-').collect::<BTreeSet<_>>();
-            if (catalog_tokens.len() >= 2 || benchmark_tokens.len() >= 2)
-                && (catalog.starts_with(&format!("{benchmark}-"))
-                    || benchmark.starts_with(&format!("{catalog}-")))
-            {
+            if safe_benchmark_extension(catalog, benchmark) {
                 return true;
             }
             if catalog_tokens.len() >= 2
@@ -445,10 +665,8 @@ fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
         }
     }
 
-    // Token-level suffix prefix matching: when provider prefix differs
-    // between catalog and AA (e.g. "nemotron-3-ultra" vs
-    // "nvidia-nemotron-3-ultra-550b-a55b"). Uses prefix-only to avoid
-    // false exact matches on shared generic suffixes.
+    // Permit one creator/provider prefix, but never scan arbitrary suffixes:
+    // that can cross families such as Nemotron and Qwen Omni.
     for catalog in &catalog_variants {
         let cat_tokens: Vec<&str> = catalog.split('-').collect();
         for benchmark in &benchmark_variants {
@@ -456,31 +674,46 @@ fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
                 continue;
             }
             let bench_tokens: Vec<&str> = benchmark.split('-').collect();
-            for cat_start in 0..cat_tokens.len() {
-                let cat_suffix = cat_tokens[cat_start..].join("-");
-                let cat_suffix_len = cat_tokens.len() - cat_start;
-                for bench_start in 0..bench_tokens.len() {
-                    let bench_suffix = bench_tokens[bench_start..].join("-");
-                    let bench_suffix_len = bench_tokens.len() - bench_start;
-                    if cat_suffix == bench_suffix {
-                        continue;
-                    }
-                    // Require at least 3 tokens in the shorter suffix
-                    // to avoid false matches on short generic suffixes
-                    if cat_suffix_len.min(bench_suffix_len) < 3 {
-                        continue;
-                    }
-                    if cat_suffix.starts_with(&format!("{bench_suffix}-"))
-                        || bench_suffix.starts_with(&format!("{cat_suffix}-"))
-                    {
-                        return true;
-                    }
-                }
+            if catalog_provider_prefix(&cat_tokens, &bench_tokens)
+                || benchmark_creator_prefix(&bench_tokens, &cat_tokens)
+            {
+                return true;
             }
         }
     }
 
     false
+}
+
+fn catalog_provider_prefix(catalog: &[&str], benchmark: &[&str]) -> bool {
+    if catalog.len() != benchmark.len() + 1 {
+        return false;
+    }
+    catalog.get(1..).is_some_and(|aligned| aligned == benchmark)
+}
+
+fn benchmark_creator_prefix(benchmark: &[&str], catalog: &[&str]) -> bool {
+    if benchmark.len() <= catalog.len() || catalog.len() < 2 {
+        return false;
+    }
+    benchmark
+        .get(1..)
+        .is_some_and(|aligned| aligned == catalog || safe_token_extension(catalog, aligned))
+}
+
+fn safe_benchmark_extension(catalog: &str, benchmark: &str) -> bool {
+    let catalog_tokens = catalog.split('-').collect::<Vec<_>>();
+    let benchmark_tokens = benchmark.split('-').collect::<Vec<_>>();
+    safe_token_extension(&catalog_tokens, &benchmark_tokens)
+}
+
+fn safe_token_extension(base: &[&str], candidate: &[&str]) -> bool {
+    if base.len() < 2 || candidate.len() <= base.len() || !candidate.starts_with(base) {
+        return false;
+    }
+    candidate[base.len()..]
+        .iter()
+        .all(|token| token.chars().any(|character| character.is_ascii_digit()))
 }
 
 fn identity_variant_tokens(identifier: &str) -> BTreeSet<&str> {
@@ -807,11 +1040,15 @@ fn is_model_denied(model: &str, provider: &str, server: &ServerConfig) -> bool {
 }
 
 fn is_provider_auto_route(model: &str) -> bool {
-    // Provider-level auto-route entries like kilo-auto-free, openrouter-free,
-    // orcarouter-free. These are internal routing mechanisms, not user-selectable models.
-    model.ends_with("-free")
-        || model.ends_with("/free")
-        || (model.contains("auto-") && model.ends_with("-free"))
+    model.starts_with("kilo-auto/")
+        || matches!(
+            model,
+            "openrouter/auto"
+                | "openrouter/auto-beta"
+                | "openrouter/free"
+                | "orcarouter/auto"
+                | "orcarouter/free"
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -959,21 +1196,30 @@ struct CatalogModelEntry<'a> {
     rank: usize,
     effort_level: Option<&'a str>,
     parameters: Option<String>,
+    match_kind: Option<ModelMatchKind>,
 }
 
 fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
-    let input_price = entry
-        .price
-        .as_ref()
-        .map(|price| price.input_price_per_million)
-        .or(entry.offering.input_price_per_million)
-        .or_else(|| entry.benchmark.and_then(|b| b.input_price_per_million));
-    let output_price = entry
-        .price
-        .as_ref()
-        .map(|price| price.output_price_per_million)
-        .or(entry.offering.output_price_per_million)
-        .or_else(|| entry.benchmark.and_then(|b| b.output_price_per_million));
+    let input_price = if entry.offering.is_free {
+        Some(0.0)
+    } else {
+        entry
+            .price
+            .as_ref()
+            .map(|price| price.input_price_per_million)
+            .or(entry.offering.input_price_per_million)
+            .or_else(|| entry.benchmark.and_then(|b| b.input_price_per_million))
+    };
+    let output_price = if entry.offering.is_free {
+        Some(0.0)
+    } else {
+        entry
+            .price
+            .as_ref()
+            .map(|price| price.output_price_per_million)
+            .or(entry.offering.output_price_per_million)
+            .or_else(|| entry.benchmark.and_then(|b| b.output_price_per_million))
+    };
     json!({
         "model": {
             "name": entry.offering.model,
@@ -999,10 +1245,20 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
         "price_per_million": {
             "input": input_price,
             "output": output_price,
-            "source": entry.price.as_ref().map(|price| price.source.clone()),
-            "estimated": entry.price.as_ref().map(|price| price.estimated),
+            "source": if entry.offering.is_free {
+                Some("provider_free")
+            } else {
+                entry.price.as_ref().map(|price| price.source.as_str())
+            },
+            "estimated": if entry.offering.is_free {
+                Some(false)
+            } else {
+                entry.price.as_ref().map(|price| price.estimated)
+            },
             "pricing_eligible": input_price.is_some() && output_price.is_some(),
         },
+        "benchmark_match": entry.match_kind.map(ModelMatchKind::as_str),
+        "benchmark_id": entry.benchmark.map(|benchmark| benchmark.id.clone()),
     })
 }
 
@@ -1011,6 +1267,123 @@ struct ModelCandidate {
     benchmark: Option<BenchmarkModel>,
     price: Option<EffectivePrice>,
     offering: CatalogOffering,
+    match_kind: Option<ModelMatchKind>,
+}
+
+type ApprovedMappingIndex = BTreeMap<(String, String), String>;
+type EntityReferenceIndex = BTreeMap<(String, String), String>;
+
+struct IdentityMappingIndexes {
+    approved: ApprovedMappingIndex,
+    references: EntityReferenceIndex,
+    conflicts: BTreeMap<(String, String), Vec<String>>,
+}
+
+struct CanonicalMatch {
+    benchmark_model: String,
+    kind: ModelMatchKind,
+    source: &'static str,
+}
+
+fn identity_provider_key(provider: &ProviderConfig) -> Option<&str> {
+    provider.pricing_profile.as_deref().or_else(|| {
+        provider
+            .profile
+            .and_then(|profile| profile.models_dev_key())
+    })
+}
+
+fn identity_mapping_indexes(routing: &RoutingStore) -> IdentityMappingIndexes {
+    let approved = routing
+        .approved_model_mappings()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mapping| {
+            (
+                (mapping.provider, mapping.catalog_model),
+                mapping.benchmark_model,
+            )
+        })
+        .collect();
+    let mut reference_candidates = BTreeMap::<(String, String), Option<String>>::new();
+    let mut conflicts = BTreeMap::<(String, String), Vec<String>>::new();
+    for (provider_key, provider_model_id, benchmark_id) in
+        routing.approved_identity_references().unwrap_or_default()
+    {
+        let key = (provider_key, provider_model_id);
+        let entry = reference_candidates
+            .entry(key.clone())
+            .or_insert_with(|| Some(benchmark_id.clone()));
+        if entry.as_deref() != Some(&benchmark_id) {
+            let alternatives = conflicts.entry(key).or_default();
+            if let Some(existing) = entry.as_ref() {
+                alternatives.push(existing.clone());
+            }
+            alternatives.push(benchmark_id);
+            alternatives.sort();
+            alternatives.dedup();
+            *entry = None;
+        }
+    }
+    let references = reference_candidates
+        .into_iter()
+        .filter_map(|(key, benchmark_id)| Some((key, benchmark_id?)))
+        .collect();
+    IdentityMappingIndexes {
+        approved,
+        references,
+        conflicts,
+    }
+}
+
+fn canonical_match(
+    provider: &ProviderConfig,
+    provider_name: &str,
+    catalog_model: &str,
+    mappings: &IdentityMappingIndexes,
+) -> CanonicalMatch {
+    if let Some(benchmark_model) = provider.model_mappings.get(catalog_model) {
+        return CanonicalMatch {
+            benchmark_model: benchmark_model.clone(),
+            kind: ModelMatchKind::Configured,
+            source: "config",
+        };
+    }
+    if let Some(benchmark_model) = mappings
+        .approved
+        .get(&(provider_name.to_owned(), catalog_model.to_owned()))
+    {
+        return CanonicalMatch {
+            benchmark_model: benchmark_model.clone(),
+            kind: ModelMatchKind::Approved,
+            source: "registry",
+        };
+    }
+    if let Some(benchmark_model) = identity_provider_key(provider).and_then(|provider_key| {
+        mappings
+            .references
+            .get(&(provider_key.to_owned(), catalog_model.to_owned()))
+    }) {
+        let exact = is_exact_runtime_model_identity(catalog_model, benchmark_model);
+        return CanonicalMatch {
+            benchmark_model: benchmark_model.clone(),
+            kind: if exact {
+                ModelMatchKind::Exact
+            } else {
+                ModelMatchKind::Approved
+            },
+            source: if exact {
+                "normalized_exact"
+            } else {
+                "canonical_entity"
+            },
+        };
+    }
+    CanonicalMatch {
+        benchmark_model: catalog_model.to_owned(),
+        kind: ModelMatchKind::Exact,
+        source: "normalized_exact",
+    }
 }
 
 struct PaidCandidateContext<'a> {
@@ -1020,13 +1393,17 @@ struct PaidCandidateContext<'a> {
     provider_filter: Option<&'a str>,
     routing: &'a RoutingStore,
     pricing_max_age_seconds: u64,
+    mappings: &'a IdentityMappingIndexes,
 }
 
+#[derive(Clone, Copy)]
 struct ModeModelValue<'a> {
     model: &'a str,
     provider: &'a str,
     price: Option<&'a EffectivePrice>,
     pricing_eligible: bool,
+    match_kind: Option<ModelMatchKind>,
+    is_free: bool,
 }
 
 fn collect_free_candidates(
@@ -1036,6 +1413,7 @@ fn collect_free_candidates(
     runtimes: &BTreeMap<String, ProviderRuntime>,
     cfg: &ServerConfig,
     provider_filter: Option<&str>,
+    mappings: &IdentityMappingIndexes,
 ) -> Vec<ModelCandidate> {
     let mut candidates = Vec::new();
     for offering in offerings {
@@ -1061,12 +1439,9 @@ fn collect_free_candidates(
         if is_model_denied(&offering.model, &offering.provider, cfg) {
             continue;
         }
-        let canonical = provider
-            .model_mappings
-            .get(&offering.model)
-            .cloned()
-            .unwrap_or_else(|| offering.model.clone());
-        let matching = find_all_matching_benchmarks(benchmark_by_model, &canonical);
+        let canonical = canonical_match(provider, &offering.provider, &offering.model, mappings);
+        let matching =
+            find_exact_matching_benchmarks(benchmark_by_model, &canonical.benchmark_model);
         if matching.is_empty() {
             if cfg.free_models_quality.passes(
                 None,
@@ -1074,13 +1449,14 @@ fn collect_free_candidates(
                 offering.input_price_per_million,
                 offering.output_price_per_million,
                 offering.context_length,
-                &canonical,
+                &canonical.benchmark_model,
             ) {
                 candidates.push(ModelCandidate {
                     quality: None,
                     benchmark: None,
                     price: None,
                     offering: offering.clone(),
+                    match_kind: None,
                 });
             }
         } else {
@@ -1096,7 +1472,7 @@ fn collect_free_candidates(
                     offering.input_price_per_million,
                     offering.output_price_per_million,
                     offering.context_length,
-                    &canonical,
+                    &canonical.benchmark_model,
                 ) {
                     continue;
                 }
@@ -1105,6 +1481,7 @@ fn collect_free_candidates(
                     benchmark: Some(benchmark.clone()),
                     price: None,
                     offering: offering.clone(),
+                    match_kind: Some(canonical.kind),
                 });
             }
             if !has_quality
@@ -1114,7 +1491,7 @@ fn collect_free_candidates(
                     offering.input_price_per_million,
                     offering.output_price_per_million,
                     offering.context_length,
-                    &canonical,
+                    &canonical.benchmark_model,
                 )
             {
                 candidates.push(ModelCandidate {
@@ -1122,6 +1499,7 @@ fn collect_free_candidates(
                     benchmark: None,
                     price: None,
                     offering: offering.clone(),
+                    match_kind: None,
                 });
             }
         }
@@ -1166,10 +1544,13 @@ fn collect_paid_candidates(
         if is_model_denied(&offering.model, &offering.provider, context.cfg) {
             continue;
         }
-        let canonical_mapping = provider.model_mappings.get(&offering.model);
-        let canonical = canonical_mapping
-            .cloned()
-            .unwrap_or_else(|| offering.model.clone());
+        let pricing_mapping = provider.model_mappings.get(&offering.model);
+        let canonical = canonical_match(
+            provider,
+            &offering.provider,
+            &offering.model,
+            context.mappings,
+        );
         let price = context
             .routing
             .effective_price(
@@ -1180,18 +1561,20 @@ fn collect_paid_candidates(
                         .and_then(|profile| profile.models_dev_key())
                 }),
                 &offering.model,
-                canonical_mapping.map(String::as_str),
+                pricing_mapping.map(String::as_str),
                 context.pricing_max_age_seconds,
             )
             .ok()
             .flatten();
-        let matching = find_all_matching_benchmarks(benchmark_by_model, &canonical);
+        let matching =
+            find_exact_matching_benchmarks(benchmark_by_model, &canonical.benchmark_model);
         if matching.is_empty() {
             candidates.push(ModelCandidate {
                 quality: None,
                 benchmark: None,
                 price: price.clone(),
                 offering: offering.clone(),
+                match_kind: None,
             });
         } else {
             for benchmark in matching {
@@ -1200,12 +1583,13 @@ fn collect_paid_candidates(
                 };
                 let effective_price = price
                     .clone()
-                    .or_else(|| benchmark_price_for_model(&canonical, benchmark));
+                    .or_else(|| benchmark_price_for_model(&canonical.benchmark_model, benchmark));
                 candidates.push(ModelCandidate {
                     quality: Some(quality),
                     benchmark: Some(benchmark.clone()),
                     price: effective_price,
                     offering: offering.clone(),
+                    match_kind: Some(canonical.kind),
                 });
             }
         }
@@ -1249,6 +1633,7 @@ async fn list_auto_models(
             .or_default()
             .push(benchmark.clone());
     }
+    let mappings = identity_mapping_indexes(&state.routing);
 
     let free_candidates = collect_free_candidates(
         &free_offerings,
@@ -1257,6 +1642,7 @@ async fn list_auto_models(
         &state.providers,
         cfg,
         None,
+        &mappings,
     );
     let paid_candidates = collect_paid_candidates(
         &paid_offerings,
@@ -1268,6 +1654,7 @@ async fn list_auto_models(
             provider_filter: None,
             routing: &state.routing,
             pricing_max_age_seconds: cfg.pricing_max_age_seconds,
+            mappings: &mappings,
         },
     );
 
@@ -1376,17 +1763,32 @@ fn select_mode_models(
                 provider: candidate.offering.provider.as_str(),
                 price: candidate.price.as_ref(),
                 pricing_eligible: candidate.offering.is_free || candidate.price.is_some(),
+                match_kind: candidate.match_kind,
+                is_free: candidate.offering.is_free,
             },
         });
     }
 
-    let mut ranked = pareto_rank(scored);
-    ranked.sort_by(|a, b| {
+    let eligible = scored;
+    let mut ranked = pareto_rank(eligible.clone());
+    let rank_order = |a: &ScoredCandidate<ModeModelValue<'_>>,
+                      b: &ScoredCandidate<ModeModelValue<'_>>| {
         a.expected_cost_microusd
             .cmp(&b.expected_cost_microusd)
             .then_with(|| a.latency_seconds.total_cmp(&b.latency_seconds))
             .then_with(|| b.quality.total_cmp(&a.quality))
-    });
+    };
+    ranked.sort_by(rank_order);
+    let selected = ranked
+        .iter()
+        .map(|candidate| (candidate.value.provider, candidate.value.model))
+        .collect::<BTreeSet<_>>();
+    let mut dominated = eligible
+        .into_iter()
+        .filter(|candidate| !selected.contains(&(candidate.value.provider, candidate.value.model)))
+        .collect::<Vec<_>>();
+    dominated.sort_by(rank_order);
+    ranked.extend(dominated);
 
     let mut iter = ranked.into_iter();
     let primary = iter.next();
@@ -1412,12 +1814,22 @@ fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
         "expected_cost_microusd": candidate.expected_cost_microusd,
         "latency_seconds": candidate.latency_seconds,
         "pricing_eligible": candidate.value.pricing_eligible,
-        "price_per_million": candidate.value.price.map(|price| json!({
-            "input": price.input_price_per_million,
-            "output": price.output_price_per_million,
-            "source": price.source,
-            "estimated": price.estimated,
-        })),
+        "benchmark_match": candidate.value.match_kind.map(ModelMatchKind::as_str),
+        "price_per_million": if candidate.value.is_free {
+            Some(json!({
+                "input": 0.0,
+                "output": 0.0,
+                "source": "provider_free",
+                "estimated": false,
+            }))
+        } else {
+            candidate.value.price.map(|price| json!({
+                "input": price.input_price_per_million,
+                "output": price.output_price_per_million,
+                "source": price.source,
+                "estimated": price.estimated,
+            }))
+        },
     })
 }
 
@@ -1497,6 +1909,7 @@ async fn list_free_models(
             .or_insert_with(Vec::new)
             .push(b.clone());
     }
+    let mappings = identity_mapping_indexes(&state.routing);
 
     let candidates = collect_free_candidates(
         &offerings,
@@ -1505,6 +1918,7 @@ async fn list_free_models(
         &state.providers,
         &state.config.server,
         provider_filter,
+        &mappings,
     );
 
     let mut providers = BTreeMap::new();
@@ -1544,21 +1958,17 @@ async fn list_free_models(
         });
 
         data.push((
-            candidate.quality,
+            candidate
+                .benchmark
+                .as_ref()
+                .and_then(|benchmark| quality_for(benchmark, task)),
             candidate.benchmark.clone(),
             candidate.offering.clone(),
             limit_kind,
             source_url,
+            candidate.match_kind,
         ));
     }
-
-    // Deduplicate: if two offerings have the same normalized canonical ID,
-    // keep the one with higher quality (or the first if equal).
-    let mut seen = std::collections::HashSet::new();
-    data.retain(|(_, _, offering, _, _)| {
-        let normalized = normalize_identifier(&offering.model);
-        seen.insert(normalized)
-    });
 
     // Auto-route models (kilo-auto/free, openrouter/free, orcarouter/free, etc.)
     // can't be benchmarked individually. Assign them the best quality of any
@@ -1566,16 +1976,9 @@ async fn list_free_models(
     // of their provider's offerings.
     // Note: :free suffixed models (kat-coder-pro-v2.5:free) are regular free-tier
     // models with benchmarks — they are NOT auto-routes.
-    let is_auto_route = |model: &str| -> bool {
-        model.ends_with("/free")
-            && (model.contains("kilo-auto")
-                || model.contains("openrouter")
-                || model.contains("orcarouter"))
-    };
-
     let mut best_per_provider: BTreeMap<String, (f64, BenchmarkModel)> = BTreeMap::new();
-    for (quality, benchmark, offering, _, _) in &data {
-        if is_auto_route(&offering.model) {
+    for (quality, benchmark, offering, _, _, _) in &data {
+        if is_provider_auto_route(&offering.model) {
             continue;
         }
         if let (Some(quality), Some(benchmark)) = (quality, benchmark) {
@@ -1588,7 +1991,7 @@ async fn list_free_models(
         }
     }
     for entry in &mut data {
-        if entry.0.is_some() || !is_auto_route(&entry.2.model) {
+        if entry.0.is_some() || !is_provider_auto_route(&entry.2.model) {
             continue;
         }
         if let Some((best_q, best_bm)) = best_per_provider.get(&entry.2.provider) {
@@ -1598,7 +2001,7 @@ async fn list_free_models(
     }
 
     data.sort_by(
-        |(left_q, _, left_o, left_kind, _), (right_q, _, right_o, right_kind, _)| {
+        |(left_q, _, left_o, left_kind, _, _), (right_q, _, right_o, right_kind, _, _)| {
             let left_benchmarked = left_q.is_some();
             let right_benchmarked = right_q.is_some();
             right_benchmarked
@@ -1614,12 +2017,22 @@ async fn list_free_models(
         },
     );
 
+    // Keep the highest-ranked benchmark variant per provider offering while
+    // preserving alternatives from providers with different limits.
+    let mut seen = std::collections::HashSet::new();
+    data.retain(|(_, _, offering, _, _, _)| {
+        seen.insert((
+            offering.provider.clone(),
+            normalize_identifier(&offering.model),
+        ))
+    });
+
     let ranked = data
         .into_iter()
         .take(limit)
         .enumerate()
         .map(
-            |(index, (_quality, benchmark, offering, _limit_kind, _source_url))| {
+            |(index, (_quality, benchmark, offering, _limit_kind, _source_url, match_kind))| {
                 let composite_quality = benchmark.as_ref().and_then(composite_quality);
                 let effort_level = benchmark
                     .as_ref()
@@ -1632,6 +2045,7 @@ async fn list_free_models(
                     rank: index + 1,
                     effort_level,
                     parameters: None,
+                    match_kind,
                 })
             },
         )
@@ -1725,6 +2139,7 @@ async fn list_paid_models(
             .or_insert_with(Vec::new)
             .push(b.clone());
     }
+    let mappings = identity_mapping_indexes(&state.routing);
 
     let candidates = collect_paid_candidates(
         &offerings,
@@ -1736,6 +2151,7 @@ async fn list_paid_models(
             provider_filter,
             routing: &state.routing,
             pricing_max_age_seconds: state.config.server.pricing_max_age_seconds,
+            mappings: &mappings,
         },
     );
 
@@ -1764,22 +2180,20 @@ async fn list_paid_models(
             });
 
         data.push((
-            candidate.quality,
+            candidate
+                .benchmark
+                .as_ref()
+                .and_then(|benchmark| quality_for(benchmark, task)),
             candidate.benchmark.clone(),
             candidate.price.clone(),
             candidate.offering.clone(),
+            candidate.match_kind,
         ));
     }
 
-    let mut seen = std::collections::HashSet::new();
-    data.retain(|(_, _, _, offering)| {
-        let normalized = normalize_identifier(&offering.model);
-        seen.insert(normalized)
-    });
-
     data.sort_by(|left, right| {
-        let (left_quality, _, _, left_offering) = left;
-        let (right_quality, _, _, right_offering) = right;
+        let (left_quality, _, _, left_offering, _) = left;
+        let (right_quality, _, _, right_offering, _) = right;
         match (left_quality, right_quality) {
             (Some(lq), Some(rq)) => rq
                 .total_cmp(lq)
@@ -1790,25 +2204,36 @@ async fn list_paid_models(
         }
     });
 
+    let mut seen = std::collections::HashSet::new();
+    data.retain(|(_, _, _, offering, _)| {
+        seen.insert((
+            offering.provider.clone(),
+            normalize_identifier(&offering.model),
+        ))
+    });
+
     let ranked = data
         .into_iter()
         .enumerate()
         .take(limit)
-        .map(|(index, (_quality, benchmark, price, offering))| {
-            let composite_quality = benchmark.as_ref().and_then(composite_quality);
-            let effort_level = benchmark
-                .as_ref()
-                .and_then(|b| b.reasoning_effort.as_deref());
-            catalog_model_json(&CatalogModelEntry {
-                offering: &offering,
-                benchmark: benchmark.as_ref(),
-                price,
-                composite_quality,
-                rank: index + 1,
-                effort_level,
-                parameters: None,
-            })
-        })
+        .map(
+            |(index, (_quality, benchmark, price, offering, match_kind))| {
+                let composite_quality = benchmark.as_ref().and_then(composite_quality);
+                let effort_level = benchmark
+                    .as_ref()
+                    .and_then(|b| b.reasoning_effort.as_deref());
+                catalog_model_json(&CatalogModelEntry {
+                    offering: &offering,
+                    benchmark: benchmark.as_ref(),
+                    price,
+                    composite_quality,
+                    rank: index + 1,
+                    effort_level,
+                    parameters: None,
+                    match_kind,
+                })
+            },
+        )
         .collect::<Vec<_>>();
 
     Json(json!({
@@ -2399,6 +2824,7 @@ struct SelectionMetadata {
     expected_cost_microusd: u64,
     benchmark_snapshot_id: i64,
     benchmark_as_of: i64,
+    match_kind: Option<ModelMatchKind>,
 }
 
 async fn resolve_targets(
@@ -2585,6 +3011,7 @@ async fn resolve_auto_free_targets(
             .or_insert_with(Vec::new)
             .push(b.clone());
     }
+    let mappings = identity_mapping_indexes(&state.routing);
     let classification = classify(request);
     let requirements = RequestRequirements::from_request(request);
     let candidates = offerings
@@ -2618,12 +3045,9 @@ async fn resolve_auto_free_targets(
                 return None;
             }
             let reference = quota_reference(provider, &offering.model);
-            let canonical = provider
-                .model_mappings
-                .get(&offering.model)
-                .cloned()
-                .unwrap_or_else(|| offering.model.clone());
-            let benchmark = find_benchmark(&benchmark_map, &canonical, classification.task);
+            let canonical =
+                canonical_match(provider, &offering.provider, &offering.model, &mappings);
+            let benchmark = find_benchmark(&benchmark_map, &canonical.benchmark_model);
             let quality = benchmark.and_then(composite_quality);
             let effective_input = offering
                 .input_price_per_million
@@ -2637,7 +3061,7 @@ async fn resolve_auto_free_targets(
                 effective_input,
                 effective_output,
                 offering.context_length,
-                &canonical,
+                &canonical.benchmark_model,
             ) {
                 return None;
             }
@@ -2668,7 +3092,7 @@ async fn resolve_auto_free_targets(
                     output_price_per_million: offering.output_price_per_million,
                     reasoning_effort: None,
                     selection: Some(SelectionMetadata {
-                        canonical_model: canonical,
+                        canonical_model: canonical.benchmark_model,
                         task: classification.task.as_str(),
                         complexity: classification.complexity.as_str(),
                         classifier_version: classification.version,
@@ -2677,6 +3101,7 @@ async fn resolve_auto_free_targets(
                         expected_cost_microusd: 0,
                         benchmark_snapshot_id,
                         benchmark_as_of,
+                        match_kind: benchmark.map(|_| canonical.kind),
                     }),
                 },
             })
@@ -2865,6 +3290,7 @@ async fn resolve_benchmark_targets(
             .or_default()
             .push(benchmark);
     }
+    let mappings = identity_mapping_indexes(&state.routing);
     let mut candidates = Vec::new();
     for offering in offerings {
         let Some(provider) = state.config.providers.get(&offering.provider) else {
@@ -2885,11 +3311,12 @@ async fn resolve_benchmark_targets(
         {
             continue;
         }
-        let canonical_mapping = provider.model_mappings.get(&offering.model);
-        let canonical = canonical_mapping
-            .map(String::as_str)
-            .unwrap_or(&offering.model);
-        let model_benchmarks = find_all_matching_benchmarks(&benchmark_by_model, canonical);
+        let pricing_mapping = provider.model_mappings.get(&offering.model);
+        let canonical = canonical_match(provider, &offering.provider, &offering.model, &mappings);
+        let model_benchmarks = benchmarks_for_effort(
+            find_exact_matching_benchmarks(&benchmark_by_model, &canonical.benchmark_model),
+            requested_effort,
+        );
         if model_benchmarks.is_empty() {
             continue;
         }
@@ -2918,26 +3345,12 @@ async fn resolve_benchmark_targets(
                         .and_then(|profile| profile.models_dev_key())
                 }),
                 &offering.model,
-                canonical_mapping.map(String::as_str),
+                pricing_mapping.map(String::as_str),
                 state.config.server.pricing_max_age_seconds,
             )
             .ok()
             .flatten();
-        let has_effort_variants = model_benchmarks
-            .iter()
-            .any(|benchmark| benchmark.reasoning_effort.is_some());
-        let requested_effort_supported = requested_effort.is_some_and(|effort| {
-            model_benchmarks
-                .iter()
-                .any(|benchmark| benchmark.reasoning_effort.as_deref() == Some(effort))
-        });
         for benchmark in model_benchmarks {
-            if requested_effort_supported
-                && has_effort_variants
-                && benchmark.reasoning_effort.as_deref() != requested_effort
-            {
-                continue;
-            }
             let Some(raw_quality) = composite_quality(benchmark) else {
                 continue;
             };
@@ -2947,7 +3360,7 @@ async fn resolve_benchmark_targets(
             }
             let Some(effective_price) = effective_price
                 .clone()
-                .or_else(|| benchmark_price_for_model(canonical, benchmark))
+                .or_else(|| benchmark_price_for_model(&canonical.benchmark_model, benchmark))
             else {
                 continue;
             };
@@ -2987,7 +3400,7 @@ async fn resolve_benchmark_targets(
                     output_price_per_million: Some(effective_price.output_price_per_million),
                     reasoning_effort: benchmark.reasoning_effort.clone(),
                     selection: Some(SelectionMetadata {
-                        canonical_model: canonical.to_owned(),
+                        canonical_model: canonical.benchmark_model.clone(),
                         task: classification.task.as_str(),
                         complexity: classification.complexity.as_str(),
                         classifier_version: classification.version,
@@ -2996,6 +3409,7 @@ async fn resolve_benchmark_targets(
                         expected_cost_microusd,
                         benchmark_snapshot_id,
                         benchmark_as_of,
+                        match_kind: Some(canonical.kind),
                     }),
                 },
                 quality,
@@ -3017,29 +3431,55 @@ async fn resolve_benchmark_targets(
         }
         None => None,
     };
-    let mut targets = pareto_rank(candidates)
-        .into_iter()
-        .map(|candidate| candidate.value)
-        .collect::<Vec<_>>();
-    targets.sort_by(|left, right| {
+    let eligible = candidates;
+    let mut ranked = pareto_rank(eligible.clone());
+    let rank_order = |left: &ScoredCandidate<SelectedTarget>,
+                      right: &ScoredCandidate<SelectedTarget>| {
         let left_pinned = pinned
             .as_ref()
-            .is_some_and(|pin| pin.0 == left.provider && pin.1 == left.model);
+            .is_some_and(|pin| pin.0 == left.value.provider && pin.1 == left.value.model);
         let right_pinned = pinned
             .as_ref()
-            .is_some_and(|pin| pin.0 == right.provider && pin.1 == right.model);
+            .is_some_and(|pin| pin.0 == right.value.provider && pin.1 == right.value.model);
         left.expected_cost_microusd
             .cmp(&right.expected_cost_microusd)
             .then_with(|| right_pinned.cmp(&left_pinned))
-            .then_with(|| (&left.provider, &left.model).cmp(&(&right.provider, &right.model)))
-    });
-    Ok(targets)
+            .then_with(|| {
+                (&left.value.provider, &left.value.model)
+                    .cmp(&(&right.value.provider, &right.value.model))
+            })
+    };
+    ranked.sort_by(rank_order);
+    let selected = ranked
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.value.provider.as_str(),
+                candidate.value.model.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let mut dominated = eligible
+        .into_iter()
+        .filter(|candidate| {
+            !selected.contains(&(
+                candidate.value.provider.as_str(),
+                candidate.value.model.as_str(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    dominated.sort_by(rank_order);
+    ranked.extend(dominated);
+    Ok(ranked
+        .into_iter()
+        .map(|candidate| candidate.value)
+        .collect())
 }
 
 fn is_reasoning_effort(effort: &str) -> bool {
     matches!(
         effort.to_ascii_lowercase().as_str(),
-        "low" | "medium" | "high" | "xhigh"
+        "low" | "medium" | "high" | "xhigh" | "max"
     )
 }
 
@@ -4154,6 +4594,12 @@ fn add_model_headers(headers: &mut HeaderMap, metadata: &ModelMetadata) {
             "x-model-gateway-benchmark-as-of",
             header_value(&selection.benchmark_as_of.to_string()),
         );
+        if let Some(match_kind) = selection.match_kind {
+            headers.insert(
+                "x-model-gateway-benchmark-match",
+                header_value(match_kind.as_str()),
+            );
+        }
     }
 }
 
@@ -4347,15 +4793,22 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        ModelMetadata, RequestRequirements, SelectionMetadata, StreamChoice, add_model_headers,
-        benchmark_ids_match, copy_safe_headers, decorate_json_response, estimate_request_tokens,
-        expected_cost_microusd, find_benchmark, find_benchmark_raw, footer_sse_event, header_value,
-        is_fallback_status, is_model_denied, is_provider_auto_route, is_reasoning_effort,
-        log_request, malformed_sse_event, parse_json_usage, parse_sse_usage, parse_usage_value,
-        rank_benchmark_models, rate_limit_reset_delay, request_id, request_id_from_response,
-        session_material, sse_model, strip_model_noise, take_sse_event, transform_sse_event,
+        ModelMatchKind, ModelMetadata, RequestRequirements, SelectionMetadata, StreamChoice,
+        add_model_headers, benchmark_ids_match, benchmark_price_for_model, benchmarks_for_effort,
+        copy_safe_headers, decorate_json_response, estimate_request_tokens, expected_cost_microusd,
+        find_all_matching_benchmarks, find_benchmark, find_exact_matching_benchmarks,
+        find_suggested_benchmark, footer_sse_event, has_dynamic_or_release_suffix, header_value,
+        identity_mapping_indexes, is_fallback_status, is_model_denied, is_provider_auto_route,
+        is_reasoning_effort, log_request, malformed_sse_event, parse_json_usage, parse_sse_usage,
+        parse_usage_value, rank_benchmark_models, rate_limit_reset_delay, request_id,
+        request_id_from_response, session_material, sse_model, strip_model_noise, take_sse_event,
+        transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
+    use crate::identity::{
+        IdentityAliasRecord, IdentityConfidence, IdentityEntityRecord, IdentityImport,
+    };
+    use crate::routing::RoutingStore;
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use serde_json::json;
     use tracing_subscriber::fmt::MakeWriter;
@@ -4381,6 +4834,63 @@ mod tests {
 
         fn make_writer(&'a self) -> Self::Writer {
             TestGuard(self.0.clone())
+        }
+    }
+
+    fn resolves_single(catalog_id: &str, benchmark_id: &str) -> bool {
+        let benchmarks = BTreeMap::from([(
+            benchmark_id.to_owned(),
+            vec![BenchmarkModel::fixture(
+                benchmark_id,
+                50.0,
+                50.0,
+                50.0,
+                1.0,
+                1.0,
+            )],
+        )]);
+        find_all_matching_benchmarks(&benchmarks, catalog_id).len() == 1
+    }
+
+    fn resolves_exact_single(catalog_id: &str, benchmark_id: &str) -> bool {
+        let benchmarks = BTreeMap::from([(
+            benchmark_id.to_owned(),
+            vec![BenchmarkModel::fixture(
+                benchmark_id,
+                50.0,
+                50.0,
+                50.0,
+                1.0,
+                1.0,
+            )],
+        )]);
+        find_exact_matching_benchmarks(&benchmarks, catalog_id).len() == 1
+    }
+
+    #[test]
+    fn opencode_zen_free_ids_require_exact_or_approved_runtime_identity() {
+        assert!(resolves_exact_single(
+            "deepseek-v4-flash-free",
+            "deepseek-v4-flash"
+        ));
+        assert!(resolves_exact_single(
+            "north-mini-code-free",
+            "north-mini-code"
+        ));
+        assert!(resolves_exact_single("laguna-s-2.1-free", "laguna-s-2-1"));
+        assert!(resolves_exact_single(
+            "ling-3.0-flash-free",
+            "ling-3-0-flash"
+        ));
+        for (catalog, benchmark) in [
+            ("mimo-v2.5-free", "mimo-v2-5-0424"),
+            ("nemotron-3-ultra-free", "nvidia-nemotron-3-ultra-550b-a55b"),
+            ("big-pickle", "claude-sonnet-5"),
+        ] {
+            assert!(
+                !resolves_exact_single(catalog, benchmark),
+                "unexpected runtime identity {catalog} -> {benchmark}"
+            );
         }
     }
 
@@ -4425,7 +4935,7 @@ mod tests {
             "claude-4-5-sonnet"
         ));
         assert_eq!(
-            find_benchmark(&benchmarks, "models/gemini-2.5-flash", TaskKind::General)
+            find_benchmark(&benchmarks, "models/gemini-2.5-flash")
                 .expect("Gemini benchmark")
                 .intelligence,
             Some(80.0)
@@ -4433,7 +4943,7 @@ mod tests {
     }
 
     #[test]
-    fn find_benchmark_prefers_exact_over_prefix_and_penalizes_variant_keywords() {
+    fn find_benchmark_prefers_exact_and_rejects_other_variants() {
         let mut benchmarks = BTreeMap::new();
         // Exact match: mimo-v2-flash → mimo-v2-flash (G=24.7), NOT mimo-v2-flash-reasoning (G=31.2)
         benchmarks.insert(
@@ -4458,8 +4968,8 @@ mod tests {
                 1.0,
             )],
         );
-        let result = find_benchmark(&benchmarks, "xiaomimimo/mimo-v2-flash", TaskKind::General)
-            .expect("mimo-v2-flash");
+        let result =
+            find_benchmark(&benchmarks, "xiaomimimo/mimo-v2-flash").expect("mimo-v2-flash");
         assert_eq!(result.intelligence, Some(24.7));
         assert_eq!(result.coding_quality, Some(49.8));
 
@@ -4499,8 +5009,8 @@ mod tests {
                 1.0,
             )],
         );
-        let result = find_benchmark(&benchmarks, "xiaomimimo/mimo-v2.5", TaskKind::General)
-            .expect("mimo-v2.5");
+        let result =
+            find_suggested_benchmark(&benchmarks, "xiaomimimo/mimo-v2.5").expect("mimo-v2.5");
         assert_eq!(result.intelligence, Some(37.2));
         assert_eq!(
             result.id, "mimo-v2-5-0424",
@@ -4531,14 +5041,335 @@ mod tests {
                 1.0,
             )],
         );
-        assert!(find_benchmark(&benchmarks, "xiaomimimo/mimo-v2.5", TaskKind::General).is_none());
+        assert!(find_suggested_benchmark(&benchmarks, "xiaomimimo/mimo-v2.5").is_none());
         assert!(!benchmark_ids_match("mimo-v2.5", "mimo-v2-5-pro"));
         assert!(!benchmark_ids_match("mimo-v2.5-pro", "mimo-v2-5-0424"));
         assert!(!benchmark_ids_match("deepseek-v4-flash", "deepseek-v4-pro"));
-        assert!(benchmark_ids_match(
+        assert!(resolves_single(
             "stepfun/step-3.7-flash:free",
             "step-3-7-flash"
         ));
+    }
+
+    #[test]
+    fn matcher_rejects_cross_family_suffixes_and_ambiguous_groups() {
+        assert!(!benchmark_ids_match(
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+            "qwen3-omni-30b-a3b-reasoning"
+        ));
+        assert!(!benchmark_ids_match(
+            "qwen/qwen3-30b-a3b-instruct",
+            "qwen3-coder-30b-a3b-instruct"
+        ));
+        assert!(!benchmark_ids_match(
+            "qwen/qwen3-30b-a3b-instruct",
+            "qwen3-vl-30b-a3b-instruct"
+        ));
+
+        let mut benchmarks = BTreeMap::new();
+        for id in ["devstral-2", "devstral-small-2"] {
+            benchmarks.insert(
+                id.to_owned(),
+                vec![BenchmarkModel::fixture(id, 40.0, 40.0, 40.0, 1.0, 1.0)],
+            );
+        }
+        assert!(find_all_matching_benchmarks(&benchmarks, "devstral").is_empty());
+    }
+
+    #[test]
+    fn matcher_accepts_exact_normalized_and_safe_live_identities() {
+        let cases = [
+            ("gpt-4o", "gpt-4o"),
+            ("GPT_4O", "gpt-4o"),
+            ("gemini-2.5-flash", "gemini-2-5-flash"),
+            (
+                "models/gemini-3.1-flash-lite-preview",
+                "gemini-3-1-flash-lite-preview",
+            ),
+            ("anthropic/claude-sonnet-4-5", "claude-4-5-sonnet"),
+            ("deepseek/deepseek-v4-flash", "deepseek-v4-flash"),
+            (
+                "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+                "qwen3-coder-30b-a3b-instruct",
+            ),
+            (
+                "qwen/qwen3-vl-30b-a3b-instruct",
+                "qwen3-vl-30b-a3b-instruct",
+            ),
+            (
+                "qwen/qwen3-omni-30b-a3b-instruct",
+                "qwen3-omni-30b-a3b-instruct",
+            ),
+            ("stepfun/step-3.7-flash:free", "step-3-7-flash"),
+            ("xiaomimimo/mimo-v2-pro", "mimo-v2-pro"),
+            ("xiaomi/mimo-v2.5-pro", "mimo-v2-5-pro"),
+            ("xiaomimimo/mimo-v2.5", "mimo-v2-5-0424"),
+            ("MiniMaxAI/MiniMax-M2.5", "minimax-m2-5"),
+            ("moonshotai/kimi-k2-0905", "kimi-k2-0905"),
+            (
+                "qwen/qwen3-235b-a22b-instruct-2507",
+                "qwen3-235b-a22b-instruct-2507",
+            ),
+            ("deepseek/deepseek-v3-0324", "deepseek-v3-0324"),
+            ("openai/gpt-4o-2024-08-06", "gpt-4o-2024-08-06"),
+            ("openai/o3-mini-high", "o3-mini-high"),
+            ("opencode-go/glm-5.2", "glm-5-2"),
+            ("qwen/qwen3.7-max", "qwen3-7-max"),
+            ("zai-org/glm-4.7-flash", "glm-4-7-flash"),
+            (
+                "nvidia/nemotron-3-ultra",
+                "nvidia-nemotron-3-ultra-550b-a55b",
+            ),
+            ("provider/model-fp16-bf16", "model"),
+            ("provider/model-int4:free", "model"),
+        ];
+
+        for (catalog, benchmark) in cases {
+            assert!(
+                resolves_single(catalog, benchmark),
+                "expected '{catalog}' to resolve uniquely to '{benchmark}'"
+            );
+        }
+    }
+
+    #[test]
+    fn matcher_rejects_semantic_release_and_family_collisions() {
+        let cases = [
+            ("deepseek/deepseek-v4-flash", "deepseek-v4-pro"),
+            (
+                "qwen/qwen3-30b-a3b-instruct",
+                "qwen3-coder-30b-a3b-instruct",
+            ),
+            ("qwen/qwen3-30b-a3b-instruct", "qwen3-vl-30b-a3b-instruct"),
+            (
+                "qwen/qwen3-vl-30b-a3b-thinking",
+                "qwen3-vl-30b-a3b-reasoning",
+            ),
+            (
+                "qwen/qwen3-omni-30b-a3b-thinking",
+                "qwen3-omni-30b-a3b-reasoning",
+            ),
+            (
+                "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+                "qwen3-omni-30b-a3b-reasoning",
+            ),
+            (
+                "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+                "nemotron-3-nano-omni-30b-a3b",
+            ),
+            ("qwen/qwen3-235b-a22b-fp8", "qwen3-235b-a22b-instruct"),
+            (
+                "meta/llama-4-maverick-17b-128e-instruct-fp8",
+                "llama-4-maverick",
+            ),
+            ("minimax/minimax-m2.5-highspeed", "minimax-m2-5"),
+            ("qwen/qwen3.6-max-preview", "qwen3-6-max"),
+            ("qwen/qwen3-coder-flash", "qwen3-coder-next"),
+            ("kwaipilot/kat-coder-pro-v2.5", "kat-coder-pro-v2"),
+            ("mistralai/ministral-14b-2512", "ministral-3-14b"),
+            ("mistral/ministral-14b-latest", "ministral-3-14b"),
+            ("openai/gpt-4o-mini-2024-07-18", "gpt-4o-mini"),
+            ("openai/gpt-4o-2024-11-20", "gpt-4o"),
+            ("qwen/qwen3.7-max-2026-05-20", "qwen3-7-max"),
+            ("deepseek/deepseek-v4-flash:discounted", "deepseek-v4-flash"),
+            ("openai/o4-mini-deep-research", "o4-mini"),
+            ("gpt-4o-audio-preview", "gpt-4o-audio"),
+            ("model-thinking", "model"),
+            ("gpt-4", "gpt-4-turbo"),
+            ("a", "a-b"),
+        ];
+
+        for (catalog, benchmark) in cases {
+            assert!(
+                !resolves_single(catalog, benchmark),
+                "expected '{catalog}' to reject '{benchmark}'"
+            );
+        }
+    }
+
+    #[test]
+    fn matcher_prefers_exact_and_fails_closed_on_ambiguous_fuzzy_groups() {
+        let benchmark = |id: &str, quality: f64| {
+            BenchmarkModel::fixture(id, quality, quality, quality, 1.0, 1.0)
+        };
+        let benchmarks = BTreeMap::from([
+            ("gpt-4o".to_owned(), vec![benchmark("gpt-4o", 50.0)]),
+            (
+                "gpt-4o-mini".to_owned(),
+                vec![benchmark("gpt-4o-mini", 90.0)],
+            ),
+        ]);
+        let exact = find_all_matching_benchmarks(&benchmarks, "openai/gpt-4o");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].id, "gpt-4o");
+
+        let ambiguous = BTreeMap::from([
+            (
+                "model-family-1".to_owned(),
+                vec![benchmark("model-family-1", 50.0)],
+            ),
+            (
+                "model-family-2".to_owned(),
+                vec![benchmark("model-family-2", 60.0)],
+            ),
+        ]);
+        assert!(find_all_matching_benchmarks(&ambiguous, "model-family").is_empty());
+
+        let unique = BTreeMap::from([(
+            "model-family-2025".to_owned(),
+            vec![benchmark("model-family-2025", 50.0)],
+        )]);
+        let resolved = find_all_matching_benchmarks(&unique, "model-family");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].id, "model-family-2025");
+    }
+
+    #[test]
+    fn release_guards_allow_exact_ids_but_block_base_fallbacks() {
+        let releases = [
+            "model-latest",
+            "model-2512",
+            "model-2024-08",
+            "model-2024-08-06",
+            "model-2026-05-20",
+            "model-latest-2512",
+        ];
+        for release in releases {
+            assert!(
+                has_dynamic_or_release_suffix(release),
+                "missing release guard for {release}"
+            );
+            assert!(
+                resolves_single(release, release),
+                "exact release must resolve: {release}"
+            );
+            assert!(
+                !resolves_single(release, "model"),
+                "release must not borrow base: {release}"
+            );
+        }
+        for stable in [
+            "model-v2",
+            "model-32b",
+            "model-rc1",
+            "model-2024v1",
+            "model-2000-05-variant",
+        ] {
+            assert!(
+                !has_dynamic_or_release_suffix(stable),
+                "stable ID misclassified: {stable}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_normalization_is_symmetric_but_fuzzy_extensions_are_directional() {
+        let exact_pairs = [
+            ("models/gemini-2.5-flash", "gemini-2-5-flash"),
+            ("UPPER_MODEL", "upper-model"),
+            ("claude-sonnet-4-5", "claude-4-5-sonnet"),
+            ("stepfun/step-3.7-flash", "step-3-7-flash"),
+        ];
+        for (left, right) in exact_pairs {
+            assert_eq!(
+                benchmark_ids_match(left, right),
+                benchmark_ids_match(right, left)
+            );
+        }
+        assert!(benchmark_ids_match("mimo-v2.5", "mimo-v2-5-0424"));
+        assert!(!benchmark_ids_match("mimo-v2-5-0424", "mimo-v2.5"));
+    }
+
+    #[test]
+    fn benchmark_price_matching_stays_exact_even_when_quality_can_match_safely() {
+        let benchmark = BenchmarkModel::fixture("gemini-2-5-flash", 50.0, 50.0, 50.0, 1.2, 3.4);
+        assert!(benchmark_price_for_model("GEMINI-2-5-FLASH", &benchmark).is_some());
+        assert!(benchmark_price_for_model("gemini-2.5-flash", &benchmark).is_none());
+        assert!(resolves_single("gemini-2.5-flash", "gemini-2-5-flash"));
+    }
+
+    #[test]
+    fn conflicting_canonical_entity_links_fail_closed() {
+        let store = RoutingStore::open(None).expect("store");
+        for (source, entity_id, benchmark_id) in [
+            ("models.dev", "hf:vendor/model-a", "benchmark-a"),
+            ("openrouter", "hf:vendor/model-b", "benchmark-b"),
+        ] {
+            store
+                .replace_identity_source(&IdentityImport {
+                    source: source.to_owned(),
+                    attribution: "fixture".to_owned(),
+                    entities: vec![IdentityEntityRecord {
+                        id: entity_id.to_owned(),
+                        creator: Some("vendor".to_owned()),
+                        family: Some("model".to_owned()),
+                        version: None,
+                        variant: None,
+                        release_date: None,
+                        hugging_face_id: Some(entity_id.trim_start_matches("hf:").to_owned()),
+                    }],
+                    aliases: vec![IdentityAliasRecord {
+                        source: source.to_owned(),
+                        provider_key: "provider".to_owned(),
+                        provider_model_id: "model".to_owned(),
+                        entity_id: entity_id.to_owned(),
+                        confidence: IdentityConfidence::CanonicalReference,
+                        provenance_url: "fixture".to_owned(),
+                        observed_at: 100,
+                    }],
+                })
+                .expect("identity source");
+            store
+                .approve_benchmark_identity_link(entity_id, benchmark_id, "fixture")
+                .expect("approve link");
+        }
+        let indexes = identity_mapping_indexes(&store);
+        assert!(
+            !indexes
+                .references
+                .contains_key(&("provider".to_owned(), "model".to_owned()))
+        );
+        assert_eq!(
+            indexes
+                .conflicts
+                .get(&("provider".to_owned(), "model".to_owned())),
+            Some(&vec!["benchmark-a".to_owned(), "benchmark-b".to_owned()])
+        );
+    }
+
+    #[test]
+    fn matcher_groups_real_effort_suffixed_benchmarks() {
+        let benchmarks = ["max", "high", "medium", "low", "xhigh"]
+            .into_iter()
+            .map(|effort| {
+                let id = if effort == "max" {
+                    "gpt-5-6-sol".to_owned()
+                } else {
+                    format!("gpt-5-6-sol-{effort}")
+                };
+                let mut model = BenchmarkModel::fixture(&id, 60.0, 60.0, 60.0, 1.0, 1.0);
+                model.reasoning_effort = Some(effort.to_owned());
+                (id, vec![model])
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let grouped = find_all_matching_benchmarks(&benchmarks, "gpt-5.6-sol");
+        assert_eq!(grouped.len(), 5);
+        for effort in ["max", "high", "medium", "low", "xhigh"] {
+            let filtered = benchmarks_for_effort(grouped.clone(), Some(effort));
+            assert_eq!(filtered.len(), 1, "missing effort {effort}");
+            assert_eq!(filtered[0].reasoning_effort.as_deref(), Some(effort));
+            if effort != "max" {
+                let explicit =
+                    find_all_matching_benchmarks(&benchmarks, &format!("gpt-5.6-sol-{effort}"));
+                assert_eq!(explicit.len(), 1);
+                assert_eq!(explicit[0].reasoning_effort.as_deref(), Some(effort));
+            }
+        }
+        assert!(benchmarks_for_effort(grouped, Some("minimal")).is_empty());
+
+        let plain = BenchmarkModel::fixture("plain-model", 50.0, 50.0, 50.0, 1.0, 1.0);
+        assert_eq!(benchmarks_for_effort(vec![&plain], Some("high")).len(), 1);
     }
 
     #[test]
@@ -4732,35 +5563,43 @@ mod tests {
     }
 
     #[test]
-    fn strip_model_noise_removes_thinking_suffix() {
+    fn strip_model_noise_preserves_thinking_and_release_identity() {
         assert_eq!(
             strip_model_noise("qwen/qwen3-235b-a22b-thinking-2507"),
-            "qwen/qwen3-235b-a22b"
+            "qwen/qwen3-235b-a22b-thinking-2507"
         );
         assert_eq!(
             strip_model_noise("qwen/qwen3-omni-30b-a3b-thinking"),
-            "qwen/qwen3-omni-30b-a3b"
+            "qwen/qwen3-omni-30b-a3b-thinking"
         );
         assert_eq!(
             strip_model_noise("qwen/qwen3-vl-235b-a22b-thinking"),
-            "qwen/qwen3-vl-235b-a22b"
+            "qwen/qwen3-vl-235b-a22b-thinking"
         );
     }
 
     #[test]
-    fn strip_model_noise_removes_latest_suffix() {
-        // "latest" is a noise token removed from any segment
-        assert_eq!(strip_model_noise("mistral-tiny-latest"), "mistral-tiny");
-        assert_eq!(strip_model_noise("ministral-14b-latest"), "ministral-14b");
+    fn strip_model_noise_preserves_dynamic_aliases() {
+        assert_eq!(
+            strip_model_noise("mistral-tiny-latest"),
+            "mistral-tiny-latest"
+        );
+        assert_eq!(
+            strip_model_noise("ministral-14b-latest"),
+            "ministral-14b-latest"
+        );
     }
 
     #[test]
-    fn strip_model_noise_removes_date_codes() {
-        assert_eq!(strip_model_noise("ministral-14b-2512"), "ministral-14b");
-        assert_eq!(strip_model_noise("mistral-tiny-2407"), "mistral-tiny");
+    fn strip_model_noise_preserves_release_codes() {
+        assert_eq!(
+            strip_model_noise("ministral-14b-2512"),
+            "ministral-14b-2512"
+        );
+        assert_eq!(strip_model_noise("mistral-tiny-2407"), "mistral-tiny-2407");
         assert_eq!(
             strip_model_noise("qwen/qwen3-30b-a3b-2507"),
-            "qwen/qwen3-30b-a3b"
+            "qwen/qwen3-30b-a3b-2507"
         );
     }
 
@@ -4785,9 +5624,9 @@ mod tests {
         let mut benchmarks = std::collections::BTreeMap::new();
         // AA benchmark without quantization suffix
         benchmarks.insert(
-            "qwen3-30b-a3b-instruct".to_owned(),
+            "qwen3-30b-a3b".to_owned(),
             vec![BenchmarkModel::fixture(
-                "qwen3-30b-a3b-instruct",
+                "qwen3-30b-a3b",
                 6.8,
                 10.2,
                 8.5,
@@ -4796,16 +5635,16 @@ mod tests {
             )],
         );
         // Catalog has -fp8 suffix that should be stripped
-        let result = find_benchmark(&benchmarks, "qwen/qwen3-30b-a3b-fp8", TaskKind::General)
-            .expect("noise-stripped match");
+        let result =
+            find_benchmark(&benchmarks, "qwen/qwen3-30b-a3b-fp8").expect("noise-stripped match");
         assert_eq!(result.intelligence, Some(6.8));
-        assert_eq!(result.id, "qwen3-30b-a3b-instruct");
+        assert_eq!(result.id, "qwen3-30b-a3b");
     }
 
     #[test]
     fn noise_stripped_matching_uses_original_model_when_match_exists() {
         let mut benchmarks = std::collections::BTreeMap::new();
-        // Benchmark for the original (unstoned) model ID
+        // Exact identity after removing the quantization decoration wins.
         benchmarks.insert(
             "qwen3-30b-a3b".to_owned(),
             vec![BenchmarkModel::fixture(
@@ -4817,7 +5656,7 @@ mod tests {
                 1.0,
             )],
         );
-        // Benchmark for the noise-stripped version
+        // A semantically different instruct variant must not be considered.
         benchmarks.insert(
             "qwen3-30b-a3b-instruct".to_owned(),
             vec![BenchmarkModel::fixture(
@@ -4829,16 +5668,13 @@ mod tests {
                 1.0,
             )],
         );
-        // Should prefer the original match (stripped = "qwen-qwen3-30b-a3b" matches "qwen3-30b-a3b")
-        let result = find_benchmark(&benchmarks, "qwen/qwen3-30b-a3b-fp8", TaskKind::General)
-            .expect("noise-stripped match");
-        // The noise-stripped model "qwen-qwen3-30b-a3b" has an exact match
-        // with the benchmark "qwen3-30b-a3b", which has higher score (10.0 vs 6.8)
+        let result =
+            find_benchmark(&benchmarks, "qwen/qwen3-30b-a3b-fp8").expect("noise-stripped match");
         assert_eq!(result.intelligence, Some(10.0));
     }
 
     #[test]
-    fn find_benchmark_raw_still_works_without_noise() {
+    fn find_benchmark_still_works_without_noise() {
         let mut benchmarks = std::collections::BTreeMap::new();
         benchmarks.insert(
             "gemini-2-5-flash".to_owned(),
@@ -4851,20 +5687,46 @@ mod tests {
                 1.0,
             )],
         );
-        // find_benchmark_raw should still match correctly
-        let result = find_benchmark_raw(&benchmarks, "models/gemini-2.5-flash", TaskKind::General)
-            .expect("raw match");
+        let result =
+            find_benchmark(&benchmarks, "models/gemini-2.5-flash").expect("benchmark match");
         assert_eq!(result.intelligence, Some(80.0));
     }
 
     #[test]
     fn is_provider_auto_route_detects_free_and_auto_routes() {
-        assert!(is_provider_auto_route("kilo-auto-free"));
-        assert!(is_provider_auto_route("openrouter-free"));
-        assert!(is_provider_auto_route("orcarouter-free"));
-        assert!(!is_provider_auto_route("gpt-4o"));
-        assert!(!is_provider_auto_route("claude-sonnet-4"));
-        assert!(!is_provider_auto_route(""));
+        for model in [
+            "kilo-auto/free",
+            "kilo-auto/efficient",
+            "kilo-auto/balanced",
+            "kilo-auto/frontier",
+            "openrouter/auto",
+            "openrouter/auto-beta",
+            "openrouter/free",
+            "orcarouter/auto",
+            "orcarouter/free",
+        ] {
+            assert!(
+                is_provider_auto_route(model),
+                "missed virtual route {model}"
+            );
+        }
+        for model in [
+            "big-pickle",
+            "deepseek-v4-flash-free",
+            "laguna-s-2.1-free",
+            "ling-3.0-flash-free",
+            "mimo-v2.5-free",
+            "nemotron-3-ultra-free",
+            "north-mini-code-free",
+            "kat-coder-pro-v2.5:free",
+            "gpt-4o",
+            "",
+        ] {
+            assert!(
+                !is_provider_auto_route(model),
+                "misclassified real model {model}"
+            );
+        }
     }
 
     #[test]
@@ -4989,7 +5851,9 @@ mod tests {
         assert!(is_reasoning_effort("medium"));
         assert!(is_reasoning_effort("high"));
         assert!(is_reasoning_effort("xhigh"));
+        assert!(is_reasoning_effort("max"));
         assert!(is_reasoning_effort("LOW"));
+        assert!(is_reasoning_effort("MAX"));
         assert!(is_reasoning_effort("Medium"));
         assert!(!is_reasoning_effort("extreme"));
         assert!(!is_reasoning_effort(""));
@@ -5039,6 +5903,7 @@ mod tests {
                 expected_cost_microusd: 1_000,
                 benchmark_snapshot_id: 42,
                 benchmark_as_of: 1700000000,
+                match_kind: Some(ModelMatchKind::Approved),
             }),
         };
         let mut headers = HeaderMap::new();
@@ -5075,6 +5940,14 @@ mod tests {
                 .to_str()
                 .unwrap(),
             "general"
+        );
+        assert_eq!(
+            headers
+                .get("x-model-gateway-benchmark-match")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "approved"
         );
         assert_eq!(
             headers

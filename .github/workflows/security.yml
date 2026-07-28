@@ -14,13 +14,14 @@ env:
   REPO_FOUNDRY_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || '' }}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   profile:
     name: Profile
     runs-on: ubuntu-slim
+    timeout-minutes: 10
     outputs:
       javascript: ${{ steps.profile.outputs.javascript }}
       rust: ${{ steps.profile.outputs.rust }}
@@ -64,6 +65,7 @@ jobs:
   dependency-audit-javascript:
     name: Dependency Audit (JavaScript)
     runs-on: ubuntu-slim
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -99,6 +101,7 @@ jobs:
   dependency-audit-rust:
     name: Dependency Audit (Rust)
     runs-on: ubuntu-slim
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -133,17 +136,18 @@ jobs:
   dependency-audit-python:
     name: Dependency Audit (Python) / ${{ matrix.requirement }}
     needs: profile
+    if: ${{ needs.profile.result == 'success' && needs.profile.outputs.python == 'true' }}
     strategy:
       fail-fast: false
       max-parallel: 8
       matrix:
         requirement: ${{ fromJSON(needs.profile.outputs.python_requirements) }}
     runs-on: ubuntu-slim
+    timeout-minutes: 20
     env:
       REPO_FOUNDRY_PYTHON_REQUIREMENT: ${{ matrix.requirement }}
     steps:
       - name: Checkout
-        if: matrix.requirement != 'none'
         uses: actions/checkout@v7
         with:
           # Python audits only need manifests, lockfiles, and audit config.
@@ -161,37 +165,18 @@ jobs:
             **/poetry.lock
             **/uv.lock
           sparse-checkout-cone-mode: false
-      - name: Detect
-        if: matrix.requirement != 'none'
-        id: applicability
-        run: bash .github/scripts/security.sh should_run python >> "$GITHUB_OUTPUT"
       - name: Setup
-        if: matrix.requirement != 'none' && steps.applicability.outputs.applicable == 'true'
         uses: ./.github/actions/setup
         with:
           mise-scope: python
       - name: Audit dependencies
-        if: matrix.requirement != 'none' && steps.applicability.outputs.applicable == 'true'
         run: bash .github/scripts/security.sh audit python
-      - name: Skip
-        if: matrix.requirement == 'none'
-        run: echo 'Skipping Python audit (no applicable Python dependencies)'
-
-  dependency-audit-python-status:
-    name: Dependency Audit (Python)
-    if: always()
-    needs: dependency-audit-python
-    runs-on: ubuntu-slim
-    steps:
-      - name: Check matrix result
-        env:
-          RESULT: ${{ needs.dependency-audit-python.result }}
-        run: test "$RESULT" = success
 
   dependency-review:
     name: Dependency Review
     if: ${{ github.event_name == 'pull_request' && !github.event.repository.private }}
     runs-on: ubuntu-slim
+    timeout-minutes: 10
     steps:
       - name: Review
         uses: actions/dependency-review-action@v5

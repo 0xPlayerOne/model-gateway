@@ -164,7 +164,7 @@ Keep pull requests focused and reviewable. Include screenshots or recordings for
 | Push to `staging`                | Release PR workflow                      |
 | Version tag such as `v1.2.3`     | Release workflow                         |
 
-The workflows use separate concurrency groups. A newer run for the same branch or pull request cancels its older run, while independent CI, test, security, and CodeQL workflows continue in parallel.
+The workflows use separate concurrency groups keyed by the commit under test. A newer run for the same commit cancels a duplicate event-triggered run, while newer commits cancel older runs and independent CI, Test, Security, and CodeQL workflows continue in parallel.
 
 Required checks are enforced by branch protection. Do not duplicate their checklists in the pull request description; document validation commands and results instead.
 

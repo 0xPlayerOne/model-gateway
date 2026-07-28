@@ -16,13 +16,14 @@ env:
   REPO_FOUNDRY_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || '' }}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   format:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.REPO_FOUNDRY_FAST_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -39,6 +40,7 @@ jobs:
           install-python: false
           install-rust: false
           cache-build: false
+          cache-save: false
           cache-format: true
           task: format
       - name: Format
@@ -47,7 +49,8 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.REPO_FOUNDRY_FAST_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -63,6 +66,7 @@ jobs:
           install: true
           install-python: false
           cache-build: false
+          cache-save: false
           cache-lint: true
           task: lint
       - name: Lint
@@ -72,6 +76,7 @@ jobs:
   type-check:
     name: Type-Check
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -86,6 +91,8 @@ jobs:
         with:
           install: true
           install-python: false
+          cache-build: ${{ steps.applicability.outputs.rust == 'true' || vars.REPO_FOUNDRY_CACHE_BUILD == 'true' }}
+          cache-save: false
           task: type_check
       - name: Type-Check
         if: steps.applicability.outputs.applicable == 'true'
@@ -94,6 +101,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -108,6 +116,8 @@ jobs:
         with:
           install: true
           install-python: false
+          cache-build: ${{ steps.applicability.outputs.rust == 'true' || vars.REPO_FOUNDRY_CACHE_BUILD == 'true' }}
+          cache-save: false
           task: build
       - name: Build
         if: steps.applicability.outputs.applicable == 'true'

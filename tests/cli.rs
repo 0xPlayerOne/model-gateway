@@ -1,5 +1,11 @@
 use std::process::Command;
 
+use model_gateway::benchmarks::BenchmarkModel;
+use model_gateway::identity::{
+    IdentityAliasRecord, IdentityConfidence, IdentityEntityRecord, IdentityImport,
+};
+use model_gateway::routing::{CatalogRecord, RoutingStore};
+
 /// Strip environment variables that would trigger automatic provider discovery
 /// via `discover_environment_providers` in the gateway's config loader.
 /// Without this, the user's shell environment can leak into CI tests and
@@ -304,4 +310,213 @@ billing_mode = "paid"
     assert!(stdout.contains("1.2"));
     assert!(stdout.contains("3.4"));
     assert!(stdout.contains("manual-overrides"));
+}
+
+#[test]
+fn matching_reconcile_approve_explain_and_remove_are_provider_scoped() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let config_path = directory.path().join("config.toml");
+    let state_path = directory.path().join("routing.sqlite3");
+    std::fs::write(
+        &config_path,
+        r#"
+[providers.fixture]
+adapter = "openai_chat"
+base_url = "http://localhost:8000/v1"
+billing_mode = "paid"
+pricing_profile = "fixture"
+"#,
+    )
+    .expect("write config");
+    let store = RoutingStore::open(Some(&state_path)).expect("store");
+    store
+        .replace_catalog(
+            "fixture",
+            &[CatalogRecord {
+                model: "model-family".to_owned(),
+                is_free: false,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: Some(1.0),
+                output_price_per_million: Some(2.0),
+            }],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "model-family-2025",
+                50.0,
+                50.0,
+                50.0,
+                1.0,
+                2.0,
+            )],
+        )
+        .expect("benchmarks");
+    store
+        .replace_identity_source(&IdentityImport {
+            source: "models.dev".to_owned(),
+            attribution: "Fixture".to_owned(),
+            entities: vec![IdentityEntityRecord {
+                id: "hf:fixture/model-family".to_owned(),
+                creator: Some("fixture".to_owned()),
+                family: Some("model-family".to_owned()),
+                version: None,
+                variant: None,
+                release_date: None,
+                hugging_face_id: Some("Fixture/Model-Family".to_owned()),
+            }],
+            aliases: vec![IdentityAliasRecord {
+                source: "models.dev".to_owned(),
+                provider_key: "fixture".to_owned(),
+                provider_model_id: "model-family".to_owned(),
+                entity_id: "hf:fixture/model-family".to_owned(),
+                confidence: IdentityConfidence::CanonicalReference,
+                provenance_url: "fixture".to_owned(),
+                observed_at: 100,
+            }],
+        })
+        .expect("identities");
+    drop(store);
+
+    let environment = |command: &mut Command| {
+        command
+            .env("MODEL_GATEWAY_CONFIG", &config_path)
+            .env("MODEL_GATEWAY_STATE_PATH", &state_path)
+            .env("MODEL_GATEWAY_SECRET_STORE", "environment");
+    };
+
+    let mut reconcile = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    reconcile.args(["matching", "reconcile", "--provider", "fixture", "--json"]);
+    environment(&mut reconcile);
+    let output = reconcile.output().expect("reconcile");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+    assert_eq!(report["summary"]["suggested"], 1);
+    assert_eq!(report["models"][0]["benchmark_model"], "model-family-2025");
+
+    let mut approve = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    approve.args([
+        "matching",
+        "approve",
+        "fixture",
+        "model-family",
+        "MODEL.FAMILY.2025",
+    ]);
+    environment(&mut approve);
+    assert!(approve.status().expect("approve").success());
+
+    let mut explain = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    explain.args(["matching", "explain", "fixture", "model-family"]);
+    environment(&mut explain);
+    let output = explain.output().expect("explain");
+    assert!(output.status.success());
+    let explained: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("explain JSON");
+    assert_eq!(explained["status"], "approved");
+    assert_eq!(explained["source"], "registry");
+
+    let mut status = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    status.args(["matching", "status"]);
+    environment(&mut status);
+    let output = status.output().expect("identity status");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("models.dev: 1 aliases"));
+
+    let mut remove = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    remove.args(["matching", "remove", "fixture", "model-family"]);
+    environment(&mut remove);
+    assert!(remove.status().expect("remove direct mapping").success());
+
+    let mut approve_entity = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    approve_entity.args([
+        "matching",
+        "approve-entity",
+        "hf:fixture/model-family",
+        "model-family-2025",
+    ]);
+    environment(&mut approve_entity);
+    assert!(approve_entity.status().expect("approve entity").success());
+
+    let mut link_alias = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    link_alias.args([
+        "matching",
+        "link-alias",
+        "fixture",
+        "model-family",
+        "hf:fixture/model-family",
+    ]);
+    environment(&mut link_alias);
+    assert!(link_alias.status().expect("link alias").success());
+
+    let mut explain_entity = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    explain_entity.args(["matching", "explain", "fixture", "model-family"]);
+    environment(&mut explain_entity);
+    let output = explain_entity.output().expect("explain entity");
+    assert!(output.status.success());
+    let explained: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("entity explain JSON");
+    assert_eq!(explained["status"], "approved");
+    assert_eq!(explained["source"], "canonical_entity");
+    assert!(
+        explained["identity_evidence"]
+            .as_array()
+            .is_some_and(|evidence| evidence.iter().any(|item| item["source"] == "operator"))
+    );
+
+    let store = RoutingStore::open(Some(&state_path)).expect("reopen store");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "replacement-model",
+                50.0,
+                50.0,
+                50.0,
+                1.0,
+                2.0,
+            )],
+        )
+        .expect("replace benchmarks");
+    drop(store);
+    let mut check = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    check.args(["matching", "reconcile", "--provider", "fixture", "--check"]);
+    environment(&mut check);
+    assert!(!check.status().expect("drift check").success());
+
+    let mut unlink_alias = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    unlink_alias.args(["matching", "unlink-alias", "fixture", "model-family"]);
+    environment(&mut unlink_alias);
+    assert!(unlink_alias.status().expect("unlink alias").success());
+
+    let mut remove_entity = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    remove_entity.args([
+        "matching",
+        "remove-entity",
+        "hf:fixture/model-family",
+        "model-family-2025",
+    ]);
+    environment(&mut remove_entity);
+    assert!(remove_entity.status().expect("remove entity").success());
+
+    let mut invalid = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    invalid.args([
+        "matching",
+        "approve",
+        "fixture",
+        "model-family",
+        "missing-benchmark",
+    ]);
+    environment(&mut invalid);
+    assert!(!invalid.status().expect("invalid approval").success());
 }
