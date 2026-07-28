@@ -2703,6 +2703,7 @@ fn mode_model_entry(
         "links": {
             "self": link,
         },
+        "reasoning_effort": candidate.value.reasoning_effort,
         "quality": candidate.quality,
         "expected_cost_microusd": if candidate.value.access_kind.has_zero_effective_price() {
             0

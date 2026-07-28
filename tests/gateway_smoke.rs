@@ -3045,6 +3045,64 @@ async fn auto_efficient_falls_back_when_paid_models_are_unbenchmarked() {
 }
 
 #[tokio::test]
+async fn auto_frontier_keeps_effort_variants_as_distinct_candidates() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "cli-proxy",
+            &[CatalogRecord {
+                model: "gpt-5.6-sol".to_owned(),
+                access_kind: AccessKind::Paid,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(true),
+                supports_structured_output: Some(true),
+                input_price_per_million: Some(5.0),
+                output_price_per_million: Some(30.0),
+            }],
+        )
+        .expect("catalog");
+    let mut max = BenchmarkModel::fixture("gpt-5-6-sol", 90.0, 90.0, 90.0, 5.0, 30.0);
+    max.reasoning_effort = Some("max".to_owned());
+    max.latency_seconds = Some(100.0);
+    let mut medium = BenchmarkModel::fixture("gpt-5-6-sol-medium", 80.0, 80.0, 80.0, 5.0, 30.0);
+    medium.reasoning_effort = Some("medium".to_owned());
+    medium.latency_seconds = Some(1.0);
+    store
+        .replace_benchmarks("fixture", "Fixture", &[max, medium])
+        .expect("benchmarks");
+    drop(store);
+
+    let mut provider_config = provider(format!("http://{upstream}/v1"));
+    provider_config.profile = Some(ProviderProfileId::CliProxyApi);
+    provider_config.billing_mode = BillingMode::Paid;
+    let mut config = config_for(
+        BTreeMap::from([("cli-proxy".to_owned(), provider_config)]),
+        vec![TargetConfig {
+            provider: "cli-proxy".to_owned(),
+            model: "gpt-5.6-sol".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.frontier_quality_floor_single = 50.0;
+    let gateway = spawn_gateway(config).await;
+    let body: Value = reqwest::Client::new()
+        .get(format!("{gateway}/v1/auto-models?route=frontier"))
+        .send()
+        .await
+        .expect("auto models response")
+        .json()
+        .await
+        .expect("auto models body");
+    let primary = &body["routes"]["frontier"]["primary"];
+    assert_eq!(primary["id"], "cli-proxy/gpt-5.6-sol");
+    assert_eq!(primary["reasoning_effort"], "medium");
+}
+
+#[tokio::test]
 async fn auto_frontier_selects_cheapest_paid_model_above_floor() {
     let expensive = spawn_provider(ProviderResponse::Stream).await;
     let cheap = spawn_provider(ProviderResponse::Success).await;
