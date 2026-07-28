@@ -196,4 +196,4 @@ Tagged releases publish checksummed native archives (Linux x86_64, macOS Intel, 
 
 ## License
 
-Dual-licensed MIT / Apache 2.0. See `LICENSE-MIT` and `LICENSE-APACHE`.
+Licensed under the GNU Affero General Public License v3.0 or later. See `LICENSE` and `NOTICE`.
