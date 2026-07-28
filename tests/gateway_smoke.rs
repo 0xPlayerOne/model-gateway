@@ -3958,8 +3958,27 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         .await
         .expect("OpenAPI JSON");
     assert_eq!(openapi["openapi"], "3.1.0");
-    assert!(openapi["paths"]["/v1/catalog/models"].is_object());
-    assert!(openapi["paths"]["/v1/catalog/models/{provider}/{model}"].is_object());
+    for path in [
+        "/health/live",
+        "/health/ready",
+        "/openapi.json",
+        "/v1/models",
+        "/v1/providers",
+        "/v1/auto-models",
+        "/v1/rankings",
+        "/v1/chat/completions",
+        "/v1/catalog/models",
+        "/v1/catalog/models/{provider}/{model}",
+    ] {
+        assert!(
+            openapi["paths"][path].is_object(),
+            "missing OpenAPI path: {path}"
+        );
+    }
+    assert_eq!(
+        openapi["paths"]["/v1/catalog/models"]["get"]["summary"],
+        "List catalog model resources"
+    );
 
     let response = client
         .get(format!("{gateway}/v1/catalog/models?access=paid&view=full"))
