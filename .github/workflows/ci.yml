@@ -91,6 +91,7 @@ jobs:
         with:
           install: true
           install-python: false
+          cache-build: ${{ steps.applicability.outputs.rust == 'true' || vars.REPO_FOUNDRY_CACHE_BUILD == 'true' }}
           cache-save: false
           task: type_check
       - name: Type-Check
@@ -115,6 +116,7 @@ jobs:
         with:
           install: true
           install-python: false
+          cache-build: ${{ steps.applicability.outputs.rust == 'true' || vars.REPO_FOUNDRY_CACHE_BUILD == 'true' }}
           cache-save: false
           task: build
       - name: Build
