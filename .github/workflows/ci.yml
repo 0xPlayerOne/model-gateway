@@ -61,11 +61,15 @@ jobs:
       - name: Detect
         id: applicability
         run: bash .github/scripts/ci.sh should_run lint >> "$GITHUB_OUTPUT"
+      - name: Turbo Probe
+        id: turbo
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/turbo-cache-probe.sh lint
       - name: Setup
         if: steps.applicability.outputs.applicable == 'true'
         uses: ./.github/actions/setup
         with:
-          install: true
+          install: ${{ steps.turbo.outputs.hit != 'true' }}
           install-python: false
           cache-build: false
           # Warm the lint cache on branch pushes without adding archive time
@@ -89,11 +93,15 @@ jobs:
       - name: Detect
         id: applicability
         run: bash .github/scripts/ci.sh should_run type_check >> "$GITHUB_OUTPUT"
+      - name: Turbo Probe
+        id: turbo
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/turbo-cache-probe.sh type-check
       - name: Setup
         if: steps.applicability.outputs.applicable == 'true'
         uses: ./.github/actions/setup
         with:
-          install: true
+          install: ${{ steps.turbo.outputs.hit != 'true' }}
           install-python: false
           cache-build: ${{ steps.applicability.outputs.rust == 'true' || vars.REPO_FOUNDRY_CACHE_BUILD == 'true' }}
           cache-save: ${{ github.event_name == 'push' }}
@@ -114,11 +122,15 @@ jobs:
       - name: Detect
         id: applicability
         run: bash .github/scripts/ci.sh should_run build >> "$GITHUB_OUTPUT"
+      - name: Turbo Probe
+        id: turbo
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/turbo-cache-probe.sh build
       - name: Setup
         if: steps.applicability.outputs.applicable == 'true'
         uses: ./.github/actions/setup
         with:
-          install: true
+          install: ${{ steps.turbo.outputs.hit != 'true' }}
           install-python: false
           cache-build: ${{ steps.applicability.outputs.rust == 'true' || vars.REPO_FOUNDRY_CACHE_BUILD == 'true' }}
           cache-save: ${{ github.event_name == 'push' }}
