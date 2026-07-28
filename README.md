@@ -44,7 +44,7 @@ CLIProxyAPI can run as an optional loopback sidecar for Claude Code and ChatGPT/
 model-gateway cli-proxy setup
 model-gateway cli-proxy login claude
 model-gateway cli-proxy login codex --device
-model-gateway cli-proxy serve
+./scripts/start-cli-proxy.sh
 
 # In another terminal, after at least one account is connected:
 model-gateway catalog refresh --provider cli-proxy
@@ -52,6 +52,8 @@ model-gateway serve
 ```
 
 Repeat either login command to add accounts to the pool. The setup command downloads checksum-pinned CLIProxyAPI `v7.2.103`, binds it to `127.0.0.1:8317`, disables remote management/plugins/control-panel updates, and creates a `subscription` provider. It does not replace direct APIs, Ollama, LM Studio, or the built-in local endpoint. See [docs/providers.md](docs/providers.md#cliproxyapi-oauth-sidecar) for security and provider-policy limitations.
+
+The launcher backgrounds CLIProxyAPI and writes logs to its sidecar directory. Once CLIProxyAPI is configured, `./scripts/start-server.sh` and `./scripts/restart-server.sh` start and restart both services automatically. Use `./scripts/start-server.sh --follow` (or `-f`) to keep the gateway in the foreground; the sidecar remains managed in the background. Use `./scripts/start-cli-proxy.sh --follow` when you specifically want to follow only sidecar logs.
 
 ## Verification
 
@@ -69,8 +71,8 @@ Each mode picks ONE model from the Pareto frontier. Session pinning keeps you on
 |---|---|---|---|
 | `local` | — | Relays the only model from an OpenAI-compatible endpoint (default `127.0.0.1:8000`). | No |
 | `auto-free` | Free quality bar | Best free model. Falls back to `local`. | Recommended |
-| `auto-efficient` | 40 | Best bang-for-buck. Pareto ranks by composite quality, cost, latency. Falls back to `auto-free`, then `local`. | **Yes** |
-| `auto-balanced` | 60 | Mid-range quality. Great models, affordable pricing. Falls back to `auto-free`, then `local`. | **Yes** |
+| `auto-efficient` | 35 | Best bang-for-buck. Pareto ranks by composite quality, cost, latency. Falls back to `auto-free`, then `local`. | **Yes** |
+| `auto-balanced` | 42 | Mid-range quality. Great models, affordable pricing. Falls back to `auto-free`, then `local`. | **Yes** |
 | `auto-frontier` | 50 | Top tier. Highest quality floor. Never falls back. | **Yes** |
 
 Composite quality score: `0.80*intelligence + 0.10*coding + 0.10*agentic` — heavily weighted toward general intelligence.
@@ -97,7 +99,7 @@ Provider overrides use the normalized provider name (e.g., `MODEL_GATEWAY_OPENRO
 
 ## Benchmarks
 
-Quality benchmarks are sourced from [Artificial Analysis](https://artificialanalysis.ai/) and are **required** for `auto-efficient` and `auto-frontier` routing. Set up your API key:
+Quality benchmarks are sourced from [Artificial Analysis](https://artificialanalysis.ai/) and are **required** for `auto-efficient`, `auto-balanced`, and `auto-frontier` routing. Set up your API key:
 
 ```bash
 export ARTIFICIAL_ANALYSIS_API_KEY="your-key"

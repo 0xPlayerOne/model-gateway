@@ -982,19 +982,10 @@ async fn auto_models_include_free_candidates_without_price_observations() {
             }],
         )
         .expect("catalog");
+    let mut benchmark = BenchmarkModel::fixture("free-model", 80.0, 80.0, 80.0, 0.0, 0.0);
+    benchmark.reasoning_effort = Some("medium".to_owned());
     store
-        .replace_benchmarks(
-            "fixture",
-            "Fixture",
-            &[BenchmarkModel::fixture(
-                "free-model",
-                80.0,
-                80.0,
-                80.0,
-                0.0,
-                0.0,
-            )],
-        )
+        .replace_benchmarks("fixture", "Fixture", &[benchmark])
         .expect("benchmarks");
     drop(store);
 
@@ -1011,7 +1002,7 @@ async fn auto_models_include_free_candidates_without_price_observations() {
     config.server.state_path = Some(state_path);
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/auto-models"))
+        .get(format!("{gateway}/v1/auto-models?view=full"))
         .send()
         .await
         .expect("auto models response");
@@ -1031,6 +1022,30 @@ async fn auto_models_include_free_candidates_without_price_observations() {
         body["routes"]["free"]["primary"]["price_per_million"]["source"],
         "provider_free"
     );
+
+    let summary: Value = reqwest::Client::new()
+        .get(format!("{gateway}/v1/auto-models"))
+        .send()
+        .await
+        .expect("auto models summary response")
+        .json()
+        .await
+        .expect("auto models summary body");
+    let primary = &summary["routes"]["free"]["primary"];
+    assert_eq!(summary["view"], "summary");
+    assert_eq!(
+        primary["links"]["self"],
+        format!("{gateway}/v1/catalog/models/free-provider/free-model")
+    );
+    assert_eq!(primary["reasoning_effort"], "medium");
+    assert_eq!(
+        primary
+            .as_object()
+            .map(|object| object.keys().map(String::as_str).collect::<Vec<_>>()),
+        Some(vec!["id", "links", "quality", "reasoning_effort"])
+    );
+    assert!(primary.get("price_per_million").is_none());
+    assert!(primary.get("reference_price_per_million").is_none());
 }
 
 #[tokio::test]
@@ -1086,7 +1101,7 @@ async fn auto_free_uses_reference_cost_for_quota_limited_models() {
     config.server.state_path = Some(state_path);
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/auto-models?route=free"))
+        .get(format!("{gateway}/v1/auto-models?route=free&view=full"))
         .send()
         .await
         .expect("auto models response");
@@ -1219,7 +1234,7 @@ async fn auto_models_keep_base_and_pro_variants_in_separate_modes() {
     config.server.state_path = Some(state_path);
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/auto-models"))
+        .get(format!("{gateway}/v1/auto-models?view=full"))
         .send()
         .await
         .expect("auto models response");
@@ -1295,7 +1310,9 @@ async fn auto_models_fill_fallback_slots_beyond_pareto_frontier() {
     config.server.state_path = Some(state_path);
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/auto-models?route=efficient"))
+        .get(format!(
+            "{gateway}/v1/auto-models?route=efficient&view=full"
+        ))
         .send()
         .await
         .expect("auto models response");
@@ -3913,6 +3930,38 @@ async fn paid_models_lists_only_paid_provider_offerings() {
             }],
         )
         .expect("free catalog");
+    store
+        .replace_pricing(
+            "models.dev",
+            PriceSourceKind::ModelsDev,
+            "Models.dev fixture",
+            &[PriceObservation {
+                source: "models.dev".to_owned(),
+                source_kind: PriceSourceKind::ModelsDev,
+                scope: PriceScope::RuntimeProvider,
+                provider_key: Some("paid".to_owned()),
+                model_id: "gpt-4o".to_owned(),
+                rates: PriceRates {
+                    input_price_per_million: Some(2.5),
+                    output_price_per_million: Some(10.0),
+                    cache_read_price_per_million: Some(1.25),
+                    cache_write_price_per_million: Some(3.75),
+                    ..PriceRates::default()
+                },
+                fetched_at: None,
+                as_of: None,
+                valid_from: None,
+                valid_until: None,
+                attribution: Some("fixture".to_owned()),
+            }],
+        )
+        .expect("pricing fixture");
+    let effective = store
+        .effective_price("paid", Some("openrouter"), "gpt-4o", None, 604_800)
+        .expect("effective fixture price")
+        .expect("fixture price observation");
+    assert_eq!(effective.cache_read_price_per_million, Some(1.25));
+    assert_eq!(effective.cache_write_price_per_million, Some(3.75));
 
     let gateway = spawn_gateway(config).await;
     let client = reqwest::Client::new();
@@ -3926,8 +3975,27 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         .await
         .expect("OpenAPI JSON");
     assert_eq!(openapi["openapi"], "3.1.0");
-    assert!(openapi["paths"]["/v1/catalog/models"].is_object());
-    assert!(openapi["paths"]["/v1/catalog/models/{provider}/{model}"].is_object());
+    for path in [
+        "/health/live",
+        "/health/ready",
+        "/openapi.json",
+        "/v1/models",
+        "/v1/providers",
+        "/v1/auto-models",
+        "/v1/rankings",
+        "/v1/chat/completions",
+        "/v1/catalog/models",
+        "/v1/catalog/models/{provider}/{model}",
+    ] {
+        assert!(
+            openapi["paths"][path].is_object(),
+            "missing OpenAPI path: {path}"
+        );
+    }
+    assert_eq!(
+        openapi["paths"]["/v1/catalog/models"]["get"]["summary"],
+        "List catalog model resources"
+    );
 
     let response = client
         .get(format!("{gateway}/v1/catalog/models?access=paid&view=full"))
@@ -3950,8 +4018,10 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     assert_eq!(body["data"][0]["id"], "paid/gpt-4o");
     assert_eq!(
         body["data"][0]["links"]["self"],
-        "/v1/catalog/models/paid/gpt-4o"
+        format!("{gateway}/v1/catalog/models/paid/gpt-4o")
     );
+    assert_eq!(body["data"][0]["price_per_million"]["cache_read"], 1.25);
+    assert_eq!(body["data"][0]["price_per_million"]["cache_write"], 3.75);
     assert_eq!(body["data"][0]["price_per_million"]["input"], 2.5);
 
     let detail: Value = client
@@ -3995,9 +4065,14 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     assert_eq!(collection_body["view"], "summary");
     assert_eq!(collection_body["meta"]["total"], 2);
     assert_eq!(collection_body["data"].as_array().map(Vec::len), Some(1));
-    assert!(collection_body["data"][0]["id"].is_string());
-    assert_eq!(collection_body["data"][0]["object"], "model");
+    assert_eq!(
+        collection_body["data"][0]
+            .as_object()
+            .map(|object| object.keys().map(String::as_str).collect::<Vec<_>>()),
+        Some(vec!["id", "links", "quality", "reasoning_effort"])
+    );
     assert!(collection_body["data"][0]["links"]["self"].is_string());
+    assert!(collection_body["data"][0]["quality"].is_object());
     assert!(collection_body["links"]["next"].is_string());
     let next_link = collection_body["links"]["next"]
         .as_str()
@@ -4131,7 +4206,7 @@ async fn subscription_models_report_zero_effective_and_reference_prices() {
     assert!(body["data"].as_array().is_some_and(Vec::is_empty));
 
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/auto-models?route=frontier"))
+        .get(format!("{gateway}/v1/auto-models?route=frontier&view=full"))
         .send()
         .await
         .expect("auto models response");

@@ -14,6 +14,93 @@
         }
       }
     },
+    "/v1/providers": {
+      "get": {
+        "summary": "List configured and discoverable providers",
+        "parameters": [
+          {
+            "name": "available",
+            "in": "query",
+            "schema": { "type": "boolean" }
+          }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/ProviderList" }
+        }
+      }
+    },
+    "/v1/auto-models": {
+      "get": {
+        "summary": "List automatic routing selections",
+        "description": "Returns compact route selections by default. Use view=full for benchmark matching and per-million pricing details; each candidate links to its complete catalog model resource.",
+        "parameters": [
+          {
+            "name": "route",
+            "in": "query",
+            "schema": { "type": "string", "enum": ["free", "efficient", "balanced", "frontier"] }
+          },
+          {
+            "$ref": "#/components/parameters/View"
+          }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/AutoModelRoutes" }
+        }
+      }
+    },
+    "/v1/rankings": {
+      "get": {
+        "summary": "List benchmark rankings",
+        "parameters": [
+          { "$ref": "#/components/parameters/Task" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/RankingList" }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "Proxy an OpenAI-compatible chat completion",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object" } } }
+        },
+        "responses": {
+          "200": { "description": "OpenAI-compatible completion or event stream." },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "502": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/health/live": {
+      "get": {
+        "summary": "Liveness probe",
+        "responses": { "200": { "$ref": "#/components/responses/Health" } }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "summary": "Readiness probe",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Health" },
+          "503": { "$ref": "#/components/responses/Health" }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "Fetch this OpenAPI contract",
+        "responses": {
+          "200": {
+            "description": "OpenAPI document.",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
     "/v1/catalog/models": {
       "get": {
         "summary": "List catalog model resources",
@@ -148,10 +235,39 @@
           "object": { "const": "model" },
           "links": { "$ref": "#/components/schemas/Links" },
           "model": { "type": "object" },
-          "capabilities": { "type": "object" },
+          "capabilities": { "type": ["object", "null"] },
           "price_per_million": { "type": "object" },
           "access": { "type": "object" }
         }
+      },
+      "ProviderList": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": { "const": "list" },
+          "data": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "AutoModelRoutes": {
+        "type": "object",
+        "properties": {
+          "object": { "const": "auto_models" },
+          "view": { "type": "string", "enum": ["summary", "full"] },
+          "routes": { "type": "object" }
+        }
+      },
+      "RankingList": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": { "const": "list" },
+          "data": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "required": ["status"],
+        "properties": { "status": { "type": "string", "enum": ["ok", "ready", "not_ready"] } }
       },
       "ModelResourceResponse": {
         "type": "object",
@@ -169,7 +285,10 @@
         "required": ["object", "data", "meta", "links"],
         "properties": {
           "object": { "const": "model.collection" },
-          "data": { "type": "array", "items": { "$ref": "#/components/schemas/ModelResource" } },
+          "data": { "type": "array", "items": { "oneOf": [
+            { "$ref": "#/components/schemas/ModelSummary" },
+            { "$ref": "#/components/schemas/ModelResource" }
+          ] } },
           "meta": { "type": "object" },
           "links": { "$ref": "#/components/schemas/Links" }
         }
@@ -177,9 +296,25 @@
       "Links": {
         "type": "object",
         "properties": {
-          "self": { "type": "string", "format": "uri-reference" },
-          "prev": { "type": "string", "format": "uri-reference" },
-          "next": { "type": "string", "format": "uri-reference" }
+          "self": { "type": "string", "format": "uri" },
+          "prev": { "type": "string", "format": "uri" },
+          "next": { "type": "string", "format": "uri" }
+        }
+      },
+      "ModelSummary": {
+        "type": "object",
+        "required": ["id", "links", "quality", "reasoning_effort"],
+        "properties": {
+          "id": { "type": "string" },
+          "links": { "$ref": "#/components/schemas/Links" },
+          "quality": {
+            "type": "object",
+            "properties": {
+              "score": { "type": ["number", "null"] },
+              "rank": { "type": "integer" }
+            }
+          },
+          "reasoning_effort": { "type": ["string", "null"] }
         }
       },
       "Error": {

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::{BytesRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -858,8 +858,14 @@ fn strip_model_noise(model: &str) -> String {
             let normalized = normalize_identifier(segment);
             let mut tokens: Vec<&str> = normalized.split('-').collect();
 
-            // Remove transport/billing decorations, never semantic variants.
-            tokens.retain(|t| !NOISE_TOKENS.contains(t));
+            // Remove terminal transport/billing decorations, never semantic
+            // tokens that happen to use the same word internally.
+            while tokens
+                .last()
+                .is_some_and(|token| NOISE_TOKENS.contains(token))
+            {
+                tokens.pop();
+            }
 
             tokens.join("-")
         })
@@ -968,9 +974,15 @@ fn normalized_identifier_variants(identifier: &str) -> Vec<String> {
         .map(normalize_identifier)
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
-    (0..segments.len())
-        .map(|index| segments[index..].join("-"))
-        .collect()
+    let full = segments.join("-");
+    let mut variants = vec![full];
+    // A provider namespace is the only prefix that exact identity matching may
+    // discard. Removing arbitrary suffixes makes unrelated IDs such as
+    // `vendor-a/model:free` and `vendor-b/other:free` collide.
+    if segments.len() > 1 {
+        variants.push(segments[1..].join("-"));
+    }
+    variants
 }
 
 fn normalize_identifier(identifier: &str) -> String {
@@ -1300,6 +1312,13 @@ struct RankingQuery {
 #[derive(Debug, Deserialize)]
 struct AutoModelsQuery {
     route: Option<String>,
+    view: Option<ModelView>,
+}
+
+#[derive(Clone, Copy)]
+struct ModelResponseContext<'a> {
+    view: ModelView,
+    origin: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1458,7 +1477,7 @@ struct CatalogModelEntry<'a> {
     account_limit: Option<AccountLimitSnapshot>,
 }
 
-fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
+fn catalog_model_json(entry: &CatalogModelEntry, origin: &str) -> Value {
     let has_zero_effective_price = entry.offering.access_kind.has_zero_effective_price();
     let model_id = model_resource_id(entry.offering);
     let reference_input = entry
@@ -1502,7 +1521,7 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
         "id": model_id,
         "object": "model",
         "links": {
-            "self": model_detail_path(entry.offering),
+            "self": model_detail_path(entry.offering, origin),
         },
         "model": {
             "name": entry.offering.model,
@@ -1519,12 +1538,7 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
             "coding": entry.benchmark.and_then(|b| b.coding_quality),
             "agentic": entry.benchmark.and_then(|b| b.agentic_quality),
         },
-        "capabilities": {
-            "context_length": entry.offering.context_length,
-            "supports_tools": entry.offering.supports_tools,
-            "supports_vision": entry.offering.supports_vision,
-            "supports_structured_output": entry.offering.supports_structured_output,
-        },
+        "capabilities": catalog_capabilities_json(entry.offering),
         "price_per_million": {
             "input": input_price,
             "output": output_price,
@@ -1578,77 +1592,42 @@ fn model_resource_id(offering: &CatalogOffering) -> String {
     format!("{}/{}", offering.provider, offering.model)
 }
 
-fn model_detail_path(offering: &CatalogOffering) -> String {
-    catalog_model_link(offering)
+fn model_detail_path(offering: &CatalogOffering, origin: &str) -> String {
+    catalog_model_link(offering, origin)
 }
 
-fn catalog_model_summary_json(entry: &CatalogModelEntry) -> Value {
-    let model_id = model_resource_id(entry.offering);
-    let has_zero_effective_price = entry.offering.access_kind.has_zero_effective_price();
-    let input_price = if has_zero_effective_price {
-        Some(0.0)
-    } else {
-        entry
-            .price
-            .as_ref()
-            .map(|price| price.input_price_per_million)
-            .or(entry.offering.input_price_per_million)
-            .or_else(|| entry.benchmark.and_then(|b| b.input_price_per_million))
-    };
-    let output_price = if has_zero_effective_price {
-        Some(0.0)
-    } else {
-        entry
-            .price
-            .as_ref()
-            .map(|price| price.output_price_per_million)
-            .or(entry.offering.output_price_per_million)
-            .or_else(|| entry.benchmark.and_then(|b| b.output_price_per_million))
-    };
-    let price_source = if has_zero_effective_price {
-        Some(match entry.offering.access_kind {
-            AccessKind::ZeroPrice => "provider_free",
-            AccessKind::QuotaLimitedFreeTier => "free_tier",
-            AccessKind::SubscriptionIncluded => "subscription",
-            AccessKind::Paid | AccessKind::Unknown => "unknown",
-        })
-    } else {
-        entry.price.as_ref().map(|price| price.source.as_str())
-    };
-    let overage = match entry.offering.access_kind {
-        AccessKind::ZeroPrice | AccessKind::QuotaLimitedFreeTier => "gateway_blocked",
-        AccessKind::SubscriptionIncluded => "subscription_limited",
-        AccessKind::Paid | AccessKind::Unknown => "paid",
-    };
+fn catalog_model_summary_json(entry: &CatalogModelEntry, origin: &str) -> Value {
     json!({
-        "id": model_id,
-        "object": "model",
-        "provider": entry.offering.provider,
-        "model": entry.offering.model,
+        "id": model_resource_id(entry.offering),
+        "links": {
+            "self": model_detail_path(entry.offering, origin),
+        },
         "quality": {
             "score": entry.composite_quality,
             "rank": entry.rank,
         },
-        "capabilities": {
-            "context_length": entry.offering.context_length,
-            "supports_tools": entry.offering.supports_tools,
-            "supports_vision": entry.offering.supports_vision,
-            "supports_structured_output": entry.offering.supports_structured_output,
-        },
-        "pricing": {
-            "input": input_price,
-            "output": output_price,
-            "source": price_source,
-            "eligible": input_price.is_some() && output_price.is_some(),
-        },
-        "access": {
-            "kind": entry.offering.access_kind,
-            "overage": overage,
-        },
-        "links": {
-            "self": model_detail_path(entry.offering),
-        },
+        "reasoning_effort": entry.effort_level,
     })
+}
+
+fn catalog_capabilities_json(offering: &CatalogOffering) -> Option<Value> {
+    let mut capabilities = serde_json::Map::new();
+    if let Some(context_length) = offering.context_length {
+        capabilities.insert("context_length".to_owned(), json!(context_length));
+    }
+    if let Some(supports_tools) = offering.supports_tools {
+        capabilities.insert("supports_tools".to_owned(), json!(supports_tools));
+    }
+    if let Some(supports_vision) = offering.supports_vision {
+        capabilities.insert("supports_vision".to_owned(), json!(supports_vision));
+    }
+    if let Some(supports_structured_output) = offering.supports_structured_output {
+        capabilities.insert(
+            "supports_structured_output".to_owned(),
+            json!(supports_structured_output),
+        );
+    }
+    (!capabilities.is_empty()).then_some(Value::Object(capabilities))
 }
 
 async fn load_paid_candidates(
@@ -1821,12 +1800,33 @@ fn encode_uri_component(value: &str, allow_slash: bool) -> String {
     encoded
 }
 
-fn catalog_model_link(offering: &CatalogOffering) -> String {
+fn catalog_model_link(offering: &CatalogOffering, origin: &str) -> String {
+    catalog_model_link_parts(&offering.provider, &offering.model, origin)
+}
+
+fn catalog_model_link_parts(provider: &str, model: &str, origin: &str) -> String {
     format!(
-        "/v1/catalog/models/{}/{}",
-        encode_uri_component(&offering.provider, false),
-        encode_uri_component(&offering.model, false)
+        "{}/v1/catalog/models/{}/{}",
+        origin,
+        encode_uri_component(provider, false),
+        encode_uri_component(model, false)
     )
+}
+
+fn public_origin(headers: &HeaderMap) -> String {
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("http");
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("localhost");
+    format!("{scheme}://{host}")
 }
 
 fn catalog_links(
@@ -1836,6 +1836,7 @@ fn catalog_links(
     offset: usize,
     limit: usize,
     total: usize,
+    origin: &str,
 ) -> Value {
     let query_url = |cursor: Option<String>| {
         let mut params = vec![format!("access={}", catalog_access_name(access))];
@@ -1858,7 +1859,7 @@ fn catalog_links(
         if let Some(cursor) = cursor {
             params.push(format!("cursor={}", encode_uri_component(&cursor, false)));
         }
-        format!("/v1/catalog/models?{}", params.join("&"))
+        format!("{origin}/v1/catalog/models?{}", params.join("&"))
     };
     let mut links = serde_json::Map::from_iter([(
         "self".to_owned(),
@@ -1995,6 +1996,7 @@ fn catalog_model_response(
     rank: usize,
     account_limit: Option<AccountLimitSnapshot>,
     view: ModelView,
+    origin: &str,
 ) -> Value {
     let composite_quality = candidate.benchmark.as_ref().and_then(composite_quality);
     let effort_level = candidate
@@ -2013,9 +2015,9 @@ fn catalog_model_response(
         account_limit,
     };
     if view.is_full() {
-        catalog_model_json(&entry)
+        catalog_model_json(&entry, origin)
     } else {
-        catalog_model_summary_json(&entry)
+        catalog_model_summary_json(&entry, origin)
     }
 }
 
@@ -2173,6 +2175,7 @@ struct ModeModelValue<'a> {
     access_kind: AccessKind,
     reference_input_price: Option<f64>,
     reference_output_price: Option<f64>,
+    reasoning_effort: Option<&'a str>,
 }
 
 fn effective_access_kind(provider: &ProviderConfig, offering: &CatalogOffering) -> AccessKind {
@@ -2405,8 +2408,15 @@ fn collect_paid_candidates(
 
 async fn list_auto_models(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<AutoModelsQuery>,
 ) -> Response {
+    let view = query.view.unwrap_or_default();
+    let origin = public_origin(&headers);
+    let response_context = ModelResponseContext {
+        view,
+        origin: &origin,
+    };
     let cfg = &state.config.server;
     let benchmark_max_age = cfg.benchmark_max_age_seconds;
     let catalog_max_age = cfg.catalog_max_age_seconds;
@@ -2482,6 +2492,7 @@ async fn list_auto_models(
                 cfg.free_models_quality.min_composite_quality,
                 None,
                 Some(cfg.free_models_quality.max_quality_regret),
+                response_context,
             ),
         );
     }
@@ -2496,6 +2507,7 @@ async fn list_auto_models(
                 cfg.efficient_quality_floor,
                 Some(cfg.balanced_quality_floor),
                 None,
+                response_context,
             ),
         );
     }
@@ -2510,6 +2522,7 @@ async fn list_auto_models(
                 cfg.balanced_quality_floor,
                 Some(cfg.frontier_quality_floor_single),
                 None,
+                response_context,
             ),
         );
     }
@@ -2524,11 +2537,12 @@ async fn list_auto_models(
                 cfg.frontier_quality_floor_single,
                 None,
                 None,
+                response_context,
             ),
         );
     }
 
-    Json(json!({"object": "auto_models", "routes": routes})).into_response()
+    Json(json!({"object": "auto_models", "routes": routes, "view": if view.is_full() { "full" } else { "summary" }})).into_response()
 }
 
 fn select_mode_models(
@@ -2538,6 +2552,7 @@ fn select_mode_models(
     quality_floor: f64,
     quality_ceiling: Option<f64>,
     max_quality_regret: Option<f64>,
+    response_context: ModelResponseContext<'_>,
 ) -> Value {
     let mut scored: Vec<ScoredCandidate<ModeModelValue<'_>>> = Vec::new();
 
@@ -2606,6 +2621,7 @@ fn select_mode_models(
                 access_kind: candidate.offering.access_kind,
                 reference_input_price,
                 reference_output_price,
+                reasoning_effort: benchmark.and_then(|b| b.reasoning_effort.as_deref()),
             },
         });
     }
@@ -2642,9 +2658,12 @@ fn select_mode_models(
 
     let mut iter = ranked.into_iter();
     let primary = iter.next();
-    let fallbacks: Vec<Value> = iter.take(2).map(|f| mode_model_entry(&f)).collect();
+    let fallbacks: Vec<Value> = iter
+        .take(2)
+        .map(|f| mode_model_entry(&f, response_context))
+        .collect();
 
-    let primary_entry = primary.map(|p| mode_model_entry(&p));
+    let primary_entry = primary.map(|p| mode_model_entry(&p, response_context));
 
     json!({
         "label": label,
@@ -2657,10 +2676,33 @@ fn select_mode_models(
     })
 }
 
-fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
-    json!({
+fn mode_model_entry(
+    candidate: &ScoredCandidate<ModeModelValue<'_>>,
+    response_context: ModelResponseContext<'_>,
+) -> Value {
+    let id = format!("{}/{}", candidate.value.provider, candidate.value.model);
+    let link = catalog_model_link_parts(
+        candidate.value.provider,
+        candidate.value.model,
+        response_context.origin,
+    );
+    if !response_context.view.is_full() {
+        return json!({
+            "id": id,
+            "links": {"self": link},
+            "quality": {
+                "score": candidate.quality,
+            },
+            "reasoning_effort": candidate.value.reasoning_effort,
+        });
+    }
+    let entry = json!({
+        "id": id,
         "model": candidate.value.model,
         "provider": candidate.value.provider,
+        "links": {
+            "self": link,
+        },
         "quality": candidate.quality,
         "expected_cost_microusd": if candidate.value.access_kind.has_zero_effective_price() {
             0
@@ -2709,7 +2751,8 @@ fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
                 "estimated": price.estimated,
             }))
         },
-    })
+    });
+    entry
 }
 
 async fn list_catalog_models(
@@ -2717,6 +2760,7 @@ async fn list_catalog_models(
     headers: HeaderMap,
     query: Result<Query<CatalogModelsQuery>, QueryRejection>,
 ) -> Response {
+    let origin = public_origin(&headers);
     let Query(query) = match query {
         Ok(query) => query,
         Err(rejection) => return catalog_query_error(rejection),
@@ -2826,6 +2870,7 @@ async fn list_catalog_models(
                     .get(&candidate.offering.provider)
                     .copied(),
                 view,
+                &origin,
             )
         })
         .collect::<Vec<_>>();
@@ -2841,7 +2886,15 @@ async fn list_catalog_models(
                 "limit": limit,
                 "returned": data.len(),
             },
-            "links": catalog_links(&query, access, &snapshot.token, offset, limit, total),
+            "links": catalog_links(
+                &query,
+                access,
+                &snapshot.token,
+                offset,
+                limit,
+                total,
+                &origin,
+            ),
             "data": data,
         }),
         &headers,
@@ -2926,12 +2979,13 @@ async fn get_catalog_model(
         rank + 1,
         snapshot.account_limits.get(provider).copied(),
         ModelView::Full,
+        &public_origin(&headers),
     );
     cached_json_response(
         json!({
             "object": "model",
             "id": model_resource_id(&candidate.offering),
-            "links": {"self": catalog_model_link(&candidate.offering)},
+            "links": {"self": catalog_model_link(&candidate.offering, &public_origin(&headers))},
             "data": resource,
             "meta": {"snapshot": snapshot.token},
         }),
@@ -5542,22 +5596,22 @@ mod tests {
     use super::{
         BenchmarkIdentityIndex, ModelMatchKind, ModelMetadata, RequestRequirements,
         SelectionMetadata, StreamChoice, add_model_headers, benchmark_ids_match,
-        benchmark_price_for_model, benchmarks_for_effort, copy_safe_headers,
-        decorate_json_response, encode_uri_component, estimate_request_tokens,
+        benchmark_price_for_model, benchmarks_for_effort, catalog_capabilities_json,
+        copy_safe_headers, decorate_json_response, encode_uri_component, estimate_request_tokens,
         expected_cost_microusd, find_all_matching_benchmarks, find_benchmark,
         find_exact_matching_benchmarks, find_exact_matching_benchmarks_indexed,
         find_suggested_benchmark, footer_sse_event, has_dynamic_or_release_suffix, header_value,
-        identity_mapping_indexes, is_fallback_status, is_model_denied, is_provider_auto_route,
-        is_reasoning_effort, log_request, malformed_sse_event, parse_json_usage, parse_sse_usage,
-        parse_usage_value, rank_benchmark_models, rate_limit_reset_delay, request_id,
-        request_id_from_response, session_material, sse_model, strip_model_noise, take_sse_event,
-        transform_sse_event,
+        identity_mapping_indexes, is_exact_model_identity, is_fallback_status, is_model_denied,
+        is_provider_auto_route, is_reasoning_effort, log_request, malformed_sse_event,
+        parse_json_usage, parse_sse_usage, parse_usage_value, rank_benchmark_models,
+        rate_limit_reset_delay, request_id, request_id_from_response, session_material, sse_model,
+        strip_model_noise, take_sse_event, transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
     use crate::identity::{
         IdentityAliasRecord, IdentityConfidence, IdentityEntityRecord, IdentityImport,
     };
-    use crate::routing::RoutingStore;
+    use crate::routing::{AccessKind, CatalogOffering, RoutingStore};
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use serde_json::json;
     use tracing_subscriber::fmt::MakeWriter;
@@ -5648,6 +5702,54 @@ mod tests {
                 "identity behavior changed for {catalog_id}"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "manual performance benchmark; run with --release --ignored --nocapture"]
+    fn benchmark_indexed_exact_matching_against_scan() {
+        let models = (0..1_000)
+            .map(|index| {
+                BenchmarkModel::fixture(
+                    &format!("vendor/model-{index}-2025"),
+                    50.0,
+                    50.0,
+                    50.0,
+                    1.0,
+                    1.0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let map: BTreeMap<String, Vec<BenchmarkModel>> =
+            models
+                .iter()
+                .cloned()
+                .fold(BTreeMap::new(), |mut map, model| {
+                    map.entry(model.id.clone()).or_default().push(model);
+                    map
+                });
+        let index = BenchmarkIdentityIndex::new(models);
+        let lookups = (0..1_000)
+            .map(|index| format!("vendor/model-{index}-2025"))
+            .collect::<Vec<_>>();
+
+        let started = Instant::now();
+        let indexed_matches = lookups
+            .iter()
+            .map(|lookup| find_exact_matching_benchmarks_indexed(&index, lookup).len())
+            .sum::<usize>();
+        let indexed_elapsed = started.elapsed();
+
+        let started = Instant::now();
+        let scanned_matches = lookups
+            .iter()
+            .map(|lookup| find_exact_matching_benchmarks(&map, lookup).len())
+            .sum::<usize>();
+        let scanned_elapsed = started.elapsed();
+
+        assert_eq!(indexed_matches, scanned_matches);
+        println!(
+            "indexed_exact_matching: indexed={indexed_elapsed:?}, scan={scanned_elapsed:?}, matches={indexed_matches}"
+        );
     }
 
     fn resolves_exact_single(catalog_id: &str, benchmark_id: &str) -> bool {
@@ -6079,6 +6181,22 @@ mod tests {
     }
 
     #[test]
+    fn exact_identity_does_not_collide_on_shared_suffixes() {
+        assert!(!is_exact_model_identity(
+            "nvidia/nemotron-3-nano:free",
+            "baidu/cobuddy:free"
+        ));
+        assert!(!is_exact_model_identity(
+            "vendor-a/model:free",
+            "vendor-b/other:free"
+        ));
+        assert!(is_exact_model_identity(
+            "models/gemini-2.5-flash",
+            "gemini-2-5-flash"
+        ));
+    }
+
+    #[test]
     fn benchmark_price_matching_stays_exact_even_when_quality_can_match_safely() {
         let benchmark = BenchmarkModel::fixture("gemini-2-5-flash", 50.0, 50.0, 50.0, 1.2, 3.4);
         assert!(benchmark_price_for_model("GEMINI-2-5-FLASH", &benchmark).is_some());
@@ -6299,6 +6417,23 @@ mod tests {
     }
 
     #[test]
+    fn unknown_capabilities_are_not_inferred() {
+        let offering = CatalogOffering {
+            provider: "cli-proxy".to_owned(),
+            model: "gpt-5.4".to_owned(),
+            refreshed_at: 0,
+            access_kind: AccessKind::SubscriptionIncluded,
+            context_length: None,
+            supports_tools: None,
+            supports_vision: None,
+            supports_structured_output: None,
+            input_price_per_million: None,
+            output_price_per_million: None,
+        };
+        assert_eq!(catalog_capabilities_json(&offering), None);
+    }
+
+    #[test]
     fn request_estimates_and_capabilities_are_deterministic() {
         let request = serde_json::json!({
             "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}],
@@ -6415,6 +6550,15 @@ mod tests {
         );
         // No /, single segment, no noise
         assert_eq!(strip_model_noise("gemini-2-5-flash"), "gemini-2-5-flash");
+    }
+
+    #[test]
+    fn strip_model_noise_preserves_internal_noise_tokens() {
+        assert_eq!(
+            strip_model_noise("free-model-fp8-instruct"),
+            "free-model-fp8-instruct"
+        );
+        assert_eq!(strip_model_noise("model-int8-chat"), "model-int8-chat");
     }
 
     #[test]

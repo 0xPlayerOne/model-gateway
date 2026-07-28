@@ -25,7 +25,9 @@ use model_gateway::gateway::{
     run_server,
 };
 use model_gateway::identity::fetch_identity_sources;
-use model_gateway::pricing::{ManualPriceImport, PriceSourceKind, fetch_models_dev};
+use model_gateway::pricing::{
+    ManualPriceImport, PriceSourceKind, fetch_models_dev, summarize_pricing,
+};
 use model_gateway::providers::{
     BuiltinProvider, ConnectionCheck, fetch_account_limit, fetch_catalog,
 };
@@ -484,9 +486,14 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
                 "Models.dev (https://models.dev/)",
                 &observations,
             )?;
+            let coverage = summarize_pricing(&observations);
             println!(
-                "Refreshed models.dev: {} observations, snapshot={snapshot}",
-                observations.len()
+                "Refreshed models.dev: {} observations, complete={}, incomplete={}, cache_read={}, cache_write={}, snapshot={snapshot}",
+                coverage.total,
+                coverage.complete,
+                coverage.incomplete,
+                coverage.cache_read,
+                coverage.cache_write,
             );
         }
         PricingCommand::Import { file } => {
