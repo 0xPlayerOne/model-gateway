@@ -149,6 +149,7 @@ audit_rust() {
 }
 
 audit_python() {
+  local pip_audit_version='2.10.1'
   requirement_files=()
   if [ -n "${REPO_FOUNDRY_PYTHON_REQUIREMENT:-}" ] && [ "$REPO_FOUNDRY_PYTHON_REQUIREMENT" != project ] && [ "$REPO_FOUNDRY_PYTHON_REQUIREMENT" != none ]; then
     if ! git ls-files --error-unmatch -- "${REPO_FOUNDRY_PYTHON_REQUIREMENT}" >/dev/null 2>&1; then
@@ -165,9 +166,17 @@ audit_python() {
     audits=$((audits + 1))
     if command -v uv >/dev/null 2>&1; then
       local uv_audit_cache="${REPO_FOUNDRY_UV_AUDIT_CACHE:-$HOME/.cache/uv-audit}"
-      pip_audit() { UV_CACHE_DIR="$uv_audit_cache" uv tool run --from pip-audit pip-audit "$@"; }
+      pip_audit() {
+        if [ "${REPO_FOUNDRY_UV_AUDIT_OFFLINE:-false}" = true ]; then
+          if UV_CACHE_DIR="$uv_audit_cache" uv tool run --offline --from "pip-audit==${pip_audit_version}" pip-audit "$@"; then
+            return 0
+          fi
+          echo 'Offline pip-audit cache was incomplete; retrying online.' >&2
+        fi
+        REPO_FOUNDRY_UV_AUDIT_OFFLINE=false UV_CACHE_DIR="$uv_audit_cache" uv tool run --from "pip-audit==${pip_audit_version}" pip-audit "$@"
+      }
     else
-      python -m pip install --disable-pip-version-check --quiet pip-audit
+      python -m pip install --disable-pip-version-check --quiet "pip-audit==${pip_audit_version}"
       pip_audit() { python -m pip_audit "$@"; }
     fi
     if [ "${#requirement_files[@]}" -gt 0 ]; then
