@@ -29,15 +29,43 @@ fi
 mkdir -p "$CLI_PROXY_HOME"
 
 CONFIG="${MODEL_GATEWAY_CLI_PROXY_CONFIG:-$CLI_PROXY_HOME/config.yaml}"
+PORT="${MODEL_GATEWAY_CLI_PROXY_PORT:-8317}"
 if [ "$OPTIONAL" = true ] && [ ! -f "$CONFIG" ]; then
     echo "CLIProxyAPI is not configured; skipping sidecar startup."
     exit 0
 fi
 
+LISTENER_PIDS=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
+if [ -n "$LISTENER_PIDS" ]; then
+    LISTENER_PID="$(printf '%s\n' "$LISTENER_PIDS" | head -n 1)"
+    printf '%s\n' "$LISTENER_PID" > "$PIDFILE"
+    echo "CLIProxyAPI is already running (PID $LISTENER_PID, port $PORT)."
+    if [ "$OPTIONAL" = true ]; then
+        exit 0
+    fi
+    exit 1
+fi
+
 if [ -f "$PIDFILE" ]; then
     OLD_PID=$(cat "$PIDFILE")
     if kill -0 "$OLD_PID" 2>/dev/null; then
+        for _ in $(seq 1 20); do
+            LISTENER_PIDS=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
+            if [ -n "$LISTENER_PIDS" ]; then
+                LISTENER_PID="$(printf '%s\n' "$LISTENER_PIDS" | head -n 1)"
+                printf '%s\n' "$LISTENER_PID" > "$PIDFILE"
+                echo "CLIProxyAPI is already running (PID $LISTENER_PID, port $PORT)."
+                if [ "$OPTIONAL" = true ]; then
+                    exit 0
+                fi
+                exit 1
+            fi
+            sleep 0.25
+        done
         echo "CLIProxyAPI is already running (PID $OLD_PID). Use 'scripts/restart-cli-proxy.sh' to restart."
+        if [ "$OPTIONAL" = true ]; then
+            exit 0
+        fi
         exit 1
     fi
     rm -f "$PIDFILE"
@@ -51,4 +79,18 @@ echo "Starting CLIProxyAPI in the background (log: $LOG)..."
 nohup "$BIN" cli-proxy serve > "$LOG" 2>&1 &
 PID=$!
 printf '%s\n' "$PID" > "$PIDFILE"
-echo "CLIProxyAPI started (PID $PID, log: $LOG)"
+for _ in $(seq 1 40); do
+    LISTENER_PIDS=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
+    if [ -n "$LISTENER_PIDS" ]; then
+        LISTENER_PID="$(printf '%s\n' "$LISTENER_PIDS" | head -n 1)"
+        printf '%s\n' "$LISTENER_PID" > "$PIDFILE"
+        echo "CLIProxyAPI started (PID $LISTENER_PID, port $PORT, log: $LOG)"
+        exit 0
+    fi
+    if ! kill -0 "$PID" 2>/dev/null; then
+        break
+    fi
+    sleep 0.25
+done
+echo "CLIProxyAPI failed to listen on port $PORT; check $LOG" >&2
+exit 1
