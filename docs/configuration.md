@@ -61,7 +61,7 @@ Each floor must be 0–100. Higher floors select higher-quality models. The Pare
 
 ## Free Models Quality Bar
 
-Filters low-quality, stale, or expensive models from `/v1/free-models` and auto-free routing. Uses composite quality (not per-task).
+Filters low-quality, stale, or expensive models from the free view of `/v1/catalog/models` and auto-free routing. Uses composite quality (not per-task).
 
 | Env Variable | Default | Description |
 |---|---|---|

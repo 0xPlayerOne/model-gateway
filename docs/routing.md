@@ -171,7 +171,7 @@ The canonical model discovery collection. Use `?access=free|paid|all`, `?task=`,
 
 Returns one complete model resource, including benchmark matching, cache pricing, reference pricing, access limits, freshness, and provenance. The model portion may contain additional path segments; use the exact encoded resource link returned by the collection.
 
-`/v1/free-models` and `/v1/paid-models` remain migration aliases. The old `/v1/models/{provider}/{model}` detail route is removed; new integrations should use the canonical catalog paths and `/openapi.json`.
+The catalog collection is the only model-discovery listing surface. The old `/v1/models/{provider}/{model}` detail route is removed; new integrations should use the canonical catalog paths and `/openapi.json`.
 
 ### `/v1/auto-models`
 

@@ -31,16 +31,23 @@
         }
       }
     },
-    "/v1/catalog/models/{model_id}": {
+    "/v1/catalog/models/{provider}/{model}": {
       "get": {
         "summary": "Fetch complete catalog model metadata",
         "parameters": [
           {
-            "name": "model_id",
+            "name": "provider",
             "in": "path",
             "required": true,
             "schema": { "type": "string" },
-            "description": "Provider/model identifier returned by the catalog collection."
+            "description": "Provider namespace returned by the catalog collection."
+          },
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "URI-encoded model identifier returned by the catalog collection."
           }
         ],
         "responses": {

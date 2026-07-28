@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
-use axum::extract::rejection::BytesRejection;
+use axum::extract::rejection::{BytesRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -212,8 +212,6 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
         .route("/v1/providers", get(list_providers))
         .route("/v1/rankings", get(list_rankings))
         .route("/v1/auto-models", get(list_auto_models))
-        .route("/v1/free-models", get(list_free_models))
-        .route("/v1/paid-models", get(list_paid_models))
         .route("/v1/chat/completions", post(chat_completions))
         .layer(DefaultBodyLimit::max(state.config.server.max_body_bytes))
         .with_state(state))
@@ -1304,22 +1302,6 @@ struct AutoModelsQuery {
     route: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct FreeModelsQuery {
-    task: Option<String>,
-    limit: Option<usize>,
-    provider: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PaidModelsQuery {
-    task: Option<String>,
-    limit: Option<usize>,
-    provider: Option<String>,
-    page: Option<usize>,
-    view: Option<ModelView>,
-}
-
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum CatalogAccess {
@@ -1669,34 +1651,6 @@ fn catalog_model_summary_json(entry: &CatalogModelEntry) -> Value {
     })
 }
 
-fn ranked_paid_candidates(
-    mut candidates: Vec<ModelCandidate>,
-    task: TaskKind,
-) -> Vec<ModelCandidate> {
-    candidates.sort_by(|left, right| {
-        let left_quality = left.benchmark.as_ref().and_then(|b| quality_for(b, task));
-        let right_quality = right.benchmark.as_ref().and_then(|b| quality_for(b, task));
-        match (left_quality, right_quality) {
-            (Some(left_quality), Some(right_quality)) => right_quality
-                .total_cmp(&left_quality)
-                .then_with(|| left.offering.model.cmp(&right.offering.model)),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => left.offering.model.cmp(&right.offering.model),
-        }
-        .then_with(|| left.offering.provider.cmp(&right.offering.provider))
-    });
-
-    let mut seen = std::collections::HashSet::new();
-    candidates.retain(|candidate| {
-        seen.insert((
-            candidate.offering.provider.clone(),
-            normalize_identifier(&candidate.offering.model),
-        ))
-    });
-    candidates
-}
-
 async fn load_paid_candidates(
     state: &AppState,
     provider_filter: Option<&str>,
@@ -1825,6 +1779,9 @@ fn catalog_snapshot(
         }
     }
     let token = digest_hex(hasher.finalize());
+    for account in account_limits.values() {
+        last_modified = last_modified.max(account.fetched_at);
+    }
     CatalogSnapshot {
         candidates,
         account_limits,
@@ -1868,7 +1825,7 @@ fn catalog_model_link(offering: &CatalogOffering) -> String {
     format!(
         "/v1/catalog/models/{}/{}",
         encode_uri_component(&offering.provider, false),
-        encode_uri_component(&offering.model, true)
+        encode_uri_component(&offering.model, false)
     )
 }
 
@@ -1934,11 +1891,26 @@ fn cached_json_response(value: Value, request_headers: &HeaderMap, last_modified
     };
     let last_modified = httpdate::fmt_http_date(modified_at);
     let cache_control = "private, max-age=30, must-revalidate";
-    if request_headers
+    let not_modified = if let Some(if_none_match) = request_headers
         .get("if-none-match")
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag))
     {
+        if_none_match
+            .split(',')
+            .any(|candidate| candidate.trim() == etag)
+    } else {
+        request_headers
+            .get("if-modified-since")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| httpdate::parse_http_date(value).ok())
+            .and_then(|since| {
+                httpdate::parse_http_date(&last_modified)
+                    .ok()
+                    .map(|modified| modified <= since)
+            })
+            .unwrap_or(false)
+    };
+    if not_modified {
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header("etag", etag)
@@ -1976,6 +1948,20 @@ fn parse_catalog_task(task: Option<&str>) -> Result<TaskKind, Box<Response>> {
                 .into_response(),
         )),
     }
+}
+
+fn catalog_query_error(rejection: QueryRejection) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": {
+                "message": rejection.to_string(),
+                "type": "invalid_request_error",
+                "code": "invalid_query"
+            }
+        })),
+    )
+        .into_response()
 }
 
 async fn load_catalog_snapshot(
@@ -2031,38 +2017,6 @@ fn catalog_model_response(
     } else {
         catalog_model_summary_json(&entry)
     }
-}
-
-fn paged_links(query: &PaidModelsQuery, page: usize, pages: usize) -> Value {
-    let page_url = |target_page: usize| {
-        let mut params = vec![format!("page={target_page}")];
-        if let Some(limit) = query.limit {
-            params.push(format!("limit={limit}"));
-        }
-        if let Some(task) = query.task.as_deref() {
-            params.push(format!("task={task}"));
-        }
-        if let Some(provider) = query.provider.as_deref() {
-            params.push(format!("provider={provider}"));
-        }
-        if let Some(view) = query.view {
-            params.push(format!(
-                "view={}",
-                if view.is_full() { "full" } else { "summary" }
-            ));
-        }
-        format!("/v1/paid-models?{}", params.join("&"))
-    };
-
-    let mut links =
-        serde_json::Map::from_iter([("self".to_owned(), Value::String(page_url(page)))]);
-    if page > 1 {
-        links.insert("prev".to_owned(), Value::String(page_url(page - 1)));
-    }
-    if page < pages {
-        links.insert("next".to_owned(), Value::String(page_url(page + 1)));
-    }
-    Value::Object(links)
 }
 
 #[derive(Debug)]
@@ -2758,370 +2712,15 @@ fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
     })
 }
 
-async fn list_free_models(
-    State(state): State<AppState>,
-    Query(query): Query<FreeModelsQuery>,
-) -> Response {
-    let provider_filter = match query.provider.as_deref() {
-        None | Some("all") => None,
-        Some(provider) => Some(provider),
-    };
-    if let Some(provider) = provider_filter {
-        if !state.config.providers.contains_key(provider) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": format!("unknown provider '{provider}'"),
-                        "type": "invalid_request_error",
-                        "code": "invalid_provider"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    }
-    let task = match query.task.as_deref().unwrap_or("general") {
-        "general" => TaskKind::General,
-        "coding" => TaskKind::Coding,
-        "agentic" => TaskKind::Agentic,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": "task must be one of general, coding, agentic",
-                        "type": "invalid_request_error",
-                        "code": "invalid_task"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-    let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
-    let max_age = state.config.server.catalog_max_age_seconds;
-    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
-
-    let (offerings, benchmarks, account_limits) = match tokio::try_join!(
-        routing_operation(state.routing.clone(), move |routing| {
-            routing.all_candidates(max_age)
-        }),
-        routing_operation(state.routing.clone(), move |routing| {
-            routing.benchmark_models(benchmark_max_age)
-        }),
-        routing_operation(state.routing.clone(), move |routing| {
-            routing.account_limits()
-        })
-    ) {
-        Ok(v) => v,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {
-                        "message": "routing state is unavailable",
-                        "type": "server_error",
-                        "code": "routing_state_unavailable"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let mut benchmark_map = BTreeMap::new();
-    for b in &benchmarks {
-        benchmark_map
-            .entry(b.id.clone())
-            .or_insert_with(Vec::new)
-            .push(b.clone());
-    }
-    let mappings = identity_mapping_indexes(&state.routing);
-
-    let candidates = collect_free_candidates(
-        &offerings,
-        &benchmark_map,
-        FreeCandidateContext {
-            providers: &state.config.providers,
-            runtimes: &state.providers,
-            cfg: &state.config.server,
-            provider_filter,
-            mappings: &mappings,
-            account_limits: &account_limits,
-        },
-    );
-
-    let mut providers = BTreeMap::new();
-    let mut data = Vec::new();
-
-    for candidate in &candidates {
-        let Some(config) = state.config.providers.get(&candidate.offering.provider) else {
-            continue;
-        };
-
-        let reference = quota_reference(config, &candidate.offering.model);
-        let limits = reference
-            .as_ref()
-            .map(|r| r.rules.clone())
-            .unwrap_or_default();
-        let limit_kind = reference.as_ref().map(|r| r.as_of).unwrap_or("unknown");
-        let source_url = reference.as_ref().map(|r| r.source_url);
-
-        providers.entry(candidate.offering.provider.clone()).or_insert_with(|| {
-            json!({
-                "name": config.profile
-                    .map(|profile| profile.definition().display_name.to_owned())
-                    .unwrap_or_else(|| candidate.offering.provider.clone()),
-                "billing_mode": match config.billing_mode {
-                    BillingMode::Free => "free",
-                    BillingMode::Paid => "paid",
-                    BillingMode::Subscription => "subscription",
-                },
-                "limits": limits.iter().map(|limit| json!({
-                    "kind": serde_json::to_string(&limit.kind).unwrap_or_else(|_| "unknown".to_owned()).trim_matches('"'),
-                    "limit": limit.limit,
-                    "window_seconds": limit.window_seconds,
-                })).collect::<Vec<_>>(),
-                "limit_status": limit_kind,
-                "limit_reference": source_url,
-            })
-        });
-
-        data.push((
-            candidate
-                .benchmark
-                .as_ref()
-                .and_then(|benchmark| quality_for(benchmark, task)),
-            candidate.benchmark.clone(),
-            candidate.offering.clone(),
-            limit_kind,
-            source_url,
-            candidate.match_kind,
-        ));
-    }
-
-    // Auto-route models (kilo-auto/free, openrouter/free, orcarouter/free, etc.)
-    // can't be benchmarked individually. Assign them the best quality of any
-    // non-auto-route model from the same provider, so they rank at the top
-    // of their provider's offerings.
-    // Note: :free suffixed models (kat-coder-pro-v2.5:free) are regular free-tier
-    // models with benchmarks — they are NOT auto-routes.
-    let mut best_per_provider: BTreeMap<String, (f64, BenchmarkModel)> = BTreeMap::new();
-    for (quality, benchmark, offering, _, _, _) in &data {
-        if is_provider_auto_route(&offering.model) {
-            continue;
-        }
-        if let (Some(quality), Some(benchmark)) = (quality, benchmark) {
-            let entry = best_per_provider
-                .entry(offering.provider.clone())
-                .or_insert_with(|| (*quality, benchmark.clone()));
-            if *quality > entry.0 {
-                *entry = (*quality, benchmark.clone());
-            }
-        }
-    }
-    for entry in &mut data {
-        if entry.0.is_some() || !is_provider_auto_route(&entry.2.model) {
-            continue;
-        }
-        if let Some((best_q, best_bm)) = best_per_provider.get(&entry.2.provider) {
-            entry.0 = Some(*best_q);
-            entry.1 = Some(best_bm.clone());
-        }
-    }
-
-    data.sort_by(
-        |(left_q, _, left_o, left_kind, _, _), (right_q, _, right_o, right_kind, _, _)| {
-            let left_benchmarked = left_q.is_some();
-            let right_benchmarked = right_q.is_some();
-            right_benchmarked
-                .cmp(&left_benchmarked)
-                .then_with(|| right_q.unwrap_or(0.0).total_cmp(&left_q.unwrap_or(0.0)))
-                .then_with(|| {
-                    let left_known = *left_kind != "unknown";
-                    let right_known = *right_kind != "unknown";
-                    right_known.cmp(&left_known)
-                })
-                .then_with(|| left_o.provider.cmp(&right_o.provider))
-                .then_with(|| left_o.model.cmp(&right_o.model))
-        },
-    );
-
-    // Keep the highest-ranked benchmark variant per provider offering while
-    // preserving alternatives from providers with different limits.
-    let mut seen = std::collections::HashSet::new();
-    data.retain(|(_, _, offering, _, _, _)| {
-        seen.insert((
-            offering.provider.clone(),
-            normalize_identifier(&offering.model),
-        ))
-    });
-
-    let ranked = data
-        .into_iter()
-        .take(limit)
-        .enumerate()
-        .map(
-            |(index, (_quality, benchmark, offering, _limit_kind, _source_url, match_kind))| {
-                let composite_quality = benchmark.as_ref().and_then(composite_quality);
-                let effort_level = benchmark
-                    .as_ref()
-                    .and_then(|b| b.reasoning_effort.as_deref());
-                catalog_model_json(&CatalogModelEntry {
-                    offering: &offering,
-                    benchmark: benchmark.as_ref(),
-                    price: None,
-                    composite_quality,
-                    rank: index + 1,
-                    effort_level,
-                    parameters: None,
-                    match_kind,
-                    account_limit: account_limits.get(&offering.provider).copied(),
-                })
-            },
-        )
-        .collect::<Vec<_>>();
-
-    Json(json!({
-        "object": "free-models",
-        "task": task.as_str(),
-        "provider": provider_filter,
-        "catalog_max_age_seconds": max_age,
-        "benchmark_max_age_seconds": benchmark_max_age,
-        "providers": providers,
-        "data": ranked
-    }))
-    .into_response()
-}
-
-async fn list_paid_models(
-    State(state): State<AppState>,
-    Query(query): Query<PaidModelsQuery>,
-) -> Response {
-    let provider_filter = match query.provider.as_deref() {
-        None | Some("all") => None,
-        Some(provider) => Some(provider),
-    };
-    if let Some(provider) = provider_filter {
-        if !state.config.providers.contains_key(provider) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": format!("unknown provider '{provider}'"),
-                        "type": "invalid_request_error",
-                        "code": "invalid_provider"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    }
-    let task = match query.task.as_deref().unwrap_or("general") {
-        "general" => TaskKind::General,
-        "coding" => TaskKind::Coding,
-        "agentic" => TaskKind::Agentic,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": "task must be one of general, coding, agentic",
-                        "type": "invalid_request_error",
-                        "code": "invalid_task"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-    let limit = query.limit.unwrap_or(25).clamp(1, 100);
-    let page = query.page.unwrap_or(1).max(1);
-    let view = query.view.unwrap_or_default();
-    let max_age = state.config.server.catalog_max_age_seconds;
-    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
-    let candidates = match load_paid_candidates(&state, provider_filter).await {
-        Ok(candidates) => candidates,
-        Err(()) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {
-                        "message": "routing state is unavailable",
-                        "type": "server_error",
-                        "code": "routing_state_unavailable"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
-    let ranked = ranked_paid_candidates(candidates, task);
-
-    let mut providers = BTreeMap::new();
-    for candidate in &ranked {
-        let Some(config) = state.config.providers.get(&candidate.offering.provider) else {
-            continue;
-        };
-
-        providers
-            .entry(candidate.offering.provider.clone())
-            .or_insert_with(|| {
-                let billing_label = match config.billing_mode {
-                    BillingMode::Paid => "paid",
-                    BillingMode::Subscription => "subscription",
-                    BillingMode::Free => "free",
-                };
-                json!({
-                    "name": config.profile
-                        .map(|profile| profile.definition().display_name.to_owned())
-                        .unwrap_or_else(|| candidate.offering.provider.clone()),
-                    "billing_mode": billing_label,
-                })
-            });
-    }
-
-    let total = ranked.len();
-    let pages = total.div_ceil(limit).max(1);
-    let start = page.saturating_sub(1).saturating_mul(limit);
-    let data = if start >= total {
-        Vec::new()
-    } else {
-        ranked
-            .iter()
-            .skip(start)
-            .take(limit)
-            .enumerate()
-            .map(|(index, candidate)| {
-                catalog_model_response(candidate, start + index + 1, None, view)
-            })
-            .collect::<Vec<_>>()
-    };
-
-    Json(json!({
-        "object": "paid-models",
-        "task": task.as_str(),
-        "provider": provider_filter,
-        "view": if view.is_full() { "full" } else { "summary" },
-        "page": page,
-        "per_page": limit,
-        "total": total,
-        "pages": pages,
-        "links": paged_links(&query, page, pages),
-        "catalog_max_age_seconds": max_age,
-        "benchmark_max_age_seconds": benchmark_max_age,
-        "providers": providers,
-        "data": data
-    }))
-    .into_response()
-}
-
 async fn list_catalog_models(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<CatalogModelsQuery>,
+    query: Result<Query<CatalogModelsQuery>, QueryRejection>,
 ) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(rejection) => return catalog_query_error(rejection),
+    };
     let access = query.access.unwrap_or(CatalogAccess::All);
     let provider_filter = match query.provider.as_deref() {
         None | Some("all") => None,
@@ -5944,14 +5543,15 @@ mod tests {
         BenchmarkIdentityIndex, ModelMatchKind, ModelMetadata, RequestRequirements,
         SelectionMetadata, StreamChoice, add_model_headers, benchmark_ids_match,
         benchmark_price_for_model, benchmarks_for_effort, copy_safe_headers,
-        decorate_json_response, estimate_request_tokens, expected_cost_microusd,
-        find_all_matching_benchmarks, find_benchmark, find_exact_matching_benchmarks,
-        find_exact_matching_benchmarks_indexed, find_suggested_benchmark, footer_sse_event,
-        has_dynamic_or_release_suffix, header_value, identity_mapping_indexes, is_fallback_status,
-        is_model_denied, is_provider_auto_route, is_reasoning_effort, log_request,
-        malformed_sse_event, parse_json_usage, parse_sse_usage, parse_usage_value,
-        rank_benchmark_models, rate_limit_reset_delay, request_id, request_id_from_response,
-        session_material, sse_model, strip_model_noise, take_sse_event, transform_sse_event,
+        decorate_json_response, encode_uri_component, estimate_request_tokens,
+        expected_cost_microusd, find_all_matching_benchmarks, find_benchmark,
+        find_exact_matching_benchmarks, find_exact_matching_benchmarks_indexed,
+        find_suggested_benchmark, footer_sse_event, has_dynamic_or_release_suffix, header_value,
+        identity_mapping_indexes, is_fallback_status, is_model_denied, is_provider_auto_route,
+        is_reasoning_effort, log_request, malformed_sse_event, parse_json_usage, parse_sse_usage,
+        parse_usage_value, rank_benchmark_models, rate_limit_reset_delay, request_id,
+        request_id_from_response, session_material, sse_model, strip_model_noise, take_sse_event,
+        transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
     use crate::identity::{
@@ -5984,6 +5584,16 @@ mod tests {
         fn make_writer(&'a self) -> Self::Writer {
             TestGuard(self.0.clone())
         }
+    }
+
+    #[test]
+    fn catalog_links_percent_encode_path_and_query_delimiters() {
+        assert_eq!(
+            encode_uri_component("model/name?x=y", false),
+            "model%2Fname%3Fx%3Dy"
+        );
+        assert_eq!(encode_uri_component("model/name", true), "model/name");
+        assert_eq!(encode_uri_component("coding task", false), "coding%20task");
     }
 
     fn resolves_single(catalog_id: &str, benchmark_id: &str) -> bool {
