@@ -20,6 +20,7 @@ use model_gateway::gateway::build_app;
 use model_gateway::identity::{
     IdentityAliasRecord, IdentityConfidence, IdentityEntityRecord, IdentityImport,
 };
+use model_gateway::pricing::{PriceObservation, PriceRates, PriceScope, PriceSourceKind};
 use model_gateway::providers::AccountLimit;
 use model_gateway::routing::{AccessKind, CatalogRecord, RoutingStore};
 use model_gateway::secrets::SecretResolver;
@@ -715,7 +716,7 @@ async fn paid_model_listing_task_changes_ranking_not_identity() {
     for (task, expected) in [("general", "general-model"), ("coding", "coding-model")] {
         let response = reqwest::Client::new()
             .get(format!(
-                "{gateway}/v1/paid-models?provider=paid-provider&task={task}"
+                "{gateway}/v1/paid-models?provider=paid-provider&task={task}&view=full"
             ))
             .send()
             .await
@@ -3846,11 +3847,37 @@ async fn paid_models_lists_only_paid_provider_offerings() {
                 supports_tools: Some(true),
                 supports_vision: Some(true),
                 supports_structured_output: Some(true),
-                input_price_per_million: Some(2.5),
-                output_price_per_million: Some(10.0),
+                input_price_per_million: None,
+                output_price_per_million: None,
             }],
         )
         .expect("paid catalog");
+    store
+        .replace_pricing(
+            "models.dev",
+            PriceSourceKind::ModelsDev,
+            "Fixture pricing",
+            &[PriceObservation {
+                source: "models.dev".to_owned(),
+                source_kind: PriceSourceKind::ModelsDev,
+                scope: PriceScope::RuntimeProvider,
+                provider_key: Some("paid".to_owned()),
+                model_id: "gpt-4o".to_owned(),
+                rates: PriceRates {
+                    input_price_per_million: Some(2.5),
+                    output_price_per_million: Some(10.0),
+                    cache_read_price_per_million: Some(1.25),
+                    cache_write_price_per_million: Some(3.75),
+                    ..PriceRates::default()
+                },
+                fetched_at: None,
+                as_of: None,
+                valid_from: None,
+                valid_until: None,
+                attribution: None,
+            }],
+        )
+        .expect("pricing");
     store
         .replace_catalog(
             "free",
@@ -3878,19 +3905,39 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["object"], "paid-models");
+    assert_eq!(body["view"], "summary");
+    assert_eq!(body["per_page"], 25);
     // Only the paid provider's models should appear (free provider excluded)
     assert_eq!(
         body["data"].as_array().map(|a| a.len()),
         Some(1),
         "should only include the paid (non-free) model"
     );
-    assert_eq!(body["data"][0]["model"]["provider"], "paid");
-    assert_eq!(body["data"][0]["model"]["name"], "gpt-4o");
+    assert_eq!(body["data"][0]["provider"], "paid");
+    assert_eq!(body["data"][0]["model"], "gpt-4o");
+    assert_eq!(body["data"][0]["id"], "paid/gpt-4o");
+    assert_eq!(body["data"][0]["links"]["self"], "/v1/models/paid/gpt-4o");
+    assert!(body["data"][0]["price_per_million"].is_null());
+    assert_eq!(body["data"][0]["pricing"]["input"], 2.5);
     assert_eq!(body["providers"]["paid"]["billing_mode"], "paid");
     assert!(
         body["providers"].get("free").is_none(),
         "free provider should not appear in paid-models listing"
     );
+
+    let detail: Value = client
+        .get(format!("{gateway}/v1/models/paid/gpt-4o"))
+        .send()
+        .await
+        .expect("model detail response")
+        .json()
+        .await
+        .expect("model detail JSON");
+    assert_eq!(detail["object"], "model");
+    assert_eq!(detail["id"], "paid/gpt-4o");
+    assert_eq!(detail["data"]["model"]["name"], "gpt-4o");
+    assert_eq!(detail["data"]["price_per_million"]["cache_read"], 1.25);
+    assert_eq!(detail["data"]["price_per_million"]["cache_write"], 3.75);
 }
 
 #[tokio::test]
@@ -3935,7 +3982,9 @@ async fn subscription_models_report_zero_effective_and_reference_prices() {
     let gateway = spawn_gateway(config).await;
 
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/paid-models?provider=cli-proxy"))
+        .get(format!(
+            "{gateway}/v1/paid-models?provider=cli-proxy&view=full"
+        ))
         .send()
         .await
         .expect("paid models response");
