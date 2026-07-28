@@ -32,11 +32,15 @@ jobs:
       - name: Detect
         id: applicability
         run: bash .github/scripts/ci.sh should_run format >> "$GITHUB_OUTPUT"
+      - name: Format Probe
+        id: format-probe
+        if: steps.applicability.outputs.applicable == 'true'
+        run: bash .github/scripts/format-fast-path.sh
       - name: Setup
         if: steps.applicability.outputs.applicable == 'true'
         uses: ./.github/actions/setup
         with:
-          install: true
+          install: ${{ steps.format-probe.outputs.hit != 'true' }}
           install-python: false
           install-rust: false
           cache-build: false
@@ -47,6 +51,28 @@ jobs:
           task: format
       - name: Format
         if: steps.applicability.outputs.applicable == 'true'
+        id: format-fast
+        continue-on-error: ${{ steps.format-probe.outputs.hit == 'true' }}
+        run: bash .github/scripts/ci.sh format
+      - name: Setup Fallback
+        if: >-
+          steps.applicability.outputs.applicable == 'true' &&
+          steps.format-probe.outputs.hit == 'true' &&
+          steps.format-fast.outcome == 'failure'
+        uses: ./.github/actions/setup
+        with:
+          install: true
+          install-python: false
+          install-rust: false
+          cache-build: false
+          cache-save: false
+          cache-format: true
+          task: format
+      - name: Format Fallback
+        if: >-
+          steps.applicability.outputs.applicable == 'true' &&
+          steps.format-probe.outputs.hit == 'true' &&
+          steps.format-fast.outcome == 'failure'
         run: bash .github/scripts/ci.sh format
 
   lint:
