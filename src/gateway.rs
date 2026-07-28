@@ -5354,6 +5354,54 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "manual performance benchmark; run with --release --ignored --nocapture"]
+    fn benchmark_indexed_exact_matching_against_scan() {
+        let models = (0..1_000)
+            .map(|index| {
+                BenchmarkModel::fixture(
+                    &format!("vendor/model-{index}-2025"),
+                    50.0,
+                    50.0,
+                    50.0,
+                    1.0,
+                    1.0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let map: BTreeMap<String, Vec<BenchmarkModel>> =
+            models
+                .iter()
+                .cloned()
+                .fold(BTreeMap::new(), |mut map, model| {
+                    map.entry(model.id.clone()).or_default().push(model);
+                    map
+                });
+        let index = BenchmarkIdentityIndex::new(models);
+        let lookups = (0..1_000)
+            .map(|index| format!("vendor/model-{index}-2025"))
+            .collect::<Vec<_>>();
+
+        let started = Instant::now();
+        let indexed_matches = lookups
+            .iter()
+            .map(|lookup| find_exact_matching_benchmarks_indexed(&index, lookup).len())
+            .sum::<usize>();
+        let indexed_elapsed = started.elapsed();
+
+        let started = Instant::now();
+        let scanned_matches = lookups
+            .iter()
+            .map(|lookup| find_exact_matching_benchmarks(&map, lookup).len())
+            .sum::<usize>();
+        let scanned_elapsed = started.elapsed();
+
+        assert_eq!(indexed_matches, scanned_matches);
+        println!(
+            "indexed_exact_matching: indexed={indexed_elapsed:?}, scan={scanned_elapsed:?}, matches={indexed_matches}"
+        );
+    }
+
     fn resolves_exact_single(catalog_id: &str, benchmark_id: &str) -> bool {
         let benchmarks = BTreeMap::from([(
             benchmark_id.to_owned(),
