@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.10.1](https://github.com/0xPlayerOne/model-gateway/compare/v0.10.0...v0.10.1) (2026-07-28)
+
+
+### Bug Fixes
+
+* cover canonical price observation mapping ([bc89370](https://github.com/0xPlayerOne/model-gateway/commit/bc89370a793e12d1ea15fe48f8bf312a0aae9507))
+* cover canonical price observation mapping ([e92fb4b](https://github.com/0xPlayerOne/model-gateway/commit/e92fb4bcf54b76999ce5b5259e50887b10efc1fb))
+
+## [0.10.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.9.0...v0.10.0) (2026-07-28)
+
+
+### Features
+
+* improve model reconciliation and pricing coverage ([8d43001](https://github.com/0xPlayerOne/model-gateway/commit/8d430017c6e10b7e7553c3ffdbe1dde9b6725908))
+
 ## [0.9.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.8.0...v0.9.0) (2026-07-28)
 
 
