@@ -27,6 +27,18 @@ jobs:
     outputs:
       languages: ${{ steps.languages.outputs.languages }}
       code_security: ${{ steps.security.outputs.status }}
+      actions_available: ${{ steps.languages.outputs.actions_available }}
+      actions_changed: ${{ steps.languages.outputs.actions_changed }}
+      actions_build_mode: ${{ steps.languages.outputs.actions_build_mode }}
+      javascript_available: ${{ steps.languages.outputs.javascript_available }}
+      javascript_changed: ${{ steps.languages.outputs.javascript_changed }}
+      javascript_build_mode: ${{ steps.languages.outputs.javascript_build_mode }}
+      python_available: ${{ steps.languages.outputs.python_available }}
+      python_changed: ${{ steps.languages.outputs.python_changed }}
+      python_build_mode: ${{ steps.languages.outputs.python_build_mode }}
+      rust_available: ${{ steps.languages.outputs.rust_available }}
+      rust_changed: ${{ steps.languages.outputs.rust_changed }}
+      rust_build_mode: ${{ steps.languages.outputs.rust_build_mode }}
     steps:
       - name: Detect Code Security
         id: security
@@ -61,39 +73,78 @@ jobs:
             bash .github/scripts/codeql-languages.sh
           fi
 
-  analyze:
-    name: Analyze (${{ matrix.name }})
+  analyze-actions:
+    name: Analyze (Actions)
     needs: detect
-    if: ${{ !github.event.repository.private || needs.detect.outputs.code_security == 'enabled' }}
-    # Unchanged matrix entries only complete skipped steps; reserve a full
-    # runner for analyzers that actually initialize and scan source.
-    runs-on: ${{ matrix.changed && 'ubuntu-latest' || 'ubuntu-slim' }}
+    if: >-
+      ( !github.event.repository.private || needs.detect.outputs.code_security == 'enabled' ) &&
+      needs.detect.outputs.actions_available == 'true' &&
+      needs.detect.outputs.actions_changed == 'true'
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        include: ${{ fromJSON(needs.detect.outputs.languages) }}
     steps:
       - name: Checkout
-        if: matrix.changed
         uses: actions/checkout@v7
-      - name: Initialize
-        if: matrix.changed
-        uses: github/codeql-action/init@v4
-        with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
       - name: Analyze
-        if: matrix.changed
-        uses: github/codeql-action/analyze@v4
+        uses: ./.github/actions/codeql
         with:
-          category: /language:${{ matrix.language }}
-          # SARIF results remain uploaded for code scanning; the database
-          # archive is not needed by this reusable baseline and adds upload
-          # overhead.
-          upload-database: false
-          # The upload acknowledgment is sufficient for the required workflow
-          # check; let GitHub process the SARIF asynchronously to remove the
-          # post-upload wait from the critical path.
-          wait-for-processing: false
+          language: actions
+          build-mode: ${{ needs.detect.outputs.actions_build_mode }}
+          category: /language:actions
+
+  analyze-typescript:
+    name: Analyze (TypeScript)
+    needs: detect
+    if: >-
+      ( !github.event.repository.private || needs.detect.outputs.code_security == 'enabled' ) &&
+      needs.detect.outputs.javascript_available == 'true' &&
+      needs.detect.outputs.javascript_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Analyze
+        uses: ./.github/actions/codeql
+        with:
+          language: javascript-typescript
+          build-mode: ${{ needs.detect.outputs.javascript_build_mode }}
+          category: /language:javascript-typescript
+
+  analyze-python:
+    name: Analyze (Python)
+    needs: detect
+    if: >-
+      ( !github.event.repository.private || needs.detect.outputs.code_security == 'enabled' ) &&
+      needs.detect.outputs.python_available == 'true' &&
+      needs.detect.outputs.python_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Analyze
+        uses: ./.github/actions/codeql
+        with:
+          language: python
+          build-mode: ${{ needs.detect.outputs.python_build_mode }}
+          category: /language:python
+
+  analyze-rust:
+    name: Analyze (Rust)
+    needs: detect
+    if: >-
+      ( !github.event.repository.private || needs.detect.outputs.code_security == 'enabled' ) &&
+      needs.detect.outputs.rust_available == 'true' &&
+      needs.detect.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Analyze
+        uses: ./.github/actions/codeql
+        with:
+          language: rust
+          build-mode: ${{ needs.detect.outputs.rust_build_mode }}
+          category: /language:rust
