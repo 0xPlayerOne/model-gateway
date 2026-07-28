@@ -40,6 +40,8 @@ htmlcov/
 .next/
 artifacts/
 cache/
+!.github/actions/cache/
+!.github/actions/cache/action.yml
 typechain/
 coverage.json
 tests/.bin/

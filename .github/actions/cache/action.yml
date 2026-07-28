@@ -1,0 +1,43 @@
+name: Repository Cache
+description: Restore a cache and optionally enable the post-job save performed by actions/cache.
+
+inputs:
+  path:
+    description: Cache paths.
+    required: true
+  key:
+    description: Primary cache key.
+    required: true
+  restore-keys:
+    description: Optional newline-delimited restore keys.
+    required: false
+    default: ''
+  save:
+    description: Enable cache saving after the job completes.
+    required: false
+    default: 'true'
+
+outputs:
+  cache-hit:
+    description: Whether an exact cache was restored.
+    value: ${{ steps.cache.outputs.cache-hit || steps.restore.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Restore cache
+      id: restore
+      if: inputs.save != 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        restore-keys: ${{ inputs.restore-keys }}
+    - name: Restore and save cache
+      id: cache
+      if: inputs.save == 'true'
+      uses: actions/cache@v5
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        restore-keys: ${{ inputs.restore-keys }}

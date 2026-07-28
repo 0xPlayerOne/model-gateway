@@ -35,7 +35,7 @@ inputs:
     required: false
     default: auto
   cache-save:
-    description: Save restored JavaScript dependency and package caches after installation.
+    description: Save restored caches after the job completes; disable to avoid post-job archive work in parallel jobs.
     required: false
     default: 'true'
   cache-packages:
@@ -474,8 +474,9 @@ runs:
         fi
     - name: Cache Corepack managers
       if: (inputs.mise-scope == 'javascript' || steps.javascript-dependencies.outputs.cache-hit == 'true') && inputs.install-javascript == 'true' && steps.profile.outputs.javascript == 'true' && hashFiles('**/pnpm-lock.yaml', '**/yarn.lock') != ''
-      uses: actions/cache@v5
+      uses: ./.github/actions/cache
       with:
+        save: ${{ inputs.cache-save }}
         path: ~/.cache/node/corepack
         # Corepack shims are independent of the project toolchain; keep this
         # cache warm when Node, Bun, or other mise-managed tools change.
@@ -500,8 +501,9 @@ runs:
       # Fallback ESLint mode is valid without a dedicated config file; use the
       # manifest/lockfile as the cache identity in that case as well.
       if: inputs.install == 'true' && inputs.cache-lint == 'true' && steps.profile.outputs.eslint_fallback == 'true' && hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.eslintrc*', '**/eslint.config.*') != ''
-      uses: actions/cache@v5
+      uses: ./.github/actions/cache
       with:
+        save: ${{ inputs.cache-save }}
         path: |
           **/.eslintcache
         key: ${{ runner.os }}-javascript-lint-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.eslintrc*', '**/eslint.config.*') }}
@@ -509,8 +511,9 @@ runs:
           ${{ runner.os }}-javascript-lint-${{ github.workflow }}-${{ github.job }}-
     - name: Cache JavaScript format state
       if: inputs.install == 'true' && inputs.cache-format == 'true' && steps.profile.outputs.prettier_fallback == 'true' && hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.prettierrc*', '**/prettier.config.*') != ''
-      uses: actions/cache@v5
+      uses: ./.github/actions/cache
       with:
+        save: ${{ inputs.cache-save }}
         path: |
           **/node_modules/.cache/prettier
         key: ${{ runner.os }}-javascript-format-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('**/package.json', '**/bun.lock', '**/bun.lockb', '**/pnpm-lock.yaml', '**/yarn.lock', '**/package-lock.json', '**/.prettierrc*', '**/prettier.config.*') }}
@@ -530,8 +533,9 @@ runs:
         env.TURBO_TEAM == '' ||
         steps.profile.outputs.turbo != 'true' ||
         steps.profile.outputs.turbo_task != 'true')
-      uses: actions/cache@v5
+      uses: ./.github/actions/cache
       with:
+        save: ${{ inputs.cache-save }}
         # Remote Turbo already stores task outputs for Turbo-backed builds.
         # Avoid a second, often-empty framework cache archive in that mode;
         # Turbo Type-Check tasks do not need framework build state either.
@@ -547,16 +551,18 @@ runs:
     - name: Cache Python environment
       id: python-environment
       if: inputs.install == 'true' && inputs.install-python == 'true' && inputs.cache-environment == 'true' && steps.profile.outputs.python == 'true' && hashFiles('**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock', '.mise.toml', 'mise.lock') != ''
-      uses: actions/cache@v5
+      uses: ./.github/actions/cache
       with:
+        save: ${{ inputs.cache-save }}
         path: |
           .venv
           **/.venv
         key: ${{ runner.os }}-python-environment-${{ hashFiles('**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock', '.mise.toml', 'mise.lock') }}
     - name: Cache Python packages
       if: inputs.install == 'true' && (inputs.mise-scope == 'auto' || inputs.mise-scope == 'all' || inputs.mise-scope == 'python') && inputs.install-python == 'true' && steps.profile.outputs.python_dependencies == 'true' && hashFiles('**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock') != '' && steps.python-environment.outputs.cache-hit != 'true'
-      uses: actions/cache@v5
+      uses: ./.github/actions/cache
       with:
+        save: ${{ inputs.cache-save }}
         path: |
           ~/.cache/pip
           ~/.cache/uv
@@ -566,8 +572,9 @@ runs:
     - name: Cache Python audit tools
       id: python-audit-tools
       if: inputs.install == 'false' && (inputs.mise-scope == 'auto' || inputs.mise-scope == 'all' || inputs.mise-scope == 'python') && inputs.install-python == 'true' && steps.profile.outputs.python_dependencies == 'true' && hashFiles('**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock') != ''
-      uses: actions/cache@v5
+      uses: ./.github/actions/cache
       with:
+        save: ${{ inputs.cache-save }}
         path: ~/.cache/uv-audit
         # Keep scanner wheels and metadata warm across application and script
         # changes. Bump v2 only when the pinned scanner version changes.
@@ -580,8 +587,9 @@ runs:
       run: echo 'REPO_FOUNDRY_UV_AUDIT_OFFLINE=true' >> "$GITHUB_ENV"
     - name: Cache Python lint state
       if: inputs.install == 'true' && inputs.cache-lint == 'true' && steps.profile.outputs.ruff == 'true' && hashFiles('**/pyproject.toml', '**/ruff.toml', '.mise.toml', 'mise.lock') != ''
-      uses: actions/cache@v5
+      uses: ./.github/actions/cache
       with:
+        save: ${{ inputs.cache-save }}
         path: |
           **/.ruff_cache
         key: ${{ runner.os }}-python-lint-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('**/pyproject.toml', '**/ruff.toml', '.mise.toml', 'mise.lock') }}
@@ -598,8 +606,9 @@ runs:
         steps.profile.outputs.turbo_task == 'true' &&
         hashFiles('**/turbo.json', '**/turbo.jsonc') != '' &&
         (inputs.cache-turbo == 'true' || env.TURBO_TOKEN == '' || env.TURBO_TEAM == '')
-      uses: actions/cache@v5
+      uses: ./.github/actions/cache
       with:
+        save: ${{ inputs.cache-save }}
         path: |
           .turbo/cache
           **/.turbo/cache
@@ -619,8 +628,9 @@ runs:
     - name: Cache Rust packages
       id: rust-packages
       if: (inputs.mise-scope == 'auto' || inputs.mise-scope == 'all' || inputs.mise-scope == 'rust') && inputs.install-rust == 'true' && steps.profile.outputs.rust == 'true' && hashFiles('**/Cargo.toml', '**/Cargo.lock') != ''
-      uses: actions/cache@v5
+      uses: ./.github/actions/cache
       with:
+        save: ${{ inputs.cache-save }}
         path: |
           ~/.cargo/registry
           ~/.cargo/git
@@ -629,8 +639,9 @@ runs:
           ${{ runner.os }}-rust-
     - name: Cache Rust advisory database
       if: inputs.install == 'false' && (inputs.mise-scope == 'auto' || inputs.mise-scope == 'all' || inputs.mise-scope == 'rust') && inputs.install-rust == 'true' && steps.profile.outputs.rust == 'true' && hashFiles('**/Cargo.toml', '**/Cargo.lock') != ''
-      uses: actions/cache@v5
+      uses: ./.github/actions/cache
       with:
+        save: ${{ inputs.cache-save }}
         path: ~/.cargo/advisory-db
         # The advisory database is independent of project dependencies. Keep
         # it warm for Security without invalidating it on every lockfile edit.
@@ -639,8 +650,9 @@ runs:
           ${{ runner.os }}-rust-advisory-
     - name: Cache Rust builds
       if: inputs.install == 'true' && inputs.install-rust == 'true' && inputs.cache-build == 'true' && steps.profile.outputs.rust == 'true' && hashFiles('**/Cargo.toml', '**/Cargo.lock') != ''
-      uses: actions/cache@v5
+      uses: ./.github/actions/cache
       with:
+        save: ${{ inputs.cache-save }}
         # Keep reusable dependency/build-script artifacts for the Build job;
         # exclude target/incremental and release output, which are large and
         # provide little value on a fresh hosted runner.
