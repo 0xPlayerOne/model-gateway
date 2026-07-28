@@ -968,9 +968,15 @@ fn normalized_identifier_variants(identifier: &str) -> Vec<String> {
         .map(normalize_identifier)
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
-    (0..segments.len())
-        .map(|index| segments[index..].join("-"))
-        .collect()
+    let full = segments.join("-");
+    let mut variants = vec![full];
+    // A provider namespace is the only prefix that exact identity matching may
+    // discard. Removing arbitrary suffixes makes unrelated IDs such as
+    // `vendor-a/model:free` and `vendor-b/other:free` collide.
+    if segments.len() > 1 {
+        variants.push(segments[1..].join("-"));
+    }
+    variants
 }
 
 fn normalize_identifier(identifier: &str) -> String {
@@ -5547,11 +5553,11 @@ mod tests {
         expected_cost_microusd, find_all_matching_benchmarks, find_benchmark,
         find_exact_matching_benchmarks, find_exact_matching_benchmarks_indexed,
         find_suggested_benchmark, footer_sse_event, has_dynamic_or_release_suffix, header_value,
-        identity_mapping_indexes, is_fallback_status, is_model_denied, is_provider_auto_route,
-        is_reasoning_effort, log_request, malformed_sse_event, parse_json_usage, parse_sse_usage,
-        parse_usage_value, rank_benchmark_models, rate_limit_reset_delay, request_id,
-        request_id_from_response, session_material, sse_model, strip_model_noise, take_sse_event,
-        transform_sse_event,
+        identity_mapping_indexes, is_exact_model_identity, is_fallback_status, is_model_denied,
+        is_provider_auto_route, is_reasoning_effort, log_request, malformed_sse_event,
+        parse_json_usage, parse_sse_usage, parse_usage_value, rank_benchmark_models,
+        rate_limit_reset_delay, request_id, request_id_from_response, session_material, sse_model,
+        strip_model_noise, take_sse_event, transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
     use crate::identity::{
@@ -6124,6 +6130,22 @@ mod tests {
         }
         assert!(benchmark_ids_match("mimo-v2.5", "mimo-v2-5-0424"));
         assert!(!benchmark_ids_match("mimo-v2-5-0424", "mimo-v2.5"));
+    }
+
+    #[test]
+    fn exact_identity_does_not_collide_on_shared_suffixes() {
+        assert!(!is_exact_model_identity(
+            "nvidia/nemotron-3-nano:free",
+            "baidu/cobuddy:free"
+        ));
+        assert!(!is_exact_model_identity(
+            "vendor-a/model:free",
+            "vendor-b/other:free"
+        ));
+        assert!(is_exact_model_identity(
+            "models/gemini-2.5-flash",
+            "gemini-2-5-flash"
+        ));
     }
 
     #[test]
