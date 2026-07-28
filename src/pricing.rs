@@ -187,7 +187,7 @@ impl ManualPriceImport {
             source_kind: PriceSourceKind::Manual,
             scope: PriceScope::RuntimeProvider,
             provider_key: Some(self.provider.trim().to_ascii_lowercase()),
-            model_id: self.model,
+            model_id: self.model.trim().to_owned(),
             rates: PriceRates {
                 input_price_per_million: Some(self.input_price_per_million),
                 output_price_per_million: Some(self.output_price_per_million),
@@ -472,7 +472,7 @@ mod tests {
     fn manual_import_normalizes_provider_and_preserves_billing_windows() {
         let observation = ManualPriceImport {
             provider: "  Fixture ".to_owned(),
-            model: "model".to_owned(),
+            model: "  model  ".to_owned(),
             input_price_per_million: 1.0,
             output_price_per_million: 2.0,
             cache_read_price_per_million: Some(0.5),
@@ -484,6 +484,7 @@ mod tests {
         }
         .observation(15);
         assert_eq!(observation.provider_key.as_deref(), Some("fixture"));
+        assert_eq!(observation.model_id, "model");
         assert!(observation.is_valid_at(15));
         assert!(!observation.is_valid_at(20));
         assert_eq!(observation.rates.reasoning_price_per_million, Some(3.0));
@@ -590,5 +591,21 @@ mod tests {
         assert!(observation.validate().is_err());
         observation.rates.input_price_per_million = Some(1.0);
         assert!(observation.validate().is_ok());
+    }
+
+    #[test]
+    fn models_dev_parser_rejects_invalid_provider_shapes_and_skips_unpriced_models() {
+        assert!(parse_models_dev(&json!([]), 100).is_err());
+        assert!(parse_models_dev(&json!({"provider": {}}), 100).is_err());
+        let observations = parse_models_dev(
+            &json!({"provider": {"models": {
+                "unpriced": {"name": "no cost"},
+                "priced": {"cost": {"input": 1.0, "output": 2.0}}
+            }}}),
+            100,
+        )
+        .expect("models.dev pricing");
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].model_id, "priced");
     }
 }
