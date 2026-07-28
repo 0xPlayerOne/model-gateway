@@ -9,95 +9,12 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
+  id-token: write
 
 jobs:
   release:
-    name: Release / Version
-    runs-on: ubuntu-slim
-    timeout-minutes: 20
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}
-      cancel-in-progress: false
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created || 'false' }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      npm_publish: ${{ steps.profile.outputs.npm_publish }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          # Release Please reads release metadata and manifests; defer source
-          # blob transfer until a package file is actually needed.
-          filter: blob:none
-      - name: Detect release profile
-        id: profile
-        shell: bash
-        run: |
-          release_type="$(awk -F': ' '/^release_type:/ {print $2; exit}' .github/template.yml 2>/dev/null || true)"
-          npm_publish="$(awk -F': ' '/^npm_publish:/ {print $2; exit}' .github/template.yml 2>/dev/null || true)"
-          [ -n "$release_type" ] || release_type=auto
-          [ -n "$npm_publish" ] || npm_publish=false
-
-          if [ "$release_type" = auto ]; then
-            if [ -f package.json ]; then release_type=node
-            elif [ -f pyproject.toml ]; then release_type=python
-            elif [ -f Cargo.toml ]; then release_type=rust
-            elif [ -f version.txt ]; then release_type=simple
-            else release_type=none
-            fi
-          fi
-
-          case "$release_type" in
-            node|python|rust|simple) ;;
-            none) npm_publish=false ;;
-            *) echo "Unsupported release_type: $release_type" >&2; exit 2 ;;
-          esac
-          if [ ! -f package.json ]; then npm_publish=false; fi
-          printf 'release_type=%s\n' "$release_type" >> "$GITHUB_OUTPUT"
-          printf 'npm_publish=%s\n' "$npm_publish" >> "$GITHUB_OUTPUT"
-      - name: Release Please
-        id: release
-        if: steps.profile.outputs.release_type != 'none'
-        uses: googleapis/release-please-action@v5
-        with:
-          # Use a PAT or GitHub App token when GITHUB_TOKEN cannot create PRs.
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
-          config-file: release-please-config.json
-          release-type: ${{ steps.profile.outputs.release_type }}
-          bump-minor-pre-major: true
-
-  npm:
-    name: Release / Publish npm
-    needs: release
-    if: needs.release.outputs.release_created == 'true' && needs.release.outputs.npm_publish == 'true'
-    runs-on: ubuntu-slim
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-    steps:
-      - name: Checkout release
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.release.outputs.tag_name }}
-      - name: Setup Node (trusted)
-        if: env.NPM_TOKEN == ''
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-      - name: Setup Node (token)
-        if: env.NPM_TOKEN != ''
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-      - name: Publish npm with token
-        if: env.NPM_TOKEN != ''
-        env:
-          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
-        run: npm publish --provenance --access public
-      - name: Publish npm with trusted publishing
-        if: env.NPM_TOKEN == ''
-        run: npm publish --provenance --access public
+    name: Release
+    uses: 0xPlayerOne/code-foundry/.github/workflows/reusable-release.yml@v0.22.0
+    with:
+      runner: ubuntu-slim
+    secrets: inherit

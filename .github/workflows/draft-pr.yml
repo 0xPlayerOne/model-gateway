@@ -15,45 +15,10 @@ permissions:
   contents: read
   pull-requests: write
 
-env:
-  GH_TOKEN: ${{ github.token }}
-
 jobs:
-  create-draft-pr:
-    name: Create
-    runs-on: ubuntu-slim
-    timeout-minutes: 10
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}
-      cancel-in-progress: true
-    steps:
-      - name: Check
-        id: check-pr
-        run: |
-          BRANCH="${{ github.ref_name }}"
-          EXISTING=$(gh pr list --limit 1 --base staging --head "$BRANCH" --state open --json number,title 2>/dev/null | jq 'length')
-          echo "existing=$EXISTING" >> "$GITHUB_OUTPUT"
-
-      - name: Create
-        if: steps.check-pr.outputs.existing == '0'
-        run: |
-          BRANCH="${{ github.ref_name }}"
-          gh pr create \
-            --base staging \
-            --head "$BRANCH" \
-            --draft \
-            --title "[WIP] $BRANCH" \
-            --body "Draft PR created automatically by CI.
-
-            This PR is a draft and should not be merged until CI passes and a reviewer (or the Daily Review agent) marks it ready.
-
-            **CI Status:** Pending — this workflow triggered on push to \`$BRANCH\`."
-
-      - name: Mark ready
-        if: steps.check-pr.outputs.existing == '0'
-        run: |
-          BRANCH="${{ github.ref_name }}"
-          PR_NUMBER=$(gh pr list --limit 1 --base staging --head "$BRANCH" --state open --json number 2>/dev/null | jq '.[0].number')
-          if [ -n "$PR_NUMBER" ]; then
-            gh pr ready "$PR_NUMBER"
-          fi
+  draft-pr:
+    name: Draft PR
+    uses: 0xPlayerOne/code-foundry/.github/workflows/reusable-draft-pr.yml@v0.22.0
+    with:
+      runner: ubuntu-slim
+    secrets: inherit

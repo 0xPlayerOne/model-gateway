@@ -7,9 +7,11 @@ mode="check"
 configured_features="all"
 configured_languages="auto"
 
-if [ -f .github/template.yml ]; then
-  configured_features="$(awk -F': ' '/^features:/ {print $2; exit}' .github/template.yml)"
-  configured_languages="$(awk -F': ' '/^languages:/ {print $2; exit}' .github/template.yml)"
+config_file=.github/code-foundry.yml
+[ -f "$config_file" ] || config_file=.github/template.yml
+if [ -f "$config_file" ]; then
+  configured_features="$(awk -F': ' '/^features:/ {print $2; exit}' "$config_file")"
+  configured_languages="$(awk -F': ' '/^languages:/ {print $2; exit}' "$config_file")"
   [ -n "$configured_features" ] || configured_features="all"
   [ -n "$configured_languages" ] || configured_languages="auto"
 fi

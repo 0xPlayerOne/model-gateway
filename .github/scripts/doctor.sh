@@ -4,8 +4,10 @@ set -euo pipefail
 errors=0
 
 configured_features="all"
-if [ -f .github/template.yml ]; then
-  configured_features="$(awk -F': ' '/^features:/ {print $2; exit}' .github/template.yml)"
+config_file=.github/code-foundry.yml
+[ -f "$config_file" ] || config_file=.github/template.yml
+if [ -f "$config_file" ]; then
+  configured_features="$(awk -F': ' '/^features:/ {print $2; exit}' "$config_file")"
   [ -n "$configured_features" ] || configured_features="all"
 fi
 
@@ -91,9 +93,11 @@ for workflow in ci codeql security test draft-pr release-pr release; do
   fi
 done
 
-for script in ci.sh codeql-languages.sh security.sh doctor.sh bootstrap.sh sync-template.sh init-repo.sh sync-protection.sh sync-codeowners.sh; do
+for script in ci.sh profile.sh doctor.sh bootstrap.sh sync-template.sh init-repo.sh sync-protection.sh sync-codeowners.sh; do
   [ -x ".github/scripts/$script" ] || error "missing executable script: .github/scripts/$script"
 done
+
+printf '%s\n' 'Remote CI, Test, Security, and CodeQL runtimes are loaded by reusable workflow wrappers.'
 
 if [ "$errors" -gt 0 ]; then
   printf '%s\n' "Repository doctor found $errors error(s)." >&2
