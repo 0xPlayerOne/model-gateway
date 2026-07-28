@@ -64,13 +64,9 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.name }})
     needs: detect
-    if: >-
-      (!github.event.repository.private || needs.detect.outputs.code_security == 'enabled') &&
-      matrix.changed
+    if: ${{ !github.event.repository.private || needs.detect.outputs.code_security == 'enabled' }}
     # Unchanged matrix entries only complete skipped steps; reserve a full
-    # runner for analyzers that actually initialize and scan source. The
-    # job-level condition also avoids provisioning a runner for skipped
-    # matrix entries while preserving their required check conclusions.
+    # runner for analyzers that actually initialize and scan source.
     runs-on: ${{ matrix.changed && 'ubuntu-latest' || 'ubuntu-slim' }}
     timeout-minutes: 30
     strategy:
