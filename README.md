@@ -135,6 +135,16 @@ Or per-provider: `MODEL_GATEWAY_OPENAI_API_BILLING_MODE=paid`. See [docs/configu
 | `pricing import --file <path>` | Import exact provider/model pricing overrides |
 | `pricing status` | Inspect active pricing snapshots |
 | `pricing explain <provider> <model>` | Show the selected effective price source |
+| `matching reconcile [--provider <name>] [--json] [--check]` | Report identity coverage; fail on mapping drift or ambiguity |
+| `matching refresh` | Refresh source-backed model identities from models.dev and OpenRouter |
+| `matching status` | Inspect active identity source snapshots |
+| `matching approve <provider> <catalog-model> <benchmark-model>` | Approve a provider-scoped benchmark identity |
+| `matching approve-entity <entity-id> <benchmark-model>` | Link a canonical entity to a benchmark for deterministic propagation |
+| `matching link-alias <provider-key> <provider-model-id> <entity-id>` | Approve a source-backed provider alias for a canonical entity |
+| `matching remove <provider> <catalog-model>` | Remove an approved identity mapping |
+| `matching remove-entity <entity-id> <benchmark-model>` | Remove a canonical entity benchmark link |
+| `matching unlink-alias <provider-key> <provider-model-id>` | Remove an approved canonical provider alias |
+| `matching explain <provider> <catalog-model>` | Explain one model's identity resolution |
 | `healthcheck` | Verify the server is running |
 
 ## Development

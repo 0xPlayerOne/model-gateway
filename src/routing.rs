@@ -12,6 +12,7 @@ use crate::benchmarks::BenchmarkModel;
 use crate::config::{
     BillingMode, ProviderConfig, ProviderProfileId, QuotaBoundary, QuotaKind, QuotaLimit,
 };
+use crate::identity::IdentityImport;
 use crate::pricing::{
     EffectivePrice, PriceObservation, PriceScope, PriceSourceKind, normalize_price_id,
 };
@@ -44,6 +45,30 @@ pub struct CatalogOffering {
     pub input_price_per_million: Option<f64>,
     pub output_price_per_million: Option<f64>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovedModelMapping {
+    pub provider: String,
+    pub catalog_model: String,
+    pub benchmark_model: String,
+    pub approved_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct IdentityAliasEvidence {
+    pub source: String,
+    pub provider_key: String,
+    pub provider_model_id: String,
+    pub entity_id: String,
+    pub confidence: String,
+    pub provenance_url: String,
+    pub family: Option<String>,
+    pub release_date: Option<String>,
+    pub hugging_face_id: Option<String>,
+    pub approved_benchmark_id: Option<String>,
+}
+
+pub type ApprovedIdentityReference = (String, String, String);
 
 #[derive(Debug, Clone)]
 pub struct CatalogRecord {
@@ -241,7 +266,7 @@ impl RoutingStore {
         };
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 4 {
+        if version > 6 {
             return Err(RoutingError::UnsupportedSchema(version));
         }
         connection.execute_batch(
@@ -356,7 +381,7 @@ impl RoutingStore {
                     active INTEGER NOT NULL DEFAULT 0,
                     attribution TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS price_observations (
+                 CREATE TABLE IF NOT EXISTS price_observations (
                     snapshot_id INTEGER NOT NULL,
                     scope TEXT NOT NULL,
                     provider_key TEXT,
@@ -373,8 +398,66 @@ impl RoutingStore {
                     valid_from INTEGER,
                     valid_until INTEGER,
                     PRIMARY KEY (snapshot_id, scope, provider_key, model_id),
-                    FOREIGN KEY (snapshot_id) REFERENCES pricing_snapshots(id) ON DELETE CASCADE
-                );",
+                     FOREIGN KEY (snapshot_id) REFERENCES pricing_snapshots(id) ON DELETE CASCADE
+                 );
+                 CREATE TABLE IF NOT EXISTS approved_model_mappings (
+                     provider TEXT NOT NULL,
+                     catalog_model TEXT NOT NULL,
+                     benchmark_model TEXT NOT NULL,
+                     approved_at INTEGER NOT NULL,
+                     PRIMARY KEY (provider, catalog_model)
+                 );
+                 CREATE TABLE IF NOT EXISTS identity_snapshots (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     source TEXT NOT NULL,
+                     fetched_at INTEGER NOT NULL,
+                     active INTEGER NOT NULL DEFAULT 0,
+                     attribution TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS model_entities (
+                     id TEXT PRIMARY KEY,
+                     creator TEXT,
+                     family TEXT,
+                     version TEXT,
+                     variant TEXT,
+                     release_date TEXT,
+                     hugging_face_id TEXT,
+                     updated_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS model_identity_aliases (
+                     snapshot_id INTEGER NOT NULL,
+                     source TEXT NOT NULL,
+                     provider_key TEXT NOT NULL,
+                     provider_model_id TEXT NOT NULL,
+                     entity_id TEXT NOT NULL,
+                     confidence TEXT NOT NULL,
+                     provenance_url TEXT NOT NULL,
+                     observed_at INTEGER NOT NULL,
+                     PRIMARY KEY (snapshot_id, provider_key, provider_model_id),
+                     FOREIGN KEY (snapshot_id) REFERENCES identity_snapshots(id) ON DELETE CASCADE,
+                     FOREIGN KEY (entity_id) REFERENCES model_entities(id)
+                 );
+                 CREATE TABLE IF NOT EXISTS benchmark_identity_links (
+                     entity_id TEXT NOT NULL,
+                     benchmark_source TEXT NOT NULL,
+                     benchmark_id TEXT NOT NULL,
+                     reasoning_effort TEXT NOT NULL DEFAULT '',
+                     confidence TEXT NOT NULL,
+                     provenance_url TEXT NOT NULL,
+                     observed_at INTEGER NOT NULL,
+                     approved_at INTEGER,
+                     PRIMARY KEY (entity_id, benchmark_source, benchmark_id, reasoning_effort),
+                     FOREIGN KEY (entity_id) REFERENCES model_entities(id)
+                 );
+                 CREATE TABLE IF NOT EXISTS approved_entity_aliases (
+                     provider_key TEXT NOT NULL,
+                     provider_model_id TEXT NOT NULL,
+                     entity_id TEXT NOT NULL,
+                     provenance_url TEXT NOT NULL,
+                     approved_at INTEGER NOT NULL,
+                     PRIMARY KEY (provider_key, provider_model_id),
+                     FOREIGN KEY (entity_id) REFERENCES model_entities(id)
+                 );",
         )?;
         ensure_catalog_columns(&connection)?;
         ensure_benchmark_columns(&connection)?;
@@ -382,10 +465,305 @@ impl RoutingStore {
             "DELETE FROM benchmark_snapshots WHERE source = 'pricing-overrides'",
             [],
         )?;
-        connection.pragma_update(None, "user_version", 4)?;
+        connection.pragma_update(None, "user_version", 6)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
+    }
+
+    pub fn approve_model_mapping(
+        &self,
+        provider: &str,
+        catalog_model: &str,
+        benchmark_model: &str,
+    ) -> Result<(), RoutingError> {
+        for (label, value) in [
+            ("provider", provider),
+            ("catalog model", catalog_model),
+            ("benchmark model", benchmark_model),
+        ] {
+            if value.trim().is_empty() || value.len() > 512 {
+                return Err(RoutingError::Background(format!(
+                    "approved mapping {label} must be 1-512 characters"
+                )));
+            }
+        }
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        connection.execute(
+            "INSERT INTO approved_model_mappings(
+                provider, catalog_model, benchmark_model, approved_at
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(provider, catalog_model) DO UPDATE SET
+                benchmark_model = excluded.benchmark_model,
+                approved_at = excluded.approved_at",
+            params![provider, catalog_model, benchmark_model, epoch_seconds()],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_model_mapping(
+        &self,
+        provider: &str,
+        catalog_model: &str,
+    ) -> Result<bool, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        Ok(connection.execute(
+            "DELETE FROM approved_model_mappings WHERE provider = ?1 AND catalog_model = ?2",
+            params![provider, catalog_model],
+        )? > 0)
+    }
+
+    pub fn approved_model_mappings(&self) -> Result<Vec<ApprovedModelMapping>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT provider, catalog_model, benchmark_model, approved_at
+             FROM approved_model_mappings ORDER BY provider, catalog_model",
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok(ApprovedModelMapping {
+                    provider: row.get(0)?,
+                    catalog_model: row.get(1)?,
+                    benchmark_model: row.get(2)?,
+                    approved_at: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn replace_identity_source(&self, import: &IdentityImport) -> Result<i64, RoutingError> {
+        if import.source.trim().is_empty()
+            || import.attribution.trim().is_empty()
+            || import.entities.is_empty()
+            || import.aliases.is_empty()
+        {
+            return Err(RoutingError::Background(
+                "identity snapshot requires source, attribution, entities, and aliases".to_owned(),
+            ));
+        }
+        if import
+            .aliases
+            .iter()
+            .any(|alias| alias.source != import.source)
+        {
+            return Err(RoutingError::Background(
+                "identity alias source must match snapshot source".to_owned(),
+            ));
+        }
+        let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE identity_snapshots SET active = 0 WHERE source = ?1",
+            [&import.source],
+        )?;
+        transaction.execute(
+            "INSERT INTO identity_snapshots(source, fetched_at, active, attribution)
+             VALUES (?1, ?2, 0, ?3)",
+            params![import.source, epoch_seconds(), import.attribution],
+        )?;
+        let snapshot_id = transaction.last_insert_rowid();
+        for entity in &import.entities {
+            transaction.execute(
+                "INSERT INTO model_entities(
+                    id, creator, family, version, variant, release_date,
+                    hugging_face_id, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(id) DO UPDATE SET
+                    creator = COALESCE(excluded.creator, model_entities.creator),
+                    family = COALESCE(excluded.family, model_entities.family),
+                    version = COALESCE(excluded.version, model_entities.version),
+                    variant = COALESCE(excluded.variant, model_entities.variant),
+                    release_date = COALESCE(excluded.release_date, model_entities.release_date),
+                    hugging_face_id = COALESCE(excluded.hugging_face_id, model_entities.hugging_face_id),
+                    updated_at = excluded.updated_at",
+                params![
+                    entity.id,
+                    entity.creator,
+                    entity.family,
+                    entity.version,
+                    entity.variant,
+                    entity.release_date,
+                    entity.hugging_face_id,
+                    epoch_seconds(),
+                ],
+            )?;
+        }
+        for alias in &import.aliases {
+            transaction.execute(
+                "INSERT INTO model_identity_aliases(
+                    snapshot_id, source, provider_key, provider_model_id, entity_id,
+                    confidence, provenance_url, observed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    snapshot_id,
+                    alias.source,
+                    alias.provider_key,
+                    alias.provider_model_id,
+                    alias.entity_id,
+                    alias.confidence.as_str(),
+                    alias.provenance_url,
+                    alias.observed_at,
+                ],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE identity_snapshots SET active = 1 WHERE id = ?1",
+            [snapshot_id],
+        )?;
+        transaction.commit()?;
+        Ok(snapshot_id)
+    }
+
+    pub fn identity_status(&self) -> Result<Vec<(String, i64, u64, String)>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT s.source, s.fetched_at, COUNT(a.provider_model_id), s.attribution
+             FROM identity_snapshots s
+             LEFT JOIN model_identity_aliases a ON a.snapshot_id = s.id
+             WHERE s.active = 1 GROUP BY s.id ORDER BY s.source",
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn active_identity_aliases(&self) -> Result<Vec<IdentityAliasEvidence>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT a.source, a.provider_key, a.provider_model_id, a.entity_id,
+                    a.confidence, a.provenance_url, e.family, e.release_date,
+                    e.hugging_face_id,
+                    (SELECT l.benchmark_id FROM benchmark_identity_links l
+                     WHERE l.entity_id = a.entity_id AND l.approved_at IS NOT NULL
+                     ORDER BY l.approved_at DESC LIMIT 1)
+             FROM model_identity_aliases a
+             JOIN identity_snapshots s ON s.id = a.snapshot_id AND s.active = 1
+             JOIN model_entities e ON e.id = a.entity_id
+             UNION ALL
+             SELECT 'operator', a.provider_key, a.provider_model_id, a.entity_id,
+                    'approved_alias', a.provenance_url, e.family, e.release_date,
+                    e.hugging_face_id,
+                    (SELECT l.benchmark_id FROM benchmark_identity_links l
+                     WHERE l.entity_id = a.entity_id AND l.approved_at IS NOT NULL
+                     ORDER BY l.approved_at DESC LIMIT 1)
+             FROM approved_entity_aliases a
+             JOIN model_entities e ON e.id = a.entity_id
+             ORDER BY 1, 2, 3",
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok(IdentityAliasEvidence {
+                    source: row.get(0)?,
+                    provider_key: row.get(1)?,
+                    provider_model_id: row.get(2)?,
+                    entity_id: row.get(3)?,
+                    confidence: row.get(4)?,
+                    provenance_url: row.get(5)?,
+                    family: row.get(6)?,
+                    release_date: row.get(7)?,
+                    hugging_face_id: row.get(8)?,
+                    approved_benchmark_id: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn approved_identity_references(
+        &self,
+    ) -> Result<Vec<ApprovedIdentityReference>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT a.provider_key, a.provider_model_id, l.benchmark_id
+             FROM model_identity_aliases a
+             JOIN identity_snapshots s ON s.id = a.snapshot_id AND s.active = 1
+             JOIN benchmark_identity_links l
+               ON l.entity_id = a.entity_id AND l.approved_at IS NOT NULL
+             WHERE a.confidence = 'canonical_reference'
+             UNION ALL
+             SELECT a.provider_key, a.provider_model_id, l.benchmark_id
+             FROM approved_entity_aliases a
+             JOIN benchmark_identity_links l
+               ON l.entity_id = a.entity_id AND l.approved_at IS NOT NULL
+             ORDER BY 1, 2, 3",
+        )?;
+        Ok(statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn approve_benchmark_identity_link(
+        &self,
+        entity_id: &str,
+        benchmark_id: &str,
+        provenance_url: &str,
+    ) -> Result<(), RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        connection.execute(
+            "INSERT INTO benchmark_identity_links(
+                entity_id, benchmark_source, benchmark_id, reasoning_effort,
+                confidence, provenance_url, observed_at, approved_at
+             ) VALUES (?1, 'operator', ?2, '', 'approved', ?3, ?4, ?4)
+             ON CONFLICT(entity_id, benchmark_source, benchmark_id, reasoning_effort)
+             DO UPDATE SET confidence = 'approved', provenance_url = excluded.provenance_url,
+                           observed_at = excluded.observed_at, approved_at = excluded.approved_at",
+            params![entity_id, benchmark_id, provenance_url, epoch_seconds()],
+        )?;
+        Ok(())
+    }
+
+    pub fn approve_entity_alias(
+        &self,
+        provider_key: &str,
+        provider_model_id: &str,
+        entity_id: &str,
+        provenance_url: &str,
+    ) -> Result<(), RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        connection.execute(
+            "INSERT INTO approved_entity_aliases(
+                provider_key, provider_model_id, entity_id, provenance_url, approved_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(provider_key, provider_model_id) DO UPDATE SET
+                entity_id = excluded.entity_id,
+                provenance_url = excluded.provenance_url,
+                approved_at = excluded.approved_at",
+            params![
+                provider_key,
+                provider_model_id,
+                entity_id,
+                provenance_url,
+                epoch_seconds()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_entity_alias(
+        &self,
+        provider_key: &str,
+        provider_model_id: &str,
+    ) -> Result<bool, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        Ok(connection.execute(
+            "DELETE FROM approved_entity_aliases
+             WHERE provider_key = ?1 AND provider_model_id = ?2",
+            params![provider_key, provider_model_id],
+        )? > 0)
+    }
+
+    pub fn remove_benchmark_identity_link(
+        &self,
+        entity_id: &str,
+        benchmark_id: &str,
+    ) -> Result<bool, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        Ok(connection.execute(
+            "DELETE FROM benchmark_identity_links
+             WHERE entity_id = ?1 AND benchmark_source = 'operator' AND benchmark_id = ?2",
+            params![entity_id, benchmark_id],
+        )? > 0)
     }
 
     pub fn replace_pricing(
@@ -1943,6 +2321,9 @@ mod tests {
     };
 
     use crate::benchmarks::BenchmarkModel;
+    use crate::identity::{
+        IdentityAliasRecord, IdentityConfidence, IdentityEntityRecord, IdentityImport,
+    };
     use crate::pricing::{PriceObservation, PriceRates, PriceScope, PriceSourceKind};
     use crate::providers::AccountLimit;
 
@@ -2083,6 +2464,158 @@ mod tests {
             valid_until: None,
             attribution: None,
         }
+    }
+
+    #[test]
+    fn approved_model_mappings_persist_update_and_remove() {
+        let directory = tempfile::tempdir().expect("state directory");
+        let path = directory.path().join("routing.sqlite3");
+        let store = RoutingStore::open(Some(&path)).expect("store");
+        store
+            .approve_model_mapping("provider-a", "catalog-model", "benchmark-v1")
+            .expect("approve");
+        let mappings = store.approved_model_mappings().expect("mappings");
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].provider, "provider-a");
+        assert_eq!(mappings[0].catalog_model, "catalog-model");
+        assert_eq!(mappings[0].benchmark_model, "benchmark-v1");
+        drop(store);
+
+        let store = RoutingStore::open(Some(&path)).expect("reopen store");
+        store
+            .approve_model_mapping("provider-a", "catalog-model", "benchmark-v2")
+            .expect("update");
+        let mappings = store.approved_model_mappings().expect("updated mappings");
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].benchmark_model, "benchmark-v2");
+        assert!(
+            store
+                .remove_model_mapping("provider-a", "catalog-model")
+                .expect("remove")
+        );
+        assert!(
+            store
+                .approved_model_mappings()
+                .expect("empty mappings")
+                .is_empty()
+        );
+        assert!(
+            !store
+                .remove_model_mapping("provider-a", "catalog-model")
+                .expect("idempotent remove")
+        );
+    }
+
+    #[test]
+    fn identity_sources_persist_canonical_aliases_and_approved_links() {
+        let store = RoutingStore::open(None).expect("store");
+        let entity_id = "hf:xiaomimimo/mimo-v2.5";
+        let import = IdentityImport {
+            source: "models.dev".to_owned(),
+            attribution: "fixture".to_owned(),
+            entities: vec![IdentityEntityRecord {
+                id: entity_id.to_owned(),
+                creator: Some("xiaomimimo".to_owned()),
+                family: Some("mimo".to_owned()),
+                version: Some("v2.5".to_owned()),
+                variant: None,
+                release_date: Some("2026-04-22".to_owned()),
+                hugging_face_id: Some("XiaomiMiMo/MiMo-V2.5".to_owned()),
+            }],
+            aliases: ["provider-a", "provider-b"]
+                .into_iter()
+                .map(|provider| IdentityAliasRecord {
+                    source: "models.dev".to_owned(),
+                    provider_key: provider.to_owned(),
+                    provider_model_id: "XiaomiMiMo/MiMo-V2.5".to_owned(),
+                    entity_id: entity_id.to_owned(),
+                    confidence: IdentityConfidence::CanonicalReference,
+                    provenance_url: "fixture".to_owned(),
+                    observed_at: 100,
+                })
+                .collect(),
+        };
+        store
+            .replace_identity_source(&import)
+            .expect("identity snapshot");
+        assert_eq!(store.identity_status().expect("status")[0].2, 2);
+        let aliases = store.active_identity_aliases().expect("aliases");
+        assert_eq!(aliases.len(), 2);
+        assert!(
+            aliases
+                .iter()
+                .all(|alias| alias.approved_benchmark_id.is_none())
+        );
+
+        store
+            .approve_entity_alias("provider-c", "bare-model", entity_id, "fixture")
+            .expect("approve alias");
+        assert!(
+            store
+                .active_identity_aliases()
+                .expect("operator alias")
+                .iter()
+                .any(|alias| {
+                    alias.source == "operator"
+                        && alias.provider_key == "provider-c"
+                        && alias.provider_model_id == "bare-model"
+                        && alias.entity_id == entity_id
+                })
+        );
+
+        store
+            .approve_benchmark_identity_link(entity_id, "mimo-v2-5-0424", "fixture")
+            .expect("approve entity link");
+        let aliases = store.active_identity_aliases().expect("linked aliases");
+        assert!(
+            aliases
+                .iter()
+                .all(|alias| { alias.approved_benchmark_id.as_deref() == Some("mimo-v2-5-0424") })
+        );
+        let references = store
+            .approved_identity_references()
+            .expect("approved references");
+        assert_eq!(references.len(), 3);
+        assert!(references.iter().any(|reference| {
+            reference
+                == &(
+                    "provider-c".to_owned(),
+                    "bare-model".to_owned(),
+                    "mimo-v2-5-0424".to_owned(),
+                )
+        }));
+        assert!(
+            store
+                .remove_benchmark_identity_link(entity_id, "mimo-v2-5-0424")
+                .expect("remove entity link")
+        );
+        assert!(
+            store
+                .remove_entity_alias("provider-c", "bare-model")
+                .expect("remove alias")
+        );
+        assert!(
+            store
+                .active_identity_aliases()
+                .expect("unlinked aliases")
+                .iter()
+                .all(|alias| alias.approved_benchmark_id.is_none())
+        );
+
+        let invalid = IdentityImport {
+            source: "models.dev".to_owned(),
+            attribution: "fixture".to_owned(),
+            entities: Vec::new(),
+            aliases: Vec::new(),
+        };
+        assert!(store.replace_identity_source(&invalid).is_err());
+        assert_eq!(
+            store
+                .active_identity_aliases()
+                .expect("preserved aliases")
+                .len(),
+            2
+        );
     }
 
     #[test]

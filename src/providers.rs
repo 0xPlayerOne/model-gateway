@@ -308,7 +308,7 @@ impl ProviderProfileId {
             Self::NvidiaNim => Some("nvidia"),
             Self::Groq => Some("groq"),
             Self::OrcaRouter => Some("orcarouter"),
-            Self::OllamaCloud => Some("ollama"),
+            Self::OllamaCloud => Some("ollama-cloud"),
             Self::SiliconFlow => Some("siliconflow"),
             Self::Ollama | Self::LmStudio | Self::Custom => None,
         }
@@ -999,6 +999,19 @@ mod tests {
         super::prepare_request(AdapterKind::OpenaiChat, &mut request, "upstream")
             .expect("prepare request");
         assert_eq!(request["model"], "upstream");
+    }
+
+    #[test]
+    fn models_dev_keys_match_provider_namespaces() {
+        assert_eq!(
+            BuiltinProvider::OllamaCloud.models_dev_key(),
+            Some("ollama-cloud")
+        );
+        assert_eq!(
+            BuiltinProvider::OpenCodeGo.models_dev_key(),
+            Some("opencode-go")
+        );
+        assert_eq!(BuiltinProvider::KiloCode.models_dev_key(), Some("kilo"));
     }
 
     #[test]

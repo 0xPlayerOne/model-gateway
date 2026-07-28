@@ -28,6 +28,39 @@ All routes filter candidates by:
 - Capability requirements (tools, vision, structured output, context length)
 - Global model denylist
 
+## Model Identity
+
+Runtime routing never consumes heuristic fuzzy matches. A catalog offering may
+receive benchmark quality only from a normalized exact identity, a configured
+`model_mappings` entry, or an operator-approved provider-scoped mapping.
+
+Fuzzy matching is restricted to the offline reconciliation workflow:
+
+```bash
+model-gateway matching reconcile --json
+model-gateway matching reconcile --check
+model-gateway matching refresh
+model-gateway matching explain opencode-go mimo-v2.5
+model-gateway matching approve opencode-go mimo-v2.5 mimo-v2-5-0424
+```
+
+Reconciliation classifies fresh offerings as `exact`, `configured`,
+`approved`, `suggested`, `ambiguous`, or `unmatched`. Suggested and ambiguous
+identities never affect routing until approved. If an approved or configured
+benchmark disappears after refresh, reconciliation reports the mapping as
+unmatched and runtime routing excludes it.
+
+Identity mappings affect benchmark quality only. Provider-scoped pricing is
+resolved independently, so approving a benchmark identity never overwrites a
+gateway's direct, promotional, or aggregate price.
+
+`matching refresh` stores source-backed entities and provider aliases from
+models.dev and OpenRouter. Exact Hugging Face repository IDs form canonical
+entities. An operator may link one of those entities with
+`matching approve-entity`; the benchmark link then applies only to aliases that
+reference that exact canonical entity. Family, display-name, and release-date
+evidence remains suggestion-only.
+
 ## Quality Scoring
 
 All paid routes use **composite quality** instead of task-specific scores:

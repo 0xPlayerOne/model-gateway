@@ -17,6 +17,9 @@ use model_gateway::config::{
     QuotaLimit, ServerConfig, TargetConfig,
 };
 use model_gateway::gateway::build_app;
+use model_gateway::identity::{
+    IdentityAliasRecord, IdentityConfidence, IdentityEntityRecord, IdentityImport,
+};
 use model_gateway::routing::{CatalogRecord, RoutingStore};
 use model_gateway::secrets::SecretResolver;
 use serde_json::{Value, json};
@@ -451,6 +454,220 @@ async fn free_model_listing_task_changes_ranking_not_identity() {
 }
 
 #[tokio::test]
+async fn paid_model_listing_task_changes_ranking_not_identity() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    let catalog = |model: &str| CatalogRecord {
+        model: model.to_owned(),
+        is_free: false,
+        context_length: Some(128_000),
+        supports_tools: Some(true),
+        supports_vision: Some(false),
+        supports_structured_output: Some(false),
+        input_price_per_million: Some(1.0),
+        output_price_per_million: Some(2.0),
+    };
+    store
+        .replace_catalog(
+            "paid-provider",
+            &[catalog("general-model"), catalog("coding-model")],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[
+                BenchmarkModel::fixture("general-model", 90.0, 20.0, 50.0, 1.0, 2.0),
+                BenchmarkModel::fixture("coding-model", 60.0, 95.0, 50.0, 1.0, 2.0),
+            ],
+        )
+        .expect("benchmarks");
+    drop(store);
+
+    let mut paid = provider("https://example.com/v1".to_owned());
+    paid.billing_mode = BillingMode::Paid;
+    let mut config = config_for(
+        BTreeMap::from([("paid-provider".to_owned(), paid)]),
+        vec![TargetConfig {
+            provider: "paid-provider".to_owned(),
+            model: "general-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+
+    for (task, expected) in [("general", "general-model"), ("coding", "coding-model")] {
+        let response = reqwest::Client::new()
+            .get(format!(
+                "{gateway}/v1/paid-models?provider=paid-provider&task={task}"
+            ))
+            .send()
+            .await
+            .expect("paid models response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = response.json().await.expect("paid models body");
+        assert_eq!(body["data"][0]["model"]["name"], expected);
+    }
+}
+
+#[tokio::test]
+async fn opencode_zen_free_models_recover_only_reviewed_benchmarks() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    let free_catalog = |model: &str| CatalogRecord {
+        model: model.to_owned(),
+        is_free: true,
+        context_length: Some(128_000),
+        supports_tools: Some(true),
+        supports_vision: Some(false),
+        supports_structured_output: Some(false),
+        input_price_per_million: Some(0.0),
+        output_price_per_million: Some(0.0),
+    };
+    let free_models = [
+        "big-pickle",
+        "deepseek-v4-flash-free",
+        "laguna-s-2.1-free",
+        "ling-3.0-flash-free",
+        "mimo-v2.5-free",
+        "nemotron-3-ultra-free",
+        "north-mini-code-free",
+    ];
+    store
+        .replace_catalog(
+            "opencode-zen",
+            &free_models
+                .iter()
+                .map(|model| free_catalog(model))
+                .collect::<Vec<_>>(),
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[
+                BenchmarkModel::fixture("deepseek-v4-flash", 41.0, 41.0, 41.0, 0.0, 0.0),
+                BenchmarkModel::fixture("mimo-v2-5-0424", 38.0, 38.0, 38.0, 0.0, 0.0),
+                BenchmarkModel::fixture(
+                    "nvidia-nemotron-3-ultra-550b-a55b",
+                    38.0,
+                    38.0,
+                    38.0,
+                    0.0,
+                    0.0,
+                ),
+                BenchmarkModel::fixture("north-mini-code", 32.0, 32.0, 32.0, 0.0, 0.0),
+            ],
+        )
+        .expect("benchmarks");
+    let entities = [
+        ("hf:xiaomimimo/mimo-v2.5", "mimo-v2-5-0424"),
+        (
+            "hf:nvidia/nvidia-nemotron-3-ultra-550b-a55b-bf16",
+            "nvidia-nemotron-3-ultra-550b-a55b",
+        ),
+    ];
+    store
+        .replace_identity_source(&IdentityImport {
+            source: "fixture".to_owned(),
+            attribution: "Fixture".to_owned(),
+            entities: entities
+                .iter()
+                .map(|(entity_id, _)| IdentityEntityRecord {
+                    id: (*entity_id).to_owned(),
+                    creator: None,
+                    family: None,
+                    version: None,
+                    variant: None,
+                    release_date: None,
+                    hugging_face_id: Some(entity_id.trim_start_matches("hf:").to_owned()),
+                })
+                .collect(),
+            aliases: entities
+                .iter()
+                .map(|(entity_id, _)| IdentityAliasRecord {
+                    source: "fixture".to_owned(),
+                    provider_key: "canonical".to_owned(),
+                    provider_model_id: (*entity_id).to_owned(),
+                    entity_id: (*entity_id).to_owned(),
+                    confidence: IdentityConfidence::CanonicalReference,
+                    provenance_url: "fixture".to_owned(),
+                    observed_at: 100,
+                })
+                .collect(),
+        })
+        .expect("identities");
+    for (entity_id, benchmark_id) in entities {
+        store
+            .approve_benchmark_identity_link(entity_id, benchmark_id, "fixture")
+            .expect("entity benchmark");
+    }
+    store
+        .approve_entity_alias(
+            "opencode",
+            "mimo-v2.5-free",
+            "hf:xiaomimimo/mimo-v2.5",
+            "fixture",
+        )
+        .expect("MiMo alias");
+    store
+        .approve_entity_alias(
+            "opencode",
+            "nemotron-3-ultra-free",
+            "hf:nvidia/nvidia-nemotron-3-ultra-550b-a55b-bf16",
+            "fixture",
+        )
+        .expect("Nemotron alias");
+    drop(store);
+
+    let mut zen = provider("https://example.com/v1".to_owned());
+    zen.pricing_profile = Some("opencode".to_owned());
+    let mut config = config_for(
+        BTreeMap::from([("opencode-zen".to_owned(), zen)]),
+        vec![TargetConfig {
+            provider: "opencode-zen".to_owned(),
+            model: "deepseek-v4-flash-free".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.free_models_quality.min_composite_quality = 0.0;
+    config.server.free_models_quality.max_age_months = 0;
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway}/v1/free-models?provider=opencode-zen&task=general&limit=100"
+        ))
+        .send()
+        .await
+        .expect("Zen free models");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("Zen body");
+    let models = body["data"]
+        .as_array()
+        .expect("model array")
+        .iter()
+        .map(|entry| {
+            (
+                entry["model"]["name"].as_str().expect("model name"),
+                entry["benchmark_match"].as_str(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(models.len(), 7);
+    assert_eq!(models["deepseek-v4-flash-free"], Some("exact"));
+    assert_eq!(models["north-mini-code-free"], Some("exact"));
+    assert_eq!(models["mimo-v2.5-free"], Some("approved"));
+    assert_eq!(models["nemotron-3-ultra-free"], Some("approved"));
+    assert_eq!(models["laguna-s-2.1-free"], None);
+    assert_eq!(models["ling-3.0-flash-free"], None);
+    assert_eq!(models["big-pickle"], None);
+}
+
+#[tokio::test]
 async fn free_models_keep_a_high_quality_effort_variant() {
     let directory = tempfile::tempdir().expect("state directory");
     let state_path = directory.path().join("routing.sqlite3");
@@ -605,6 +822,8 @@ async fn auto_models_keep_base_and_pro_variants_in_separate_modes() {
 
     let mut paid = provider("https://example.com/v1".to_owned());
     paid.billing_mode = BillingMode::Paid;
+    paid.model_mappings
+        .insert("mimo-v2.5".to_owned(), "mimo-v2-5-0424".to_owned());
     let mut config = config_for(
         BTreeMap::from([("paid-provider".to_owned(), paid)]),
         vec![TargetConfig {
@@ -623,8 +842,16 @@ async fn auto_models_keep_base_and_pro_variants_in_separate_modes() {
     let body: Value = response.json().await.expect("auto models body");
     assert_eq!(body["routes"]["efficient"]["primary"]["model"], "mimo-v2.5");
     assert_eq!(
+        body["routes"]["efficient"]["primary"]["benchmark_match"],
+        "configured"
+    );
+    assert_eq!(
         body["routes"]["balanced"]["primary"]["model"],
         "mimo-v2.5-pro"
+    );
+    assert_eq!(
+        body["routes"]["balanced"]["primary"]["benchmark_match"],
+        "exact"
     );
 }
 
@@ -2298,6 +2525,10 @@ async fn auto_efficient_uses_canonical_mapping_and_reasoning_effort() {
         "High"
     );
     assert_eq!(
+        response.headers()["x-model-gateway-benchmark-match"],
+        "configured"
+    );
+    assert_eq!(
         response.headers()["x-model-gateway-canonical-model"],
         "canonical-model"
     );
@@ -3452,6 +3683,180 @@ async fn auto_balanced_with_no_benchmarks_returns_error() {
         .expect("auto-balanced response");
     // No benchmarks, no free models, no local → error
     assert!(response.status().is_client_error() || response.status().is_server_error());
+}
+
+#[tokio::test]
+async fn runtime_rejects_suggestions_until_mapping_is_approved() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "paid-provider",
+            &[CatalogRecord {
+                model: "model-family".to_owned(),
+                is_free: false,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: Some(1.0),
+                output_price_per_million: Some(2.0),
+            }],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "model-family-2025",
+                50.0,
+                50.0,
+                50.0,
+                1.0,
+                2.0,
+            )],
+        )
+        .expect("benchmarks");
+
+    let mut paid = provider(format!("http://{upstream}/v1"));
+    paid.billing_mode = BillingMode::Paid;
+    let mut config = config_for(
+        BTreeMap::from([("paid-provider".to_owned(), paid)]),
+        vec![TargetConfig {
+            provider: "paid-provider".to_owned(),
+            model: "model-family".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.auto_free_enabled = false;
+    config.server.local_base_url = "http://127.0.0.1:1/v1".to_owned();
+    let gateway = spawn_gateway(config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-balanced",
+            "messages": [{"role": "user", "content": "before approval"}]
+        }))
+        .send()
+        .await
+        .expect("unapproved response");
+    assert!(!response.status().is_success());
+
+    store
+        .approve_model_mapping("paid-provider", "model-family", "model-family-2025")
+        .expect("approve mapping");
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-balanced",
+            "messages": [{"role": "user", "content": "after approval"}]
+        }))
+        .send()
+        .await
+        .expect("approved response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-model-gateway-benchmark-match"],
+        "approved"
+    );
+}
+
+#[tokio::test]
+async fn canonical_entity_link_propagates_to_exact_provider_alias() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "paid-provider",
+            &[CatalogRecord {
+                model: "Vendor/Canonical-Model".to_owned(),
+                is_free: false,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: Some(1.0),
+                output_price_per_million: Some(2.0),
+            }],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "canonical-benchmark",
+                50.0,
+                50.0,
+                50.0,
+                1.0,
+                2.0,
+            )],
+        )
+        .expect("benchmarks");
+    let entity_id = "hf:vendor/canonical-model";
+    store
+        .replace_identity_source(&IdentityImport {
+            source: "models.dev".to_owned(),
+            attribution: "Fixture".to_owned(),
+            entities: vec![IdentityEntityRecord {
+                id: entity_id.to_owned(),
+                creator: Some("vendor".to_owned()),
+                family: Some("canonical".to_owned()),
+                version: None,
+                variant: None,
+                release_date: None,
+                hugging_face_id: Some("Vendor/Canonical-Model".to_owned()),
+            }],
+            aliases: vec![IdentityAliasRecord {
+                source: "models.dev".to_owned(),
+                provider_key: "paid-profile".to_owned(),
+                provider_model_id: "Vendor/Canonical-Model".to_owned(),
+                entity_id: entity_id.to_owned(),
+                confidence: IdentityConfidence::CanonicalReference,
+                provenance_url: "fixture".to_owned(),
+                observed_at: 100,
+            }],
+        })
+        .expect("identities");
+    store
+        .approve_benchmark_identity_link(entity_id, "canonical-benchmark", "fixture")
+        .expect("entity link");
+
+    let mut paid = provider(format!("http://{upstream}/v1"));
+    paid.billing_mode = BillingMode::Paid;
+    paid.pricing_profile = Some("paid-profile".to_owned());
+    let mut config = config_for(
+        BTreeMap::from([("paid-provider".to_owned(), paid)]),
+        vec![TargetConfig {
+            provider: "paid-provider".to_owned(),
+            model: "Vendor/Canonical-Model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.auto_free_enabled = false;
+    config.server.local_base_url = "http://127.0.0.1:1/v1".to_owned();
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-balanced",
+            "messages": [{"role": "user", "content": "canonical entity"}]
+        }))
+        .send()
+        .await
+        .expect("entity-linked response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-model-gateway-benchmark-match"],
+        "approved"
+    );
 }
 
 #[tokio::test]

@@ -14,7 +14,10 @@ use model_gateway::config::{
     BillingMode, Config, ConfigError, Exposure, ModelConfig, QuotaBoundary, QuotaKind, QuotaLimit,
     TargetConfig,
 };
-use model_gateway::gateway::run_server;
+use model_gateway::gateway::{
+    ModelMatchKind, is_exact_model_identity, reconcile_model_matches, run_server,
+};
+use model_gateway::identity::fetch_identity_sources;
 use model_gateway::pricing::{ManualPriceImport, PriceSourceKind, fetch_models_dev};
 use model_gateway::providers::{
     BuiltinProvider, ConnectionCheck, fetch_account_limit, fetch_catalog,
@@ -58,6 +61,10 @@ enum Command {
     Pricing {
         #[command(subcommand)]
         command: PricingCommand,
+    },
+    Matching {
+        #[command(subcommand)]
+        command: MatchingCommand,
     },
     Refresh,
     Healthcheck {
@@ -131,6 +138,50 @@ enum PricingCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum MatchingCommand {
+    Refresh,
+    Status,
+    Reconcile {
+        #[arg(long, help = "Reconcile only one configured provider")]
+        provider: Option<String>,
+        #[arg(long, help = "Emit machine-readable JSON")]
+        json: bool,
+        #[arg(long, help = "Fail when mappings drift or identities become ambiguous")]
+        check: bool,
+    },
+    Approve {
+        provider: String,
+        catalog_model: String,
+        benchmark_model: String,
+    },
+    ApproveEntity {
+        entity_id: String,
+        benchmark_model: String,
+    },
+    LinkAlias {
+        provider_key: String,
+        provider_model_id: String,
+        entity_id: String,
+    },
+    Remove {
+        provider: String,
+        catalog_model: String,
+    },
+    RemoveEntity {
+        entity_id: String,
+        benchmark_model: String,
+    },
+    UnlinkAlias {
+        provider_key: String,
+        provider_model_id: String,
+    },
+    Explain {
+        provider: String,
+        catalog_model: String,
+    },
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     init_logging()?;
     let cli = Cli::parse();
@@ -146,6 +197,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::Catalog { command } => catalog(command)?,
         Command::Benchmarks { command } => benchmarks(command)?,
         Command::Pricing { command } => pricing(command)?,
+        Command::Matching { command } => matching(command)?,
         Command::Refresh => refresh_all()?,
         Command::Healthcheck { endpoint } => healthcheck(&endpoint)?,
         Command::Serve => tokio::runtime::Runtime::new()?.block_on(serve())?,
@@ -337,6 +389,228 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
+    let resolver = SecretResolver::default();
+    let config = Config::load(Config::default_path(), &resolver)?;
+    let store = RoutingStore::open(config.server.state_path.as_deref())?;
+    match command {
+        MatchingCommand::Refresh => {
+            for import in fetch_identity_sources()? {
+                let snapshot = store.replace_identity_source(&import)?;
+                println!(
+                    "Refreshed {}: {} entities, {} aliases, snapshot={snapshot}",
+                    import.source,
+                    import.entities.len(),
+                    import.aliases.len()
+                );
+            }
+        }
+        MatchingCommand::Status => {
+            let status = store.identity_status()?;
+            if status.is_empty() {
+                println!("No active identity snapshots");
+            }
+            for (source, fetched_at, aliases, attribution) in status {
+                println!(
+                    "{source}: {aliases} aliases, fetched_at={fetched_at}, attribution={attribution}"
+                );
+            }
+        }
+        MatchingCommand::Reconcile {
+            provider,
+            json,
+            check,
+        } => {
+            if provider
+                .as_ref()
+                .is_some_and(|name| !config.providers.contains_key(name))
+            {
+                return Err(format!("unknown provider '{}'", provider.unwrap()).into());
+            }
+            let report = reconcile_model_matches(&config, &store, provider.as_deref())?;
+            let drift = report.iter().any(|entry| {
+                entry.status == ModelMatchKind::Ambiguous
+                    || (entry.status == ModelMatchKind::Unmatched
+                        && matches!(
+                            entry.source.as_deref(),
+                            Some("config" | "registry" | "canonical_entity")
+                        ))
+            });
+            let mut summary = BTreeMap::<&str, usize>::new();
+            for entry in &report {
+                *summary.entry(entry.status.as_str()).or_default() += 1;
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "summary": summary,
+                        "models": report,
+                    }))?
+                );
+            } else {
+                for entry in &report {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        entry.status.as_str(),
+                        entry.provider,
+                        entry.catalog_model,
+                        entry.benchmark_model.as_deref().unwrap_or("-"),
+                        entry.alternatives.join(",")
+                    );
+                }
+                println!("Summary:");
+                for (status, count) in summary {
+                    println!("  {status}: {count}");
+                }
+            }
+            if check && drift {
+                return Err(
+                    "model identity reconciliation detected mapping drift or ambiguity".into(),
+                );
+            }
+        }
+        MatchingCommand::Approve {
+            provider,
+            catalog_model,
+            benchmark_model,
+        } => {
+            let provider_config = config
+                .providers
+                .get(&provider)
+                .ok_or_else(|| format!("unknown provider '{provider}'"))?;
+            if provider_config.model_mappings.contains_key(&catalog_model) {
+                return Err(format!(
+                    "'{provider}/{catalog_model}' already has a configured model mapping"
+                )
+                .into());
+            }
+            let offering_exists = store
+                .all_candidates(config.server.catalog_max_age_seconds)?
+                .into_iter()
+                .any(|offering| offering.provider == provider && offering.model == catalog_model);
+            if !offering_exists {
+                return Err(format!(
+                    "fresh catalog offering '{provider}/{catalog_model}' does not exist"
+                )
+                .into());
+            }
+            let benchmark_model = store
+                .benchmark_models(config.server.benchmark_max_age_seconds)?
+                .into_iter()
+                .find(|benchmark| is_exact_model_identity(&benchmark.id, &benchmark_model))
+                .map(|benchmark| benchmark.id)
+                .ok_or_else(|| {
+                    format!("active benchmark model '{benchmark_model}' does not exist")
+                })?;
+            store.approve_model_mapping(&provider, &catalog_model, &benchmark_model)?;
+            println!("Approved {provider}/{catalog_model} -> {benchmark_model}");
+        }
+        MatchingCommand::ApproveEntity {
+            entity_id,
+            benchmark_model,
+        } => {
+            let entity_exists = store
+                .active_identity_aliases()?
+                .into_iter()
+                .any(|alias| alias.entity_id == entity_id);
+            if !entity_exists {
+                return Err(format!("active identity entity '{entity_id}' does not exist").into());
+            }
+            let benchmark_model = store
+                .benchmark_models(config.server.benchmark_max_age_seconds)?
+                .into_iter()
+                .find(|benchmark| is_exact_model_identity(&benchmark.id, &benchmark_model))
+                .map(|benchmark| benchmark.id)
+                .ok_or_else(|| {
+                    format!("active benchmark model '{benchmark_model}' does not exist")
+                })?;
+            store.approve_benchmark_identity_link(
+                &entity_id,
+                &benchmark_model,
+                "operator-approved canonical entity",
+            )?;
+            println!("Approved entity {entity_id} -> {benchmark_model}");
+        }
+        MatchingCommand::LinkAlias {
+            provider_key,
+            provider_model_id,
+            entity_id,
+        } => {
+            let aliases = store.active_identity_aliases()?;
+            let source_alias = aliases
+                .iter()
+                .find(|alias| {
+                    alias.source != "operator"
+                        && alias.provider_key == provider_key
+                        && is_exact_model_identity(&alias.provider_model_id, &provider_model_id)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "source-backed alias '{provider_key}/{provider_model_id}' does not exist"
+                    )
+                })?;
+            if !aliases.iter().any(|alias| alias.entity_id == entity_id) {
+                return Err(format!("active identity entity '{entity_id}' does not exist").into());
+            }
+            store.approve_entity_alias(
+                &provider_key,
+                &source_alias.provider_model_id,
+                &entity_id,
+                "operator-approved provider alias",
+            )?;
+            println!(
+                "Linked {provider_key}/{} -> {entity_id}",
+                source_alias.provider_model_id
+            );
+        }
+        MatchingCommand::Remove {
+            provider,
+            catalog_model,
+        } => {
+            if store.remove_model_mapping(&provider, &catalog_model)? {
+                println!("Removed approved mapping for {provider}/{catalog_model}");
+            } else {
+                println!("No approved mapping for {provider}/{catalog_model}");
+            }
+        }
+        MatchingCommand::RemoveEntity {
+            entity_id,
+            benchmark_model,
+        } => {
+            if store.remove_benchmark_identity_link(&entity_id, &benchmark_model)? {
+                println!("Removed entity mapping {entity_id} -> {benchmark_model}");
+            } else {
+                println!("No entity mapping {entity_id} -> {benchmark_model}");
+            }
+        }
+        MatchingCommand::UnlinkAlias {
+            provider_key,
+            provider_model_id,
+        } => {
+            if store.remove_entity_alias(&provider_key, &provider_model_id)? {
+                println!("Unlinked {provider_key}/{provider_model_id}");
+            } else {
+                println!("No approved alias {provider_key}/{provider_model_id}");
+            }
+        }
+        MatchingCommand::Explain {
+            provider,
+            catalog_model,
+        } => {
+            let report = reconcile_model_matches(&config, &store, Some(&provider))?;
+            let entry = report
+                .into_iter()
+                .find(|entry| entry.catalog_model == catalog_model)
+                .ok_or_else(|| {
+                    format!("fresh catalog offering '{provider}/{catalog_model}' does not exist")
+                })?;
+            println!("{}", serde_json::to_string_pretty(&entry)?);
+        }
+    }
+    Ok(())
+}
+
 fn refresh_all() -> Result<(), Box<dyn Error>> {
     let resolver = SecretResolver::default();
     Config::load(Config::default_path(), &resolver)?;
@@ -344,6 +618,10 @@ fn refresh_all() -> Result<(), Box<dyn Error>> {
     if let Err(error) = pricing(PricingCommand::Refresh) {
         println!("Pricing refresh failed: {error}");
         failures.push(format!("pricing: {error}"));
+    }
+    if let Err(error) = matching(MatchingCommand::Refresh) {
+        println!("Identity refresh failed: {error}");
+        failures.push(format!("identity: {error}"));
     }
     if let Err(error) = catalog(CatalogCommand::Refresh { provider: None }) {
         println!("Catalog refresh failed: {error}");
