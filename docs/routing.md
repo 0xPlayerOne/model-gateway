@@ -86,7 +86,7 @@ Relays the only model reported by an OpenAI-compatible endpoint. Default endpoin
 
 Selects the best free model. Filter + rank pipeline:
 
-1. **Access classification** — derive `zero_price`, `quota_limited_free_tier`, or `paid` from the catalog signal and current provider billing mode
+1. **Access classification** — derive `zero_price`, `quota_limited_free_tier`, `subscription_included`, or `paid` from the catalog signal and current provider billing mode
 2. **Availability** — exclude quota-tier models when a recorded account snapshot reports no remaining free quota or a paid account; exhausted state remains blocking until explicitly refreshed
 3. **Quality bar** — `free_models_quality.passes()` filters by minimum composite quality (default 30), max age, reference price ($2 input, $10 output), min context length, and min model size
 4. **Quality regret** — exclude benchmarked models more than `max_quality_regret` points (default 8) below the best currently available candidate
@@ -122,6 +122,8 @@ Best bang-for-buck. Quality floor: **40**. Pipeline:
 8. **Fallback** — `auto-free` → `local`
 
 Expected cost is computed from the offering's input/output prices and estimated request tokens. Cost-based quota windows impose spend caps.
+
+Models from profiles with known included-subscription semantics report effective cost zero with `source: "subscription"`, while reference prices remain available for Pareto efficiency ranking and diagnostics. They are eligible for efficient/balanced/frontier routes, never `auto-free`. A generic provider configured with `billing_mode = "subscription"` remains priced unless its profile explicitly supports included inference.
 
 ## `auto-balanced`
 

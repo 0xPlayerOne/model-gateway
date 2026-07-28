@@ -16,6 +16,7 @@ not gateway providers.
 | Provider group | Canonical Hermes IDs | Wire/auth family | Gateway status |
 | --- | --- | --- | --- |
 | Custom endpoint | `custom` | OpenAI Chat / configured secret | Gateway contract-tested; Hermes model discovery and tool-bearing non-streaming request integration-tested with deterministic local provider |
+| CLIProxyAPI OAuth sidecar | `cli-proxy` | OpenAI Chat / loopback bearer key; upstream Claude/Codex OAuth | Pinned local sidecar profile; installer/config/status contract-tested; live OAuth requires user-controlled subscription accounts |
 | OpenRouter | `openrouter` | OpenAI Chat / API key | Built-in profile; authenticated validation contract-tested |
 | Ollama | custom endpoint | OpenAI Chat / local | Built-in profile; profile and OpenAI wire contract-tested |
 | LM Studio | `lmstudio` | OpenAI Chat / optional local key | Built-in profile; profile and OpenAI wire contract-tested |
@@ -33,7 +34,7 @@ not gateway providers.
 | Vertex AI | `vertex` | Vertex OpenAI-compatible / OAuth | Planned credential adapter |
 | Azure Foundry | `azure-foundry` | OpenAI-compatible / API key or Entra | Planned credential adapter |
 | AWS Bedrock | `bedrock` | Bedrock Converse / AWS credentials | Planned native adapter |
-| xAI, Copilot, Codex | `xai`, `copilot`, `openai-codex` | Responses/Chat / API or OAuth | Planned adapters |
+| xAI, Copilot, Codex | `xai`, `copilot`, `openai-codex` | Responses/Chat / API or OAuth | Codex OAuth available through CLIProxyAPI; native adapters remain planned |
 | Nous Portal, Qwen OAuth, MiniMax OAuth | `nous`, `qwen-oauth`, `minimax-oauth` | Provider-specific / OAuth | Planned OAuth flows |
 | GitHub Copilot ACP | `copilot-acp` | Local ACP subprocess | Planned isolated adapter |
 

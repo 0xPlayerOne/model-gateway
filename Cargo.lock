@@ -912,6 +912,7 @@ dependencies = [
  "clap",
  "dialoguer",
  "futures-util",
+ "getrandom 0.4.3",
  "keyring",
  "reqwest",
  "rusqlite",

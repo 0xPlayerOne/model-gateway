@@ -51,6 +51,7 @@ pub struct CatalogOffering {
 pub enum AccessKind {
     ZeroPrice,
     QuotaLimitedFreeTier,
+    SubscriptionIncluded,
     Paid,
     Unknown,
 }
@@ -60,10 +61,29 @@ impl AccessKind {
         matches!(self, Self::ZeroPrice | Self::QuotaLimitedFreeTier)
     }
 
+    pub const fn has_zero_effective_price(self) -> bool {
+        matches!(
+            self,
+            Self::ZeroPrice | Self::QuotaLimitedFreeTier | Self::SubscriptionIncluded
+        )
+    }
+
+    pub const fn uses_reference_cost(self) -> bool {
+        matches!(
+            self,
+            Self::QuotaLimitedFreeTier | Self::SubscriptionIncluded
+        )
+    }
+
+    pub const fn is_paid_route_eligible(self) -> bool {
+        matches!(self, Self::SubscriptionIncluded | Self::Paid)
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ZeroPrice => "zero_price",
             Self::QuotaLimitedFreeTier => "quota_limited_free_tier",
+            Self::SubscriptionIncluded => "subscription_included",
             Self::Paid => "paid",
             Self::Unknown => "unknown",
         }
@@ -73,6 +93,7 @@ impl AccessKind {
         match value {
             "zero_price" => Self::ZeroPrice,
             "quota_limited_free_tier" => Self::QuotaLimitedFreeTier,
+            "subscription_included" => Self::SubscriptionIncluded,
             "paid" => Self::Paid,
             _ => Self::Unknown,
         }
@@ -149,6 +170,11 @@ pub type PricingSnapshotStatus = (String, String, i64, u64, String);
 
 pub const PROVIDER_LIMIT_REFERENCES: &[ProviderLimitReference] = &[
     limit(ProviderProfileId::Custom, "", "user_defined"),
+    limit(
+        ProviderProfileId::CliProxyApi,
+        "https://github.com/router-for-me/CLIProxyAPI",
+        "sidecar_account_pool",
+    ),
     limit(
         ProviderProfileId::OpenRouter,
         "https://openrouter.ai/docs/api/reference/limits",
@@ -306,7 +332,7 @@ impl RoutingStore {
         };
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 7 {
+        if version > 8 {
             return Err(RoutingError::UnsupportedSchema(version));
         }
         connection.execute_batch(
@@ -517,7 +543,7 @@ impl RoutingStore {
             "DELETE FROM benchmark_snapshots WHERE source = 'pricing-overrides'",
             [],
         )?;
-        connection.pragma_update(None, "user_version", 7)?;
+        connection.pragma_update(None, "user_version", 8)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -1885,14 +1911,14 @@ pub fn classify_access(provider: &ProviderConfig, model: &str, zero_priced: bool
         return if explicitly_free {
             AccessKind::ZeroPrice
         } else {
-            AccessKind::Paid
+            non_free_access(provider)
         };
     }
     if provider.profile == Some(ProviderProfileId::KiloCode) {
         return if explicitly_free || lower.contains("free") {
             AccessKind::ZeroPrice
         } else {
-            AccessKind::Paid
+            non_free_access(provider)
         };
     }
     if zero_priced || explicitly_free {
@@ -1912,7 +1938,7 @@ pub fn classify_access(provider: &ProviderConfig, model: &str, zero_priced: bool
         _ => {}
     }
     if provider.billing_mode != BillingMode::Free {
-        return AccessKind::Paid;
+        return non_free_access(provider);
     }
     if matches!(
         provider.profile,
@@ -1924,6 +1950,19 @@ pub fn classify_access(provider: &ProviderConfig, model: &str, zero_priced: bool
             | Some(ProviderProfileId::SiliconFlow)
     ) {
         AccessKind::QuotaLimitedFreeTier
+    } else {
+        AccessKind::Paid
+    }
+}
+
+const fn non_free_access(provider: &ProviderConfig) -> AccessKind {
+    if matches!(provider.billing_mode, BillingMode::Subscription)
+        && matches!(
+            provider.profile,
+            Some(ProviderProfileId::CliProxyApi | ProviderProfileId::OpenCodeGo)
+        )
+    {
+        AccessKind::SubscriptionIncluded
     } else {
         AccessKind::Paid
     }
@@ -2446,7 +2485,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v7_backfills_free_access_kinds() {
+    fn schema_v8_backfills_v6_free_access_kinds() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("routing.sqlite3");
         let connection = rusqlite::Connection::open(&path).expect("legacy database");
@@ -2487,7 +2526,46 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
+    }
+
+    #[test]
+    fn schema_v8_preserves_v7_catalog_access_kinds() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("routing.sqlite3");
+        let connection = rusqlite::Connection::open(&path).expect("v7 database");
+        connection
+            .execute_batch(
+                "CREATE TABLE catalog_models (
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    is_free INTEGER NOT NULL,
+                    refreshed_at INTEGER NOT NULL,
+                    context_length INTEGER,
+                    supports_tools INTEGER,
+                    supports_vision INTEGER,
+                    supports_structured_output INTEGER,
+                    input_price_per_million REAL,
+                    output_price_per_million REAL,
+                    access_kind TEXT NOT NULL DEFAULT 'unknown',
+                    PRIMARY KEY (provider, model)
+                );
+                INSERT INTO catalog_models VALUES
+                    ('cli-proxy', 'gpt-subscription', 0, 9999999999, NULL, 1, 1, 1, 1.25, 10, 'subscription_included');
+                PRAGMA user_version = 7;",
+            )
+            .expect("v7 schema");
+        drop(connection);
+
+        let store = RoutingStore::open(Some(&path)).expect("migrated store");
+        let offerings = store.all_candidates(u64::MAX).expect("offerings");
+        assert_eq!(offerings.len(), 1);
+        assert_eq!(offerings[0].access_kind, AccessKind::SubscriptionIncluded);
+        let connection = rusqlite::Connection::open(path).expect("migrated database");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(version, 8);
     }
 
     #[test]
@@ -2539,6 +2617,29 @@ mod tests {
         assert_eq!(
             super::classify_access(&provider, "model", false),
             AccessKind::ZeroPrice
+        );
+    }
+
+    #[test]
+    fn subscription_access_preserves_explicit_zero_price_models() {
+        let mut provider = ProviderConfig {
+            profile: Some(ProviderProfileId::CliProxyApi),
+            billing_mode: BillingMode::Subscription,
+            ..ProviderConfig::default()
+        };
+        assert_eq!(
+            super::classify_access(&provider, "subscription-model", false),
+            AccessKind::SubscriptionIncluded
+        );
+        provider.free_models.push("always-free".to_owned());
+        assert_eq!(
+            super::classify_access(&provider, "always-free", false),
+            AccessKind::ZeroPrice
+        );
+        provider.profile = None;
+        assert_eq!(
+            super::classify_access(&provider, "billable-custom-model", false),
+            AccessKind::Paid
         );
     }
 
