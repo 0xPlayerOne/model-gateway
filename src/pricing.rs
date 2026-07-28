@@ -216,6 +216,8 @@ impl PriceObservation {
 pub struct EffectivePrice {
     pub input_price_per_million: f64,
     pub output_price_per_million: f64,
+    pub cache_read_price_per_million: Option<f64>,
+    pub cache_write_price_per_million: Option<f64>,
     pub source: String,
     pub source_kind: PriceSourceKind,
     pub scope: PriceScope,
@@ -232,6 +234,8 @@ impl EffectivePrice {
         Some(Self {
             input_price_per_million: observation.rates.input_price_per_million?,
             output_price_per_million: observation.rates.output_price_per_million?,
+            cache_read_price_per_million: observation.rates.cache_read_price_per_million,
+            cache_write_price_per_million: observation.rates.cache_write_price_per_million,
             source: observation.source.clone(),
             source_kind: observation.source_kind,
             scope: observation.scope,
@@ -352,7 +356,7 @@ mod tests {
         let observations = parse_models_dev(
             &json!({
                 "opencode-go": {"models": {
-                    "mimo-v2-pro": {"cost": {"input": 1.0, "output": 3.0}, "last_updated": "2026-07-01"}
+                    "mimo-v2-pro": {"cost": {"input": 1.0, "output": 3.0, "cache_read": 0.25, "cache_write": 4.0}, "last_updated": "2026-07-01"}
                 }},
                 "kilo": {"models": {
                     "step-3.7-flash": {"cost": {"input": 0, "output": 0}}
@@ -365,6 +369,14 @@ mod tests {
         assert_eq!(observations[0].provider_key.as_deref(), Some("kilo"));
         assert_eq!(observations[1].provider_key.as_deref(), Some("opencode-go"));
         assert_eq!(observations[0].rates.input_price_per_million, Some(0.0));
+        assert_eq!(
+            observations[1].rates.cache_read_price_per_million,
+            Some(0.25)
+        );
+        assert_eq!(
+            observations[1].rates.cache_write_price_per_million,
+            Some(4.0)
+        );
     }
 
     #[test]
@@ -386,6 +398,34 @@ mod tests {
             attribution: None,
         };
         assert!(super::EffectivePrice::from_observation(&observation, true).is_none());
+    }
+
+    #[test]
+    fn effective_price_preserves_cache_rates() {
+        let observation = PriceObservation {
+            source: "models.dev".to_owned(),
+            source_kind: PriceSourceKind::ModelsDev,
+            scope: PriceScope::ProviderProfile,
+            provider_key: Some("fixture".to_owned()),
+            model_id: "model".to_owned(),
+            rates: PriceRates {
+                input_price_per_million: Some(1.0),
+                output_price_per_million: Some(2.0),
+                cache_read_price_per_million: Some(0.25),
+                cache_write_price_per_million: Some(3.0),
+                ..PriceRates::default()
+            },
+            fetched_at: Some(100),
+            as_of: None,
+            valid_from: None,
+            valid_until: None,
+            attribution: None,
+        };
+
+        let effective =
+            super::EffectivePrice::from_observation(&observation, false).expect("complete pricing");
+        assert_eq!(effective.cache_read_price_per_million, Some(0.25));
+        assert_eq!(effective.cache_write_price_per_million, Some(3.0));
     }
 
     #[test]

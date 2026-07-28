@@ -274,6 +274,8 @@ pub struct PricingCoverageReport {
     pub catalog_output_price_per_million: Option<f64>,
     pub effective_input_price_per_million: Option<f64>,
     pub effective_output_price_per_million: Option<f64>,
+    pub effective_cache_read_price_per_million: Option<f64>,
+    pub effective_cache_write_price_per_million: Option<f64>,
     pub effective_source: Option<String>,
     pub effective_scope: Option<PriceScope>,
     pub estimated: Option<bool>,
@@ -346,6 +348,12 @@ pub fn report_pricing_coverage(
                 effective_output_price_per_million: effective
                     .as_ref()
                     .map(|price| price.output_price_per_million),
+                effective_cache_read_price_per_million: effective
+                    .as_ref()
+                    .and_then(|price| price.cache_read_price_per_million),
+                effective_cache_write_price_per_million: effective
+                    .as_ref()
+                    .and_then(|price| price.cache_write_price_per_million),
                 effective_source: effective.as_ref().map(|price| price.source.clone()),
                 effective_scope: effective.as_ref().map(|price| price.scope),
                 estimated: effective.as_ref().map(|price| price.estimated),
@@ -1486,6 +1494,14 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
         "price_per_million": {
             "input": input_price,
             "output": output_price,
+            "cache_read": entry
+                .price
+                .as_ref()
+                .and_then(|price| price.cache_read_price_per_million),
+            "cache_write": entry
+                .price
+                .as_ref()
+                .and_then(|price| price.cache_write_price_per_million),
             "source": if has_zero_effective_price {
                 Some(match entry.offering.access_kind {
                     AccessKind::ZeroPrice => "provider_free",
@@ -2207,6 +2223,8 @@ fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
             candidate.value.price.map(|price| json!({
                 "input": price.input_price_per_million,
                 "output": price.output_price_per_million,
+                "cache_read": price.cache_read_price_per_million,
+                "cache_write": price.cache_write_price_per_million,
                 "source": price.source,
                 "estimated": price.estimated,
             }))
@@ -3934,6 +3952,8 @@ fn benchmark_price(benchmark: &BenchmarkModel) -> Option<EffectivePrice> {
     Some(EffectivePrice {
         input_price_per_million: benchmark.input_price_per_million?,
         output_price_per_million: benchmark.output_price_per_million?,
+        cache_read_price_per_million: None,
+        cache_write_price_per_million: None,
         source: "benchmark".to_owned(),
         source_kind: PriceSourceKind::Benchmark,
         scope: PriceScope::Canonical,

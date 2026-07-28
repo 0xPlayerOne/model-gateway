@@ -582,6 +582,8 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
                         "model": model,
                         "input_price_per_million": price.input_price_per_million,
                         "output_price_per_million": price.output_price_per_million,
+                        "cache_read_price_per_million": price.cache_read_price_per_million,
+                        "cache_write_price_per_million": price.cache_write_price_per_million,
                         "source": price.source,
                         "scope": price.scope.as_str(),
                         "estimated": price.estimated,
