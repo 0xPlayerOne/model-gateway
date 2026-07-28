@@ -124,10 +124,10 @@ run_script() {
   if ! has_script "$1"; then echo "Skipping $1 (script not defined)"; return; fi
   if [ "${REPO_FOUNDRY_TURBO_REMOTE_ONLY:-false}" = true ] && has_turbo_script "$1"; then
     case "$(package_manager)" in
-      bun) bun run "$1" -- --remote-only ;;
-      pnpm) corepack pnpm run "$1" -- --remote-only ;;
-      yarn) corepack yarn run "$1" -- --remote-only ;;
-      npm) npm run "$1" -- --remote-only ;;
+      bun) bun run "$1" -- --cache=remote:rw ;;
+      pnpm) corepack pnpm run "$1" -- --cache=remote:rw ;;
+      yarn) corepack yarn run "$1" -- --cache=remote:rw ;;
+      npm) npm run "$1" -- --cache=remote:rw ;;
     esac
     return
   fi
