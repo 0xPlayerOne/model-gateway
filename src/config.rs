@@ -382,6 +382,7 @@ pub struct QuotaLimit {
 #[serde(rename_all = "snake_case")]
 pub enum ProviderProfileId {
     Custom,
+    CliProxyApi,
     OpenRouter,
     Ollama,
     LmStudio,
@@ -866,8 +867,12 @@ fn discover_environment_providers(
     Ok(())
 }
 
-fn default_billing_mode(_profile: ProviderProfileId) -> BillingMode {
-    BillingMode::Free
+fn default_billing_mode(profile: ProviderProfileId) -> BillingMode {
+    if profile == ProviderProfileId::CliProxyApi {
+        BillingMode::Subscription
+    } else {
+        BillingMode::Free
+    }
 }
 
 fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), ConfigError> {
@@ -1519,6 +1524,14 @@ mod tests {
     }
 
     #[test]
+    fn cli_proxy_defaults_to_subscription_billing() {
+        assert_eq!(
+            super::default_billing_mode(super::ProviderProfileId::CliProxyApi),
+            BillingMode::Subscription
+        );
+    }
+
+    #[test]
     fn validates_typed_quota_overrides() {
         let mut config = valid_config("https://example.com/v1");
         config.providers.get_mut("local").expect("provider").quotas = vec![QuotaLimit {
@@ -2095,7 +2108,7 @@ mod tests {
         config
             .validate_structure()
             .expect("optional provider example must validate");
-        assert_eq!(config.providers.len(), 6);
+        assert_eq!(config.providers.len(), 7);
         assert_eq!(config.models.len(), 6);
         assert!(
             config.providers.values().all(|provider| {

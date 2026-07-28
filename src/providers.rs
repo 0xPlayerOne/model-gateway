@@ -37,6 +37,17 @@ pub const PROFILE_DEFINITIONS: &[ProfileDefinition] = &[
         connection_check: ConnectionCheck::OpenAiModels,
     },
     ProfileDefinition {
+        id: ProviderProfileId::CliProxyApi,
+        config_key: "cli-proxy",
+        display_name: "CLIProxyAPI OAuth subscriptions",
+        adapter: AdapterKind::OpenaiChat,
+        default_secret_name: Some("CLI_PROXY_API_KEY"),
+        native_base_url: "http://127.0.0.1:8317/v1",
+        docker_base_url: Some("http://host.docker.internal:8317/v1"),
+        suggested_model: "gpt-5-codex",
+        connection_check: ConnectionCheck::OpenAiModels,
+    },
+    ProfileDefinition {
         id: ProviderProfileId::OpenRouter,
         config_key: "openrouter",
         display_name: "OpenRouter",
@@ -310,7 +321,7 @@ impl ProviderProfileId {
             Self::OrcaRouter => Some("orcarouter"),
             Self::OllamaCloud => Some("ollama-cloud"),
             Self::SiliconFlow => Some("siliconflow"),
-            Self::Ollama | Self::LmStudio | Self::Custom => None,
+            Self::Ollama | Self::LmStudio | Self::Custom | Self::CliProxyApi => None,
         }
     }
 

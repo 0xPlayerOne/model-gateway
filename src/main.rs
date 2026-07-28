@@ -4,15 +4,21 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use dialoguer::{Confirm, Input, Password, Select};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
 use model_gateway::benchmarks::{BenchmarkImport, parse_artificial_analysis};
+use model_gateway::cli_proxy::{
+    API_KEY_SECRET as CLI_PROXY_API_KEY_SECRET, BASE_URL as CLI_PROXY_BASE_URL, CliProxyPaths,
+    OAuthProvider, PROVIDER_KEY as CLI_PROXY_PROVIDER_KEY, VERSION as CLI_PROXY_VERSION,
+    account_summary, generate_api_key, initialize as initialize_cli_proxy,
+    install as install_cli_proxy, login as login_cli_proxy, serve as serve_cli_proxy,
+};
 use model_gateway::config::{
-    BillingMode, Config, ConfigError, Exposure, ModelConfig, QuotaBoundary, QuotaKind, QuotaLimit,
-    TargetConfig,
+    BillingMode, Config, ConfigError, Exposure, ModelConfig, ProviderProfileId, QuotaBoundary,
+    QuotaKind, QuotaLimit, TargetConfig,
 };
 use model_gateway::gateway::{
     ModelMatchKind, is_exact_model_identity, reconcile_model_matches, run_server,
@@ -65,6 +71,10 @@ enum Command {
     Matching {
         #[command(subcommand)]
         command: MatchingCommand,
+    },
+    CliProxy {
+        #[command(subcommand)]
+        command: CliProxyCommand,
     },
     Refresh,
     Healthcheck {
@@ -182,6 +192,34 @@ enum MatchingCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum CliProxyCommand {
+    Setup {
+        #[arg(
+            long,
+            help = "Replace the generated sidecar config while preserving the pinned binary and frontend key"
+        )]
+        force: bool,
+    },
+    Login {
+        #[arg(value_enum)]
+        provider: CliProxyOAuthProvider,
+        #[arg(long, help = "Use Codex device login instead of browser OAuth")]
+        device: bool,
+        #[arg(long, help = "Print the OAuth URL instead of opening a browser")]
+        no_browser: bool,
+    },
+    Serve,
+    Status,
+    Accounts,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliProxyOAuthProvider {
+    Claude,
+    Codex,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     init_logging()?;
     let cli = Cli::parse();
@@ -198,9 +236,162 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::Benchmarks { command } => benchmarks(command)?,
         Command::Pricing { command } => pricing(command)?,
         Command::Matching { command } => matching(command)?,
+        Command::CliProxy { command } => cli_proxy(command)?,
         Command::Refresh => refresh_all()?,
         Command::Healthcheck { endpoint } => healthcheck(&endpoint)?,
         Command::Serve => tokio::runtime::Runtime::new()?.block_on(serve())?,
+    }
+    Ok(())
+}
+
+fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
+    let config_path = Config::default_path();
+    let paths = CliProxyPaths::discover(&config_path);
+    match command {
+        CliProxyCommand::Setup { force } => {
+            let resolver = SecretResolver::default();
+            let persisted = match Config::read(&config_path) {
+                Ok(config) => config,
+                Err(ConfigError::Missing(_)) => Config::default(),
+                Err(error) => return Err(error.into()),
+            };
+            if !force
+                && (paths.config.exists()
+                    || persisted.providers.contains_key(CLI_PROXY_PROVIDER_KEY))
+            {
+                return Err(format!(
+                    "CLIProxyAPI is already configured at {}; pass --force to replace the generated config while preserving its frontend key",
+                    paths.config.display()
+                )
+                .into());
+            }
+            let (api_key, source) = match std::env::var(CLI_PROXY_API_KEY_SECRET) {
+                Ok(value) if !value.trim().is_empty() => (value, "environment"),
+                Ok(_) => {
+                    return Err(format!(
+                        "{CLI_PROXY_API_KEY_SECRET} is set but empty; remove it or provide the frontend key"
+                    )
+                    .into());
+                }
+                Err(std::env::VarError::NotPresent) => {
+                    if let Some(value) = resolver
+                        .get(CLI_PROXY_API_KEY_SECRET)?
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        let source = resolver
+                            .source(CLI_PROXY_API_KEY_SECRET)?
+                            .unwrap_or("configured-secret-store");
+                        (value, source)
+                    } else {
+                        let value = generate_api_key()?;
+                        let source = resolver.set_preferred(CLI_PROXY_API_KEY_SECRET, &value)?;
+                        (value, source)
+                    }
+                }
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    return Err(
+                        format!("{CLI_PROXY_API_KEY_SECRET} contains non-Unicode data").into(),
+                    );
+                }
+            };
+            if !paths.binary.exists() {
+                println!("Installing checksum-pinned CLIProxyAPI v{CLI_PROXY_VERSION}...");
+                install_cli_proxy(&paths)?;
+            }
+            initialize_cli_proxy(&paths, &api_key, force)?;
+            let mut config = Config::load(&config_path, &resolver)?;
+
+            let mut provider = ProviderProfileId::CliProxyApi.config(
+                CLI_PROXY_BASE_URL.to_owned(),
+                Some(CLI_PROXY_API_KEY_SECRET.to_owned()),
+            );
+            provider.billing_mode = BillingMode::Subscription;
+            provider.account_scope = Some(CLI_PROXY_PROVIDER_KEY.to_owned());
+            provider.allow_model_passthrough = true;
+            provider.max_in_flight = Some(32);
+            provider.response_header_timeout_seconds = 60;
+            provider.stream_idle_timeout_seconds = 600;
+            config
+                .providers
+                .insert(CLI_PROXY_PROVIDER_KEY.to_owned(), provider);
+            config.save_atomic(&config_path)?;
+
+            println!("Installed binary: {}", paths.binary.display());
+            println!("Generated config: {}", paths.config.display());
+            println!("OAuth directory: {}", paths.auth_dir.display());
+            println!("Stored {CLI_PROXY_API_KEY_SECRET} in {source}");
+            println!("Added provider '{CLI_PROXY_PROVIDER_KEY}' with subscription billing");
+            println!("Next: model-gateway cli-proxy login claude");
+            println!("      model-gateway cli-proxy login codex --device");
+            println!("      model-gateway cli-proxy serve");
+        }
+        CliProxyCommand::Login {
+            provider,
+            device,
+            no_browser,
+        } => {
+            let provider = match provider {
+                CliProxyOAuthProvider::Claude => OAuthProvider::Claude,
+                CliProxyOAuthProvider::Codex => OAuthProvider::Codex,
+            };
+            login_cli_proxy(&paths, provider, device, no_browser)?;
+            println!(
+                "OAuth account added. Repeat this command to extend the round-robin account pool."
+            );
+        }
+        CliProxyCommand::Serve => serve_cli_proxy(&paths)?,
+        CliProxyCommand::Status => {
+            let resolver = SecretResolver::default();
+            let config = Config::load(&config_path, &resolver)?;
+            let provider = config
+                .providers
+                .get(CLI_PROXY_PROVIDER_KEY)
+                .or_else(|| {
+                    config
+                        .providers
+                        .values()
+                        .find(|provider| provider.profile == Some(ProviderProfileId::CliProxyApi))
+                })
+                .ok_or(
+                    "CLIProxyAPI provider is not configured; run `model-gateway cli-proxy setup`",
+                )?;
+            let secret_name = provider
+                .api_key_secret
+                .as_deref()
+                .ok_or("CLIProxyAPI provider has no frontend API key secret")?;
+            let api_key = resolver
+                .get(secret_name)?
+                .ok_or_else(|| format!("{secret_name} is unavailable"))?;
+            let body: Value = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?
+                .get(format!(
+                    "{}/models",
+                    provider.base_url.trim_end_matches('/')
+                ))
+                .bearer_auth(api_key)
+                .send()?
+                .error_for_status()?
+                .json()?;
+            let models = body
+                .get("data")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            println!("CLIProxyAPI v{CLI_PROXY_VERSION}: ready, {models} models");
+            for summary in account_summary(&paths)? {
+                println!("{}: {} accounts", summary.provider, summary.accounts);
+            }
+        }
+        CliProxyCommand::Accounts => {
+            let summary = account_summary(&paths)?;
+            if summary.is_empty() {
+                println!("No CLIProxyAPI OAuth accounts found");
+            }
+            for summary in summary {
+                println!("{}: {} accounts", summary.provider, summary.accounts);
+            }
+        }
     }
     Ok(())
 }
@@ -861,7 +1052,9 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
     }
 
     loop {
-        let profiles: Vec<_> = BuiltinProvider::all().collect();
+        let profiles: Vec<_> = BuiltinProvider::all()
+            .filter(|profile| *profile != BuiltinProvider::CliProxyApi)
+            .collect();
         let choices: Vec<&str> = profiles
             .iter()
             .map(|provider| provider.display_name())

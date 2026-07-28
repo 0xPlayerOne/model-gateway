@@ -3894,6 +3894,96 @@ async fn paid_models_lists_only_paid_provider_offerings() {
 }
 
 #[tokio::test]
+async fn subscription_models_report_zero_effective_and_reference_prices() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "cli-proxy",
+            &[CatalogRecord {
+                model: "gpt-subscription".to_owned(),
+                access_kind: AccessKind::SubscriptionIncluded,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(true),
+                supports_structured_output: Some(true),
+                input_price_per_million: Some(1.25),
+                output_price_per_million: Some(10.0),
+            }],
+        )
+        .expect("catalog");
+    let mut benchmark = BenchmarkModel::fixture("gpt-subscription", 60.0, 60.0, 60.0, 1.25, 10.0);
+    benchmark.latency_seconds = Some(1.0);
+    store
+        .replace_benchmarks("fixture", "Fixture", &[benchmark])
+        .expect("benchmarks");
+    drop(store);
+
+    let mut cli_proxy = provider(format!("http://{upstream}/v1"));
+    cli_proxy.profile = Some(ProviderProfileId::CliProxyApi);
+    cli_proxy.billing_mode = BillingMode::Subscription;
+    let mut config = config_for(
+        BTreeMap::from([("cli-proxy".to_owned(), cli_proxy)]),
+        vec![TargetConfig {
+            provider: "cli-proxy".to_owned(),
+            model: "gpt-subscription".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/paid-models?provider=cli-proxy"))
+        .send()
+        .await
+        .expect("paid models response");
+    let body: Value = response.json().await.expect("paid models body");
+    let model = &body["data"][0];
+    assert_eq!(model["access"]["kind"], "subscription_included");
+    assert_eq!(model["access"]["overage"], "subscription_limited");
+    assert_eq!(model["price_per_million"]["input"], 0.0);
+    assert_eq!(model["price_per_million"]["source"], "subscription");
+    assert_eq!(model["reference_price_per_million"]["input"], 1.25);
+    assert_eq!(model["reference_price_per_million"]["output"], 10.0);
+
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/free-models?provider=cli-proxy"))
+        .send()
+        .await
+        .expect("free models response");
+    let body: Value = response.json().await.expect("free models body");
+    assert!(body["data"].as_array().is_some_and(Vec::is_empty));
+
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/auto-models?route=frontier"))
+        .send()
+        .await
+        .expect("auto models response");
+    let body: Value = response.json().await.expect("auto models body");
+    let primary = &body["routes"]["frontier"]["primary"];
+    assert_eq!(primary["access"]["kind"], "subscription_included");
+    assert_eq!(primary["expected_cost_microusd"], 0);
+    assert!(primary["reference_cost_microusd"].as_u64().is_some());
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-frontier",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .expect("subscription completion");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-model-gateway-expected-cost-microusd"],
+        "0"
+    );
+}
+
+#[tokio::test]
 async fn auto_balanced_selects_mid_range_model() {
     let upstream = spawn_provider(ProviderResponse::Success).await;
     let directory = tempfile::tempdir().expect("state directory");

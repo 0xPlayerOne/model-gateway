@@ -36,6 +36,23 @@ docker compose up --build gateway
 
 Secrets live in a Docker named volume mounted read-only. Host port fixed to `127.0.0.1:8008`. For Ollama/LM Studio on the host, use `http://host.docker.internal:<port>/v1`. See [docs/getting-started.md](docs/getting-started.md) for details.
 
+## Claude and Codex OAuth
+
+CLIProxyAPI can run as an optional loopback sidecar for Claude Code and ChatGPT/Codex subscriptions with multi-account round-robin routing:
+
+```bash
+model-gateway cli-proxy setup
+model-gateway cli-proxy login claude
+model-gateway cli-proxy login codex --device
+model-gateway cli-proxy serve
+
+# In another terminal, after at least one account is connected:
+model-gateway catalog refresh --provider cli-proxy
+model-gateway serve
+```
+
+Repeat either login command to add accounts to the pool. The setup command downloads checksum-pinned CLIProxyAPI `v7.2.103`, binds it to `127.0.0.1:8317`, disables remote management/plugins/control-panel updates, and creates a `subscription` provider. It does not replace direct APIs, Ollama, LM Studio, or the built-in local endpoint. See [docs/providers.md](docs/providers.md#cliproxyapi-oauth-sidecar) for security and provider-policy limitations.
+
 ## Verification
 
 ```bash
@@ -107,7 +124,7 @@ Query models from explicitly authorized paid providers:
 curl /v1/paid-models?task=coding&limit=50
 ```
 
-Only appears when at least one provider has `billing_mode = "paid"` or `"subscription"`. All providers default to free — enable paid with:
+Only appears when at least one provider has `billing_mode = "paid"` or `"subscription"`. Providers default to free except the generated CLIProxyAPI subscription profile. Enable paid APIs with:
 
 ```bash
 export MODEL_GATEWAY_PAID_BILLING_MODE=openai-api,deepseek
@@ -145,6 +162,12 @@ Or per-provider: `MODEL_GATEWAY_OPENAI_API_BILLING_MODE=paid`. See [docs/configu
 | `matching remove-entity <entity-id> <benchmark-model>` | Remove a canonical entity benchmark link |
 | `matching unlink-alias <provider-key> <provider-model-id>` | Remove an approved canonical provider alias |
 | `matching explain <provider> <catalog-model>` | Explain one model's identity resolution |
+| `cli-proxy setup [--force]` | Install and configure the pinned OAuth sidecar |
+| `cli-proxy login claude` | Add a Claude OAuth account |
+| `cli-proxy login codex [--device]` | Add a ChatGPT/Codex OAuth account |
+| `cli-proxy serve` | Run the loopback CLIProxyAPI sidecar |
+| `cli-proxy status` | Check sidecar readiness, models, and account counts |
+| `cli-proxy accounts` | Show provider-level account counts without token data |
 | `healthcheck` | Verify the server is running |
 
 ## Development

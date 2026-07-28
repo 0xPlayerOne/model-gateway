@@ -29,6 +29,20 @@ Environment overrides are applied on every load and take precedence over TOML.
 | `MODEL_GATEWAY_AUTO_BALANCED_ENABLED` | `true` | Enable/disable auto-balanced route |
 | `MODEL_GATEWAY_MODEL_DENYLIST` | — | Comma-separated model IDs to exclude globally |
 
+### CLIProxyAPI Sidecar
+
+`model-gateway cli-proxy setup` creates a `cli-proxy` provider automatically. Optional path overrides:
+
+| Env Variable | Default | Description |
+|---|---|---|
+| `MODEL_GATEWAY_CLI_PROXY_HOME` | `~/.config/model-gateway/cli-proxy` | Sidecar installation and state root |
+| `MODEL_GATEWAY_CLI_PROXY_BINARY` | versioned binary under the sidecar root | Manually managed executable |
+| `MODEL_GATEWAY_CLI_PROXY_CONFIG` | `<home>/config.yaml` | Sidecar YAML configuration |
+| `MODEL_GATEWAY_CLI_PROXY_AUTH_DIR` | `<home>/auth` | OAuth credential directory |
+| `CLI_PROXY_API_KEY` | generated secret-store value | Frontend bearer key for manual/environment-only setup |
+
+Use `MODEL_GATEWAY_CLI_PROXY_MODEL_ALLOWLIST` to expose only reviewed sidecar models. The provider defaults to `billing_mode = "subscription"`; changing it to `paid` authorizes per-token billing semantics and should not be done for OAuth subscription accounts.
+
 ## Quality Floors
 
 Routing uses a single composite quality floor per mode (not per-task or per-complexity):
@@ -57,12 +71,13 @@ Filters low-quality, stale, or expensive models from `/v1/free-models` and auto-
 | `MODEL_GATEWAY_FREE_QUALITY_MAX_AGE_MONTHS` | `18` | Maximum model age |
 | `MODEL_GATEWAY_FREE_QUALITY_MAX_INPUT_PRICE` | `2.0` | Maximum input price per million tokens |
 | `MODEL_GATEWAY_FREE_QUALITY_MAX_OUTPUT_PRICE` | `10.0` | Maximum output price per million tokens |
+| `MODEL_GATEWAY_FREE_QUALITY_MAX_REGRET` | `8.0` | Maximum quality gap from the best available free candidate |
 
 Set any value to 0 to disable that filter. Models without benchmark data always pass quality/age filters (new models are not penalized).
 
 ## Billing Mode
 
-All providers default to **free billing**. To enable paid/subscription models, use:
+Providers default to **free billing**, except the CLIProxyAPI profile, which defaults to **subscription** because its frontend key represents an already-configured local OAuth sidecar. To enable other paid/subscription models, use:
 
 - **Global**: `MODEL_GATEWAY_PAID_BILLING_MODE=openai-api,deepseek,opencode-go` (comma-separated provider names)
 - **Per-provider**: `MODEL_GATEWAY_OPENAI_API_BILLING_MODE=paid` (takes precedence)
@@ -102,7 +117,7 @@ Use the normalized provider name as prefix, e.g., `MODEL_GATEWAY_OPENROUTER_BILL
 | `pricing_profile` (TOML) | `models.dev provider key` | Provider-scoped public pricing namespace |
 | `QUOTAS` | `cost_microusd:1000000:86400` | Quota windows (semicolon-separated) |
 
-Provider names used in overrides: `openrouter`, `google-gemini`, `groq`, `mistral`, `kilocode`, `opencode-zen`, `opencode-go`, `nous-portal`, `novita`, `nvidia-nim`, `ollama-cloud`, `orca-router`, `siliconflow`, `deepseek`, `fireworks`, `openai-api`, `z-ai`.
+Provider names used in overrides: `cli-proxy`, `openrouter`, `google-gemini`, `groq`, `mistral`, `kilocode`, `opencode-zen`, `opencode-go`, `nous-portal`, `novita`, `nvidia-nim`, `ollama-cloud`, `orca-router`, `siliconflow`, `deepseek`, `fireworks`, `openai-api`, `z-ai`.
 
 ## Quota Format
 

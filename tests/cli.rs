@@ -28,10 +28,134 @@ fn strip_provider_env_vars(mut cmd: Command) -> Command {
         "ORCAROUTER_API_KEY",
         "OLLAMA_API_KEY",
         "SILICON_FLOW_API_KEY",
+        "CLI_PROXY_API_KEY",
     ] {
         cmd.env_remove(var);
     }
     cmd
+}
+
+#[test]
+fn cli_proxy_accounts_reports_counts_without_token_values() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let home = directory.path().join("cli-proxy");
+    let auth = home.join("auth");
+    std::fs::create_dir_all(&auth).expect("auth dir");
+    std::fs::write(
+        auth.join("claude.json"),
+        r#"{"type":"claude","access_token":"must-not-leak"}"#,
+    )
+    .expect("auth file");
+    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
+        .args(["cli-proxy", "accounts"])
+        .env("MODEL_GATEWAY_CONFIG", directory.path().join("config.toml"))
+        .env("MODEL_GATEWAY_CLI_PROXY_HOME", home)
+        .output()
+        .expect("run cli-proxy accounts");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert_eq!(stdout, "claude: 1 accounts\n");
+    assert!(!stdout.contains("must-not-leak"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn cli_proxy_environment_discovery_uses_subscription_billing() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
+        .args(["config", "check"])
+        .env(
+            "MODEL_GATEWAY_CONFIG",
+            directory.path().join("missing.toml"),
+        )
+        .env("MODEL_GATEWAY_SECRET_STORE", "environment")
+        .env(
+            "MODEL_GATEWAY_STATE_PATH",
+            directory.path().join("routing.sqlite3"),
+        )
+        .env("CLI_PROXY_API_KEY", "test-sidecar-key")
+        .output()
+        .expect("run config show");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains("Providers: 1"));
+    assert!(!stdout.contains("test-sidecar-key"));
+}
+
+#[test]
+fn cli_proxy_setup_uses_environment_frontend_key_consistently() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let home = directory.path().join("cli-proxy");
+    let binary = home.join("bin").join("7.2.103").join("cli-proxy-api");
+    std::fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary dir");
+    std::fs::write(&binary, "fixture").expect("binary fixture");
+    let config_path = directory.path().join("config.toml");
+    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
+        .args(["cli-proxy", "setup"])
+        .env("MODEL_GATEWAY_CONFIG", &config_path)
+        .env("MODEL_GATEWAY_SECRET_STORE", "environment")
+        .env("MODEL_GATEWAY_CLI_PROXY_HOME", &home)
+        .env("CLI_PROXY_API_KEY", "environment-sidecar-key")
+        .output()
+        .expect("run cli-proxy setup");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains("Stored CLI_PROXY_API_KEY in environment"));
+    let sidecar_config = std::fs::read_to_string(home.join("config.yaml")).expect("sidecar config");
+    assert!(sidecar_config.contains("environment-sidecar-key"));
+    let gateway_config = std::fs::read_to_string(config_path).expect("gateway config");
+    assert!(gateway_config.contains("billing_mode = \"subscription\""));
+    assert!(!gateway_config.contains("environment-sidecar-key"));
+}
+
+#[test]
+fn cli_proxy_setup_fails_before_config_write_when_secret_cannot_persist() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let home = directory.path().join("cli-proxy");
+    let binary = home.join("bin").join("7.2.103").join("cli-proxy-api");
+    std::fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary dir");
+    std::fs::write(binary, "fixture").expect("binary fixture");
+    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
+        .args(["cli-proxy", "setup"])
+        .env("MODEL_GATEWAY_CONFIG", directory.path().join("config.toml"))
+        .env("MODEL_GATEWAY_SECRET_STORE", "environment")
+        .env("MODEL_GATEWAY_CLI_PROXY_HOME", &home)
+        .output()
+        .expect("run cli-proxy setup");
+    assert!(!output.status.success());
+    assert!(!home.join("config.yaml").exists());
+}
+
+#[test]
+fn cli_proxy_force_setup_preserves_existing_frontend_key() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let home = directory.path().join("cli-proxy");
+    let binary = home.join("bin").join("7.2.103").join("cli-proxy-api");
+    std::fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary dir");
+    std::fs::write(binary, "fixture").expect("binary fixture");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join("config.yaml"), "old-config").expect("old config");
+    let secret_dir = directory.path().join("secrets");
+    std::fs::create_dir(&secret_dir).expect("secret dir");
+    std::fs::write(secret_dir.join("CLI_PROXY_API_KEY"), "stable-sidecar-key").expect("secret");
+    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
+        .args(["cli-proxy", "setup", "--force"])
+        .env("MODEL_GATEWAY_CONFIG", directory.path().join("config.toml"))
+        .env("MODEL_GATEWAY_SECRET_STORE", "file")
+        .env("MODEL_GATEWAY_SECRET_DIR", &secret_dir)
+        .env("MODEL_GATEWAY_CLI_PROXY_HOME", &home)
+        .output()
+        .expect("run forced setup");
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(secret_dir.join("CLI_PROXY_API_KEY")).expect("secret"),
+        "stable-sidecar-key"
+    );
+    assert!(
+        std::fs::read_to_string(home.join("config.yaml"))
+            .expect("config")
+            .contains("stable-sidecar-key")
+    );
 }
 
 #[test]

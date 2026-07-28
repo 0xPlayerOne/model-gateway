@@ -1216,7 +1216,7 @@ struct CatalogModelEntry<'a> {
 }
 
 fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
-    let is_free = entry.offering.access_kind.is_free();
+    let has_zero_effective_price = entry.offering.access_kind.has_zero_effective_price();
     let reference_input = entry
         .offering
         .input_price_per_million
@@ -1234,7 +1234,7 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
     } else {
         None
     };
-    let input_price = if is_free {
+    let input_price = if has_zero_effective_price {
         Some(0.0)
     } else {
         entry
@@ -1244,7 +1244,7 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
             .or(entry.offering.input_price_per_million)
             .or_else(|| entry.benchmark.and_then(|b| b.input_price_per_million))
     };
-    let output_price = if is_free {
+    let output_price = if has_zero_effective_price {
         Some(0.0)
     } else {
         entry
@@ -1279,16 +1279,17 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
         "price_per_million": {
             "input": input_price,
             "output": output_price,
-            "source": if is_free {
+            "source": if has_zero_effective_price {
                 Some(match entry.offering.access_kind {
                     AccessKind::ZeroPrice => "provider_free",
                     AccessKind::QuotaLimitedFreeTier => "free_tier",
+                    AccessKind::SubscriptionIncluded => "subscription",
                     AccessKind::Paid | AccessKind::Unknown => "unknown",
                 })
             } else {
                 entry.price.as_ref().map(|price| price.source.as_str())
             },
-            "estimated": if is_free {
+            "estimated": if has_zero_effective_price {
                 Some(false)
             } else {
                 entry.price.as_ref().map(|price| price.estimated)
@@ -1302,7 +1303,11 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
         },
         "access": {
             "kind": entry.offering.access_kind,
-            "overage": if is_free { "gateway_blocked" } else { "paid" },
+            "overage": match entry.offering.access_kind {
+                AccessKind::ZeroPrice | AccessKind::QuotaLimitedFreeTier => "gateway_blocked",
+                AccessKind::SubscriptionIncluded => "subscription_limited",
+                AccessKind::Paid | AccessKind::Unknown => "paid",
+            },
             "remaining": entry.account_limit.and_then(|account| account.remaining),
             "is_free_tier": entry.account_limit.and_then(|account| account.is_free_tier),
             "account_status_fetched_at": entry.account_limit.map(|account| account.fetched_at),
@@ -1623,7 +1628,7 @@ fn collect_paid_candidates(
             continue;
         };
         if !runtime.available
-            || access_kind != AccessKind::Paid
+            || !access_kind.is_paid_route_eligible()
             || !matches!(
                 provider.billing_mode,
                 BillingMode::Paid | BillingMode::Subscription
@@ -1857,7 +1862,7 @@ fn select_mode_models(
             .or_else(|| benchmark.and_then(|b| b.output_price_per_million));
         let expected_cost_microusd = match candidate.offering.access_kind {
             AccessKind::ZeroPrice => 0,
-            AccessKind::QuotaLimitedFreeTier => {
+            AccessKind::QuotaLimitedFreeTier | AccessKind::SubscriptionIncluded => {
                 match (reference_input_price, reference_output_price) {
                     (Some(input), Some(output)) => expected_cost_microusd(
                         256,
@@ -1892,7 +1897,7 @@ fn select_mode_models(
                 model: candidate.offering.model.as_str(),
                 provider: candidate.offering.provider.as_str(),
                 price: candidate.price.as_ref(),
-                pricing_eligible: candidate.offering.access_kind.is_free()
+                pricing_eligible: candidate.offering.access_kind.has_zero_effective_price()
                     || candidate.price.is_some(),
                 match_kind: candidate.match_kind,
                 access_kind: candidate.offering.access_kind,
@@ -1954,12 +1959,12 @@ fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
         "model": candidate.value.model,
         "provider": candidate.value.provider,
         "quality": candidate.quality,
-        "expected_cost_microusd": if candidate.value.access_kind.is_free() {
+        "expected_cost_microusd": if candidate.value.access_kind.has_zero_effective_price() {
             0
         } else {
             candidate.expected_cost_microusd
         },
-        "reference_cost_microusd": if candidate.value.access_kind == AccessKind::QuotaLimitedFreeTier {
+        "reference_cost_microusd": if candidate.value.access_kind.uses_reference_cost() {
             (candidate.expected_cost_microusd != u64::MAX).then_some(candidate.expected_cost_microusd)
         } else {
             None
@@ -1969,20 +1974,25 @@ fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
         "benchmark_match": candidate.value.match_kind.map(ModelMatchKind::as_str),
         "access": {
             "kind": candidate.value.access_kind,
-            "overage": if candidate.value.access_kind.is_free() { "gateway_blocked" } else { "paid" },
+            "overage": match candidate.value.access_kind {
+                AccessKind::ZeroPrice | AccessKind::QuotaLimitedFreeTier => "gateway_blocked",
+                AccessKind::SubscriptionIncluded => "subscription_limited",
+                AccessKind::Paid | AccessKind::Unknown => "paid",
+            },
         },
         "reference_price_per_million": {
             "input": candidate.value.reference_input_price,
             "output": candidate.value.reference_output_price,
         },
-        "price_per_million": if candidate.value.access_kind.is_free() {
+        "price_per_million": if candidate.value.access_kind.has_zero_effective_price() {
             Some(json!({
                 "input": 0.0,
                 "output": 0.0,
-                "source": if candidate.value.access_kind == AccessKind::ZeroPrice {
-                    "provider_free"
-                } else {
-                    "free_tier"
+                "source": match candidate.value.access_kind {
+                    AccessKind::ZeroPrice => "provider_free",
+                    AccessKind::QuotaLimitedFreeTier => "free_tier",
+                    AccessKind::SubscriptionIncluded => "subscription",
+                    AccessKind::Paid | AccessKind::Unknown => "unknown",
                 },
                 "estimated": false,
             }))
@@ -3528,8 +3538,9 @@ async fn resolve_benchmark_targets(
         if model_benchmarks.is_empty() {
             continue;
         }
+        let access_kind = effective_access_kind(provider, &offering);
         if !runtime.available
-            || effective_access_kind(provider, &offering) != AccessKind::Paid
+            || !access_kind.is_paid_route_eligible()
             || provider.billing_mode == BillingMode::Free
         {
             continue;
@@ -3575,7 +3586,7 @@ async fn resolve_benchmark_targets(
             else {
                 continue;
             };
-            let expected_cost_microusd = expected_cost_microusd(
+            let reference_cost_microusd = expected_cost_microusd(
                 requirements.estimated_input_tokens,
                 benchmark
                     .output_tokens_per_task
@@ -3584,6 +3595,11 @@ async fn resolve_benchmark_targets(
                 effective_price.input_price_per_million,
                 effective_price.output_price_per_million,
             );
+            let expected_cost_microusd = if access_kind == AccessKind::SubscriptionIncluded {
+                0
+            } else {
+                reference_cost_microusd
+            };
             let reference = quota_reference(provider, &offering.model);
             candidates.push(ScoredCandidate {
                 value: SelectedTarget {
@@ -3603,8 +3619,20 @@ async fn resolve_benchmark_targets(
                         .map(|reference| reference.rules)
                         .unwrap_or_default(),
                     expected_cost_microusd,
-                    input_price_per_million: Some(effective_price.input_price_per_million),
-                    output_price_per_million: Some(effective_price.output_price_per_million),
+                    input_price_per_million: Some(
+                        if access_kind == AccessKind::SubscriptionIncluded {
+                            0.0
+                        } else {
+                            effective_price.input_price_per_million
+                        },
+                    ),
+                    output_price_per_million: Some(
+                        if access_kind == AccessKind::SubscriptionIncluded {
+                            0.0
+                        } else {
+                            effective_price.output_price_per_million
+                        },
+                    ),
                     reasoning_effort: benchmark.reasoning_effort.clone(),
                     selection: Some(SelectionMetadata {
                         canonical_model: canonical.benchmark_model.clone(),
@@ -3620,7 +3648,7 @@ async fn resolve_benchmark_targets(
                     }),
                 },
                 quality,
-                expected_cost_microusd,
+                expected_cost_microusd: reference_cost_microusd,
                 latency_seconds: benchmark.latency_seconds.unwrap_or(f64::MAX),
             });
         }
