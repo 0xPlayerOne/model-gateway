@@ -108,10 +108,10 @@ The gateway auto-fetches on startup if the key is configured with no fresh data.
 
 ## Free Models
 
-Query available free models:
+Query the canonical model catalog:
 
 ```bash
-curl /v1/free-models?provider=kilocode&limit=100&task=coding
+curl '/v1/catalog/models?access=free&provider=kilocode&limit=25&task=coding'
 ```
 
 Supported tasks: `general`, `coding`, `agentic`. Provider values match configured keys (e.g., `kilocode`, `opencode-zen`, `google-gemini`, `openrouter`). Unknown providers return `invalid_provider`. See [docs/providers.md](docs/providers.md) for free-tier eligibility rules.
@@ -121,10 +121,13 @@ Supported tasks: `general`, `coding`, `agentic`. Provider values match configure
 Query models from explicitly authorized paid providers:
 
 ```bash
-curl /v1/paid-models?task=coding&limit=25
+curl '/v1/catalog/models?access=paid&task=coding&limit=25'
 
 # Fetch complete metadata for one model from its summary link
-curl /v1/models/provider/model
+curl /v1/catalog/models/provider/model
+
+# Inspect the machine-readable API contract
+curl /openapi.json
 ```
 
 Only appears when at least one provider has `billing_mode = "paid"` or `"subscription"`. Providers default to free except the generated CLIProxyAPI subscription profile. Enable paid APIs with:
