@@ -858,8 +858,14 @@ fn strip_model_noise(model: &str) -> String {
             let normalized = normalize_identifier(segment);
             let mut tokens: Vec<&str> = normalized.split('-').collect();
 
-            // Remove transport/billing decorations, never semantic variants.
-            tokens.retain(|t| !NOISE_TOKENS.contains(t));
+            // Remove terminal transport/billing decorations, never semantic
+            // tokens that happen to use the same word internally.
+            while tokens
+                .last()
+                .is_some_and(|token| NOISE_TOKENS.contains(token))
+            {
+                tokens.pop();
+            }
 
             tokens.join("-")
         })
@@ -6485,6 +6491,15 @@ mod tests {
         );
         // No /, single segment, no noise
         assert_eq!(strip_model_noise("gemini-2-5-flash"), "gemini-2-5-flash");
+    }
+
+    #[test]
+    fn strip_model_noise_preserves_internal_noise_tokens() {
+        assert_eq!(
+            strip_model_noise("free-model-fp8-instruct"),
+            "free-model-fp8-instruct"
+        );
+        assert_eq!(strip_model_noise("model-int8-chat"), "model-int8-chat");
     }
 
     #[test]
