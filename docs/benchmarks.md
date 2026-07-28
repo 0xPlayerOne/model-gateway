@@ -52,7 +52,7 @@ active snapshots:
 
 ## What Benchmarks Provide
 
-Each model has up to five scored fields:
+Each model may include quality scores plus pricing, latency, output-size, provenance, and raw metric fields:
 
 | Field | Range | Description |
 |---|---|---|

@@ -113,12 +113,12 @@ prices never classify a free offering as paid.
 
 ## `auto-efficient`
 
-Best bang-for-buck. Quality floor: **40**. Pipeline:
+Best bang-for-buck. Quality floor: **35**. Pipeline:
 
 1. **`all_candidates`** — all models from `catalog_models`
 2. **Availability filter** — remove unavailable providers and free-only providers when billing requires paid
 3. **Capability filter** — context length, tools, vision, structured output
-4. **Composite quality floor** — `efficient_quality_floor` (default 40.0)
+4. **Composite quality floor** — `efficient_quality_floor` (default 35.0)
 5. **Pareto ranking** — `pareto_rank(composite_quality, cost_microusd, latency)`
    - Removes dominated candidates (worse on all three axes)
    - Sorts non-dominated by cost → latency → quality
@@ -134,9 +134,9 @@ Models from profiles with known included-subscription semantics report effective
 
 ## `auto-balanced`
 
-Mid-range quality. Quality floor: **60**. Same pipeline as auto-efficient with a higher quality floor. Targets models that are great quality but not the most expensive — DeepSeek V4 Pro, MiMo v2.5 Pro, GPT 5.6 Luna class.
+Mid-range quality. Quality floor: **42**. Same pipeline as auto-efficient with a higher quality floor. Targets models that are great quality but not the most expensive — DeepSeek V4 Pro, MiMo v2.5 Pro, GPT 5.6 Luna class.
 
-- Quality floor: `balanced_quality_floor` (default 60.0)
+- Quality floor: `balanced_quality_floor` (default 42.0)
 - Falls back to `auto-free` → `local`
 - Disable with `auto_balanced_enabled = false`
 
