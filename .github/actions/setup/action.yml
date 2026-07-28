@@ -417,7 +417,8 @@ runs:
       if: >-
         steps.profile.outputs.python == 'true' &&
         (inputs.mise-scope == 'python' ||
-        (inputs.install == 'true' && inputs.install-python == 'true'))
+        (inputs.install == 'true' && inputs.install-python == 'true')) &&
+        !contains(steps.profile.outputs.mise_tools, 'uv')
       uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
       with:
         version: 0.11.32
