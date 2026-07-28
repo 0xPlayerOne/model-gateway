@@ -3,8 +3,7 @@ set -euo pipefail
 
 # Resolve repository settings with this precedence:
 # explicit REPO_FOUNDRY_* values (CLI callers can export them), then
-# .github/code-foundry.yml, then detected defaults. A legacy
-# .github/template.yml is accepted during migration.
+# .github/code-foundry.yml, then detected defaults.
 
 root="${REPO_FOUNDRY_ROOT:-$PWD}"
 command="detect"
@@ -33,7 +32,6 @@ done
 
 cd "$root"
 template_file=.github/code-foundry.yml
-[ -f "$template_file" ] || template_file=.github/template.yml
 
 config_value() {
   local key="$1"

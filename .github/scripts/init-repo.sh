@@ -3,7 +3,6 @@ set -euo pipefail
 
 source="${REPO_FOUNDRY_SOURCE:-https://github.com/${GITHUB_REPOSITORY_OWNER:-OWNER}/code-foundry.git}"
 ref="main"
-config_file="${REPO_FOUNDRY_CONFIG:-}"
 profile="${REPO_FOUNDRY_PROFILE:-auto}"
 protection=false
 dry_run=false
@@ -67,7 +66,6 @@ Initialize or synchronize a repository from the shared baseline.
 Options:
   --source PATH_OR_URL       Template source (default: REPO_FOUNDRY_SOURCE or GitHub owner)
   --ref REF                  Template branch or tag (default: main)
-  --config PATH              Use a .github/code-foundry.yml configuration file
   --profile NAME             auto, application, monorepo, or minimal
   --languages LIST           auto or comma-separated: typescript,rust,python,solidity
   --features LIST            all or comma-separated optional features:
@@ -97,7 +95,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --source) source="${2:?missing source path or URL}"; shift 2 ;;
     --ref) ref="${2:?missing ref}"; shift 2 ;;
-    --config) config_file="${2:?missing config path}"; shift 2 ;;
     --profile) profile="${2:?missing profile}"; profile_set=true; shift 2 ;;
     --languages) languages="${2:?missing language list}"; languages_set=true; shift 2 ;;
     --features) features="${2:?missing feature list}"; features_set=true; shift 2 ;;
@@ -121,16 +118,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ -n "$config_file" ]; then
-  [ -f "$config_file" ] || { printf 'Configuration file not found: %s\n' "$config_file" >&2; exit 1; }
-  mkdir -p .github
-  if [ "$(cd -- "$(dirname -- "$config_file")" && pwd)/$(basename -- "$config_file")" != "$(pwd)/.github/code-foundry.yml" ]; then
-    cp "$config_file" .github/code-foundry.yml
-  fi
-fi
-
 config_path=.github/code-foundry.yml
-[ -f "$config_path" ] || config_path=.github/template.yml
 if [ -f "$config_path" ]; then
   config_value() {
     awk -F': ' -v key="$1" '$1 == key { value=$2; sub(/[[:space:]]+#.*/, "", value); gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); print value; exit }' "$config_path"
@@ -175,7 +163,7 @@ if [ -f "$config_path" ]; then
 fi
 
 case "$package_manager" in
-  auto|bun|pnpm|yarn|npm) ;;
+  auto|none|bun|pnpm|yarn|npm) ;;
   *) printf 'Unsupported package manager: %s\n' "$package_manager" >&2; exit 2 ;;
 esac
 case "$release_type" in
@@ -210,7 +198,7 @@ if [ -n "$license_file" ]; then sync_args+=(--license-file "$license_file"); fi
 if [ "$dry_run" = true ]; then sync_args+=(--check); else sync_args+=(--apply); fi
 if [ "$prune" = true ]; then sync_args+=(--prune); fi
 if [ "$force" = true ]; then sync_args+=(--force); fi
-bash "$sync_script" "${sync_args[@]}"
+REPO_FOUNDRY_INIT=true bash "$sync_script" "${sync_args[@]}"
 
 if [ "$dry_run" = true ]; then
   printf '%s\n' 'Dry run complete; no files were changed.'
@@ -221,7 +209,6 @@ mkdir -p .github
 config_value() {
   awk -F': ' -v key="$1" '$1 == key { value=$2; sub(/[[:space:]]+#.*/, "", value); gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); print value; exit }' .github/code-foundry.yml
 }
-template_ref="$(config_value template 2>/dev/null || true)"
 profile="$(config_value profile 2>/dev/null || true)"
 languages="$(config_value languages 2>/dev/null || true)"
 features="$(config_value features 2>/dev/null || true)"
@@ -233,9 +220,6 @@ npm_publish="$(config_value npm_publish 2>/dev/null || true)"
 license="$(config_value license 2>/dev/null || true)"
 {
   printf 'version: 1\n'
-  if [ -n "$template_ref" ]; then
-    printf 'template: %s\n' "$template_ref"
-  fi
   printf 'profile: %s\n' "$profile"
   printf 'languages: %s\n' "$languages"
   printf 'features: %s\n' "$features"
@@ -262,11 +246,6 @@ license="$(config_value license 2>/dev/null || true)"
   printf 'coverage_minimum: %s\n' "$coverage_minimum"
   printf 'turbo_remote: %s\n' "$turbo_remote"
 } > .github/code-foundry.yml
-
-if [ "$config_path" = .github/template.yml ] && [ -f .github/template.yml ]; then
-  rm .github/template.yml
-  printf '%s\n' 'Migrated .github/template.yml to .github/code-foundry.yml.'
-fi
 
 if [ "$bootstrap" = false ]; then
   printf '%s\n' 'Bootstrap skipped.'

@@ -8,7 +8,6 @@ configured_features="all"
 configured_languages="auto"
 
 config_file=.github/code-foundry.yml
-[ -f "$config_file" ] || config_file=.github/template.yml
 if [ -f "$config_file" ]; then
   configured_features="$(awk -F': ' '/^features:/ {print $2; exit}' "$config_file")"
   configured_languages="$(awk -F': ' '/^languages:/ {print $2; exit}' "$config_file")"

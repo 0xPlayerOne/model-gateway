@@ -4,6 +4,7 @@ set -euo pipefail
 git config core.hooksPath .githooks
 
 if command -v mise >/dev/null 2>&1; then
+  mise trust --yes .mise.toml >/dev/null 2>&1 || true
   if [ -f .mise.toml ] && [ ! -f mise.lock ]; then
     if MISE_TRUSTED_CONFIG_PATHS="$PWD" mise lock >/dev/null 2>&1; then
       printf '%s\n' 'Initialized mise.lock for deterministic CI tool installs.'

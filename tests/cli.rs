@@ -378,7 +378,7 @@ billing_mode = "paid"
     .expect("write config");
     std::fs::write(
         &pricing_path,
-        r#"{"provider":"fixture","model":"mimo-v2-pro","input_price_per_million":1.2,"output_price_per_million":3.4}"#,
+        r#"{"provider":"fixture","model":"mimo-v2-pro","input_price_per_million":1.2,"output_price_per_million":3.4,"cache_read_price_per_million":0.3,"cache_write_price_per_million":4.5}"#,
     )
     .expect("write pricing import");
     let environment = |command: &mut Command| {
@@ -411,6 +411,8 @@ billing_mode = "paid"
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert!(stdout.contains("1.2"));
     assert!(stdout.contains("3.4"));
+    assert!(stdout.contains("0.3"));
+    assert!(stdout.contains("4.5"));
     assert!(stdout.contains("manual-overrides"));
 }
 
