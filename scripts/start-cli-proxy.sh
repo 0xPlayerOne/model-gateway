@@ -16,14 +16,23 @@ LOG="${MODEL_GATEWAY_CLI_PROXY_LOG:-$CLI_PROXY_HOME/server.log}"
 PIDFILE="${MODEL_GATEWAY_CLI_PROXY_PIDFILE:-$CLI_PROXY_HOME/server.pid}"
 
 FOLLOW=false
+OPTIONAL=false
 if [ "${1:-}" = "--follow" ] || [ "${1:-}" = "-f" ]; then
     FOLLOW=true
+elif [ "${1:-}" = "--if-configured" ]; then
+    OPTIONAL=true
 elif [ -n "${1:-}" ]; then
-    echo "Usage: $0 [--follow|-f]" >&2
+    echo "Usage: $0 [--follow|-f|--if-configured]" >&2
     exit 2
 fi
 
 mkdir -p "$CLI_PROXY_HOME"
+
+CONFIG="${MODEL_GATEWAY_CLI_PROXY_CONFIG:-$CLI_PROXY_HOME/config.yaml}"
+if [ "$OPTIONAL" = true ] && [ ! -f "$CONFIG" ]; then
+    echo "CLIProxyAPI is not configured; skipping sidecar startup."
+    exit 0
+fi
 
 if [ -f "$PIDFILE" ]; then
     OLD_PID=$(cat "$PIDFILE")

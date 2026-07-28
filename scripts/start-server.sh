@@ -33,6 +33,9 @@ cargo build --release --manifest-path "$ROOT/Cargo.toml" 2>&1
 
 BIN="$ROOT/target/release/model-gateway"
 
+echo "Starting configured CLIProxyAPI sidecar..."
+"$ROOT/scripts/start-cli-proxy.sh" --if-configured
+
 echo "Refreshing catalogs, benchmarks, and pricing..."
 if ! "$BIN" refresh; then
     echo "Refresh completed with failures; starting with last-known-good data." >&2
