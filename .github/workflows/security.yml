@@ -194,6 +194,27 @@ jobs:
       - name: Audit dependencies
         run: bash .github/scripts/security.sh audit python
 
+  dependency-audit-python-gate:
+    name: Dependency Audit (Python)
+    needs: [profile, dependency-audit-python]
+    if: always()
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - name: Gate
+        env:
+          PROFILE_RESULT: ${{ needs.profile.result }}
+          AUDIT_RESULT: ${{ needs.dependency-audit-python.result }}
+        run: |
+          if [ "$PROFILE_RESULT" != success ]; then
+            echo "Python audit profile failed: $PROFILE_RESULT" >&2
+            exit 1
+          fi
+          case "$AUDIT_RESULT" in
+            success|skipped) exit 0 ;;
+            *) echo "Python dependency audit failed: $AUDIT_RESULT" >&2; exit 1 ;;
+          esac
+
   dependency-review:
     name: Dependency Review
     if: ${{ github.event_name == 'pull_request' && !github.event.repository.private }}
