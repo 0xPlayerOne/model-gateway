@@ -2280,7 +2280,14 @@ fn decrement_counter_at(
         "UPDATE usage_counters SET used = MAX(0, used - ?1)
          WHERE provider = ?2 AND model = ?3 AND kind = ?4
            AND window_seconds = ?5 AND window_start = ?6",
-        params![amount as i64, provider, model, kind, window_seconds as i64, window_start],
+        params![
+            amount as i64,
+            provider,
+            model,
+            kind,
+            window_seconds as i64,
+            window_start
+        ],
     )?;
     Ok(())
 }
