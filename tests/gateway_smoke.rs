@@ -1011,7 +1011,7 @@ async fn auto_models_include_free_candidates_without_price_observations() {
     config.server.state_path = Some(state_path);
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/auto-models"))
+        .get(format!("{gateway}/v1/auto-models?view=full"))
         .send()
         .await
         .expect("auto models response");
@@ -1031,6 +1031,23 @@ async fn auto_models_include_free_candidates_without_price_observations() {
         body["routes"]["free"]["primary"]["price_per_million"]["source"],
         "provider_free"
     );
+
+    let summary: Value = reqwest::Client::new()
+        .get(format!("{gateway}/v1/auto-models"))
+        .send()
+        .await
+        .expect("auto models summary response")
+        .json()
+        .await
+        .expect("auto models summary body");
+    let primary = &summary["routes"]["free"]["primary"];
+    assert_eq!(summary["view"], "summary");
+    assert_eq!(
+        primary["links"]["self"],
+        "/v1/catalog/models/free-provider/free-model"
+    );
+    assert!(primary.get("price_per_million").is_none());
+    assert!(primary.get("reference_price_per_million").is_none());
 }
 
 #[tokio::test]
@@ -1219,7 +1236,7 @@ async fn auto_models_keep_base_and_pro_variants_in_separate_modes() {
     config.server.state_path = Some(state_path);
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/auto-models"))
+        .get(format!("{gateway}/v1/auto-models?view=full"))
         .send()
         .await
         .expect("auto models response");

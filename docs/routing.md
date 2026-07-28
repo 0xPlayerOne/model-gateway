@@ -175,7 +175,9 @@ The catalog collection is the only model-discovery listing surface. The old `/v1
 
 ### `/v1/auto-models`
 
-Shows the current routing mode configuration with the top model selections for each mode. Returns a Pareto-frontier primary plus up to two additional eligible candidates as fallbacks. A dominated candidate may be a fallback but never displaces a non-dominated primary. Supports `?route=free|efficient|balanced|frontier` to filter a single mode.
+Shows the current routing mode configuration with the top model selections for each mode. The default summary includes only selection-relevant data and a `links.self` reference to the complete catalog resource for each candidate. Use `?view=full` when route diagnostics need benchmark matching and per-million pricing details. Returns a Pareto-frontier primary plus up to two additional eligible candidates as fallbacks. A dominated candidate may be a fallback but never displaces a non-dominated primary. Supports `?route=free|efficient|balanced|frontier` to filter a single mode.
+
+Capability fields are included only when the provider reports authoritative values. An omitted capability means unknown; the gateway never infers capabilities from a model name. The complete model resource is the source for all available metadata.
 
 ### `/v1/rankings`
 

@@ -1312,6 +1312,7 @@ struct RankingQuery {
 #[derive(Debug, Deserialize)]
 struct AutoModelsQuery {
     route: Option<String>,
+    view: Option<ModelView>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1531,12 +1532,7 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
             "coding": entry.benchmark.and_then(|b| b.coding_quality),
             "agentic": entry.benchmark.and_then(|b| b.agentic_quality),
         },
-        "capabilities": {
-            "context_length": entry.offering.context_length,
-            "supports_tools": entry.offering.supports_tools,
-            "supports_vision": entry.offering.supports_vision,
-            "supports_structured_output": entry.offering.supports_structured_output,
-        },
+        "capabilities": catalog_capabilities_json(entry.offering),
         "price_per_million": {
             "input": input_price,
             "output": output_price,
@@ -1632,7 +1628,7 @@ fn catalog_model_summary_json(entry: &CatalogModelEntry) -> Value {
         AccessKind::SubscriptionIncluded => "subscription_limited",
         AccessKind::Paid | AccessKind::Unknown => "paid",
     };
-    json!({
+    let mut response = json!({
         "id": model_id,
         "object": "model",
         "provider": entry.offering.provider,
@@ -1640,12 +1636,6 @@ fn catalog_model_summary_json(entry: &CatalogModelEntry) -> Value {
         "quality": {
             "score": entry.composite_quality,
             "rank": entry.rank,
-        },
-        "capabilities": {
-            "context_length": entry.offering.context_length,
-            "supports_tools": entry.offering.supports_tools,
-            "supports_vision": entry.offering.supports_vision,
-            "supports_structured_output": entry.offering.supports_structured_output,
         },
         "pricing": {
             "input": input_price,
@@ -1660,7 +1650,31 @@ fn catalog_model_summary_json(entry: &CatalogModelEntry) -> Value {
         "links": {
             "self": model_detail_path(entry.offering),
         },
-    })
+    });
+    if let Some(capabilities) = catalog_capabilities_json(entry.offering) {
+        response["capabilities"] = capabilities;
+    }
+    response
+}
+
+fn catalog_capabilities_json(offering: &CatalogOffering) -> Option<Value> {
+    let mut capabilities = serde_json::Map::new();
+    if let Some(context_length) = offering.context_length {
+        capabilities.insert("context_length".to_owned(), json!(context_length));
+    }
+    if let Some(supports_tools) = offering.supports_tools {
+        capabilities.insert("supports_tools".to_owned(), json!(supports_tools));
+    }
+    if let Some(supports_vision) = offering.supports_vision {
+        capabilities.insert("supports_vision".to_owned(), json!(supports_vision));
+    }
+    if let Some(supports_structured_output) = offering.supports_structured_output {
+        capabilities.insert(
+            "supports_structured_output".to_owned(),
+            json!(supports_structured_output),
+        );
+    }
+    (!capabilities.is_empty()).then_some(Value::Object(capabilities))
 }
 
 async fn load_paid_candidates(
@@ -1834,10 +1848,14 @@ fn encode_uri_component(value: &str, allow_slash: bool) -> String {
 }
 
 fn catalog_model_link(offering: &CatalogOffering) -> String {
+    catalog_model_link_parts(&offering.provider, &offering.model)
+}
+
+fn catalog_model_link_parts(provider: &str, model: &str) -> String {
     format!(
         "/v1/catalog/models/{}/{}",
-        encode_uri_component(&offering.provider, false),
-        encode_uri_component(&offering.model, false)
+        encode_uri_component(provider, false),
+        encode_uri_component(model, false)
     )
 }
 
@@ -2419,6 +2437,7 @@ async fn list_auto_models(
     State(state): State<AppState>,
     Query(query): Query<AutoModelsQuery>,
 ) -> Response {
+    let view = query.view.unwrap_or_default();
     let cfg = &state.config.server;
     let benchmark_max_age = cfg.benchmark_max_age_seconds;
     let catalog_max_age = cfg.catalog_max_age_seconds;
@@ -2494,6 +2513,7 @@ async fn list_auto_models(
                 cfg.free_models_quality.min_composite_quality,
                 None,
                 Some(cfg.free_models_quality.max_quality_regret),
+                view,
             ),
         );
     }
@@ -2508,6 +2528,7 @@ async fn list_auto_models(
                 cfg.efficient_quality_floor,
                 Some(cfg.balanced_quality_floor),
                 None,
+                view,
             ),
         );
     }
@@ -2522,6 +2543,7 @@ async fn list_auto_models(
                 cfg.balanced_quality_floor,
                 Some(cfg.frontier_quality_floor_single),
                 None,
+                view,
             ),
         );
     }
@@ -2536,11 +2558,12 @@ async fn list_auto_models(
                 cfg.frontier_quality_floor_single,
                 None,
                 None,
+                view,
             ),
         );
     }
 
-    Json(json!({"object": "auto_models", "routes": routes})).into_response()
+    Json(json!({"object": "auto_models", "routes": routes, "view": if view.is_full() { "full" } else { "summary" }})).into_response()
 }
 
 fn select_mode_models(
@@ -2550,6 +2573,7 @@ fn select_mode_models(
     quality_floor: f64,
     quality_ceiling: Option<f64>,
     max_quality_regret: Option<f64>,
+    view: ModelView,
 ) -> Value {
     let mut scored: Vec<ScoredCandidate<ModeModelValue<'_>>> = Vec::new();
 
@@ -2654,9 +2678,9 @@ fn select_mode_models(
 
     let mut iter = ranked.into_iter();
     let primary = iter.next();
-    let fallbacks: Vec<Value> = iter.take(2).map(|f| mode_model_entry(&f)).collect();
+    let fallbacks: Vec<Value> = iter.take(2).map(|f| mode_model_entry(&f, view)).collect();
 
-    let primary_entry = primary.map(|p| mode_model_entry(&p));
+    let primary_entry = primary.map(|p| mode_model_entry(&p, view));
 
     json!({
         "label": label,
@@ -2669,10 +2693,14 @@ fn select_mode_models(
     })
 }
 
-fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
-    json!({
+fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>, view: ModelView) -> Value {
+    let mut entry = json!({
+        "id": format!("{}/{}", candidate.value.provider, candidate.value.model),
         "model": candidate.value.model,
         "provider": candidate.value.provider,
+        "links": {
+            "self": catalog_model_link_parts(candidate.value.provider, candidate.value.model),
+        },
         "quality": candidate.quality,
         "expected_cost_microusd": if candidate.value.access_kind.has_zero_effective_price() {
             0
@@ -2721,7 +2749,15 @@ fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
                 "estimated": price.estimated,
             }))
         },
-    })
+    });
+    if !view.is_full() {
+        if let Some(object) = entry.as_object_mut() {
+            object.remove("benchmark_match");
+            object.remove("price_per_million");
+            object.remove("reference_price_per_million");
+        }
+    }
+    entry
 }
 
 async fn list_catalog_models(
@@ -5554,8 +5590,8 @@ mod tests {
     use super::{
         BenchmarkIdentityIndex, ModelMatchKind, ModelMetadata, RequestRequirements,
         SelectionMetadata, StreamChoice, add_model_headers, benchmark_ids_match,
-        benchmark_price_for_model, benchmarks_for_effort, copy_safe_headers,
-        decorate_json_response, encode_uri_component, estimate_request_tokens,
+        benchmark_price_for_model, benchmarks_for_effort, catalog_capabilities_json,
+        copy_safe_headers, decorate_json_response, encode_uri_component, estimate_request_tokens,
         expected_cost_microusd, find_all_matching_benchmarks, find_benchmark,
         find_exact_matching_benchmarks, find_exact_matching_benchmarks_indexed,
         find_suggested_benchmark, footer_sse_event, has_dynamic_or_release_suffix, header_value,
@@ -5569,7 +5605,7 @@ mod tests {
     use crate::identity::{
         IdentityAliasRecord, IdentityConfidence, IdentityEntityRecord, IdentityImport,
     };
-    use crate::routing::RoutingStore;
+    use crate::routing::{AccessKind, CatalogOffering, RoutingStore};
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use serde_json::json;
     use tracing_subscriber::fmt::MakeWriter;
@@ -6372,6 +6408,23 @@ mod tests {
         let _ = transform_sse_event(content.as_bytes(), footer, &mut state);
         let output = transform_sse_event(b"data: [DONE]\n\n", footer, &mut state);
         assert_eq!(output, vec![b"data: [DONE]\n\n".to_vec()]);
+    }
+
+    #[test]
+    fn unknown_capabilities_are_not_inferred() {
+        let offering = CatalogOffering {
+            provider: "cli-proxy".to_owned(),
+            model: "gpt-5.4".to_owned(),
+            refreshed_at: 0,
+            access_kind: AccessKind::SubscriptionIncluded,
+            context_length: None,
+            supports_tools: None,
+            supports_vision: None,
+            supports_structured_output: None,
+            input_price_per_million: None,
+            output_price_per_million: None,
+        };
+        assert_eq!(catalog_capabilities_json(&offering), None);
     }
 
     #[test]

@@ -32,11 +32,15 @@
     "/v1/auto-models": {
       "get": {
         "summary": "List automatic routing selections",
+        "description": "Returns compact route selections by default. Use view=full for benchmark matching and per-million pricing details; each candidate links to its complete catalog model resource.",
         "parameters": [
           {
             "name": "route",
             "in": "query",
             "schema": { "type": "string", "enum": ["free", "efficient", "balanced", "frontier"] }
+          },
+          {
+            "$ref": "#/components/parameters/View"
           }
         ],
         "responses": {
@@ -231,7 +235,7 @@
           "object": { "const": "model" },
           "links": { "$ref": "#/components/schemas/Links" },
           "model": { "type": "object" },
-          "capabilities": { "type": "object" },
+          "capabilities": { "type": ["object", "null"] },
           "price_per_million": { "type": "object" },
           "access": { "type": "object" }
         }
@@ -247,6 +251,8 @@
       "AutoModelRoutes": {
         "type": "object",
         "properties": {
+          "object": { "const": "auto_models" },
+          "view": { "type": "string", "enum": ["summary", "full"] },
           "routes": { "type": "object" }
         }
       },
