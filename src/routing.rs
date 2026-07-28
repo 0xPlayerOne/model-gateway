@@ -2794,7 +2794,7 @@ mod tests {
                     as_of TEXT, valid_from INTEGER, valid_until INTEGER, fetched_at INTEGER
                 );
                 INSERT INTO price_row VALUES
-                    ('manual-overrides', 'manual', 'runtime_provider', 'provider-a',
+                    ('models.dev', 'models_dev', 'canonical', 'provider-a',
                      'model-a', 1.0, 2.0, 0.5, 0.25, 0.1, 3.0, 4.0, 0.01,
                      '2026-07-28', 10, 20, 30);",
             )
@@ -2803,9 +2803,9 @@ mod tests {
         let observation = connection
             .query_row("SELECT * FROM price_row", [], price_observation_from_row)
             .expect("observation");
-        assert_eq!(observation.source, "manual-overrides");
-        assert_eq!(observation.source_kind, PriceSourceKind::Manual);
-        assert_eq!(observation.scope, PriceScope::RuntimeProvider);
+        assert_eq!(observation.source, "models.dev");
+        assert_eq!(observation.source_kind, PriceSourceKind::ModelsDev);
+        assert_eq!(observation.scope, PriceScope::Canonical);
         assert_eq!(observation.provider_key.as_deref(), Some("provider-a"));
         assert_eq!(observation.model_id, "model-a");
         assert_eq!(observation.rates.input_price_per_million, Some(1.0));
