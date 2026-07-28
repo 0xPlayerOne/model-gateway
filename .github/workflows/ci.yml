@@ -22,7 +22,7 @@ concurrency:
 jobs:
   format:
     name: Format
-    runs-on: ${{ vars.REPO_FOUNDRY_FAST_RUNNER || 'ubuntu-slim' }}
+    runs-on: ${{ vars.REPO_FOUNDRY_FAST_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -48,7 +48,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ${{ vars.REPO_FOUNDRY_FAST_RUNNER || 'ubuntu-slim' }}
+    runs-on: ${{ vars.REPO_FOUNDRY_FAST_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - name: Checkout
