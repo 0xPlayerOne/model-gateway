@@ -690,6 +690,7 @@ runs:
     - name: Measure Bun dependencies
       id: javascript-bun-cache
       if: >-
+        inputs.cache-save == 'true' &&
         inputs.install == 'true' &&
         inputs.install-javascript == 'true' &&
         inputs.cache-installed != 'false' &&
