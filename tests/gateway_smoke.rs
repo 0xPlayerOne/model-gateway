@@ -1044,7 +1044,13 @@ async fn auto_models_include_free_candidates_without_price_observations() {
     assert_eq!(summary["view"], "summary");
     assert_eq!(
         primary["links"]["self"],
-        "/v1/catalog/models/free-provider/free-model"
+        format!("{gateway}/v1/catalog/models/free-provider/free-model")
+    );
+    assert_eq!(
+        primary
+            .as_object()
+            .map(|object| object.keys().map(String::as_str).collect::<Vec<_>>()),
+        Some(vec!["id", "links", "quality"])
     );
     assert!(primary.get("price_per_million").is_none());
     assert!(primary.get("reference_price_per_million").is_none());
@@ -1103,7 +1109,7 @@ async fn auto_free_uses_reference_cost_for_quota_limited_models() {
     config.server.state_path = Some(state_path);
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/auto-models?route=free"))
+        .get(format!("{gateway}/v1/auto-models?route=free&view=full"))
         .send()
         .await
         .expect("auto models response");
@@ -1312,7 +1318,9 @@ async fn auto_models_fill_fallback_slots_beyond_pareto_frontier() {
     config.server.state_path = Some(state_path);
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/auto-models?route=efficient"))
+        .get(format!(
+            "{gateway}/v1/auto-models?route=efficient&view=full"
+        ))
         .send()
         .await
         .expect("auto models response");
@@ -4018,7 +4026,7 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     assert_eq!(body["data"][0]["id"], "paid/gpt-4o");
     assert_eq!(
         body["data"][0]["links"]["self"],
-        "/v1/catalog/models/paid/gpt-4o"
+        format!("{gateway}/v1/catalog/models/paid/gpt-4o")
     );
     assert_eq!(body["data"][0]["price_per_million"]["cache_read"], 1.25);
     assert_eq!(body["data"][0]["price_per_million"]["cache_write"], 3.75);
@@ -4065,9 +4073,14 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     assert_eq!(collection_body["view"], "summary");
     assert_eq!(collection_body["meta"]["total"], 2);
     assert_eq!(collection_body["data"].as_array().map(Vec::len), Some(1));
-    assert!(collection_body["data"][0]["id"].is_string());
-    assert_eq!(collection_body["data"][0]["object"], "model");
+    assert_eq!(
+        collection_body["data"][0]
+            .as_object()
+            .map(|object| object.keys().map(String::as_str).collect::<Vec<_>>()),
+        Some(vec!["id", "links", "quality"])
+    );
     assert!(collection_body["data"][0]["links"]["self"].is_string());
+    assert!(collection_body["data"][0]["quality"].is_object());
     assert!(collection_body["links"]["next"].is_string());
     let next_link = collection_body["links"]["next"]
         .as_str()
@@ -4201,7 +4214,7 @@ async fn subscription_models_report_zero_effective_and_reference_prices() {
     assert!(body["data"].as_array().is_some_and(Vec::is_empty));
 
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/auto-models?route=frontier"))
+        .get(format!("{gateway}/v1/auto-models?route=frontier&view=full"))
         .send()
         .await
         .expect("auto models response");

@@ -165,7 +165,7 @@ When a request succeeds, the session is pinned to `(provider, model)` for 30 min
 
 ### `/v1/catalog/models`
 
-The canonical model discovery collection. Use `?access=free|paid|all`, `?task=`, `?provider=`, `?limit=`, `?cursor=`, and `?view=summary|full`. The default is a compact summary of at most 25 models. Cursors are bound to the catalog snapshot; a refresh invalidates an old cursor with `409 stale_cursor`. Responses include `meta.snapshot`, `meta.total`, navigable links, `ETag`, `Last-Modified`, and conditional `304 Not Modified` support.
+The canonical model discovery collection. Use `?access=free|paid|all`, `?task=`, `?provider=`, `?limit=`, `?cursor=`, and `?view=summary|full`. The default is a compact summary of at most 25 models; each item contains only `id`, `quality`, and an absolute clickable `links.self` URL. Use `?view=full` for complete model metadata. Cursors are bound to the catalog snapshot; a refresh invalidates an old cursor with `409 stale_cursor`. Responses include `meta.snapshot`, `meta.total`, navigable links, `ETag`, `Last-Modified`, and conditional `304 Not Modified` support.
 
 ### `/v1/catalog/models/{provider}/{model}`
 
@@ -175,7 +175,7 @@ The catalog collection is the only model-discovery listing surface. The old `/v1
 
 ### `/v1/auto-models`
 
-Shows the current routing mode configuration with the top model selections for each mode. The default summary includes only selection-relevant data and a `links.self` reference to the complete catalog resource for each candidate. Use `?view=full` when route diagnostics need benchmark matching and per-million pricing details. Returns a Pareto-frontier primary plus up to two additional eligible candidates as fallbacks. A dominated candidate may be a fallback but never displaces a non-dominated primary. Supports `?route=free|efficient|balanced|frontier` to filter a single mode.
+Shows the current routing mode configuration with the top model selections for each mode. The default summary includes only `id`, `quality`, and an absolute clickable `links.self` URL to the complete catalog resource. Use `?view=full` when route diagnostics need benchmark matching and per-million pricing details. Returns a Pareto-frontier primary plus up to two additional eligible candidates as fallbacks. A dominated candidate may be a fallback but never displaces a non-dominated primary. Supports `?route=free|efficient|balanced|frontier` to filter a single mode.
 
 Capability fields are included only when the provider reports authoritative values. An omitted capability means unknown; the gateway never infers capabilities from a model name. The complete model resource is the source for all available metadata.
 

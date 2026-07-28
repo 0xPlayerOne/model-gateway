@@ -285,7 +285,10 @@
         "required": ["object", "data", "meta", "links"],
         "properties": {
           "object": { "const": "model.collection" },
-          "data": { "type": "array", "items": { "$ref": "#/components/schemas/ModelResource" } },
+          "data": { "type": "array", "items": { "oneOf": [
+            { "$ref": "#/components/schemas/ModelSummary" },
+            { "$ref": "#/components/schemas/ModelResource" }
+          ] } },
           "meta": { "type": "object" },
           "links": { "$ref": "#/components/schemas/Links" }
         }
@@ -293,9 +296,18 @@
       "Links": {
         "type": "object",
         "properties": {
-          "self": { "type": "string", "format": "uri-reference" },
-          "prev": { "type": "string", "format": "uri-reference" },
-          "next": { "type": "string", "format": "uri-reference" }
+          "self": { "type": "string", "format": "uri" },
+          "prev": { "type": "string", "format": "uri" },
+          "next": { "type": "string", "format": "uri" }
+        }
+      },
+      "ModelSummary": {
+        "type": "object",
+        "required": ["id", "links", "quality"],
+        "properties": {
+          "id": { "type": "string" },
+          "links": { "$ref": "#/components/schemas/Links" },
+          "quality": { "type": "object" }
         }
       },
       "Error": {

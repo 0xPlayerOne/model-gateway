@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::{BytesRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -1315,6 +1315,12 @@ struct AutoModelsQuery {
     view: Option<ModelView>,
 }
 
+#[derive(Clone, Copy)]
+struct ModelResponseContext<'a> {
+    view: ModelView,
+    origin: &'a str,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum CatalogAccess {
@@ -1471,7 +1477,7 @@ struct CatalogModelEntry<'a> {
     account_limit: Option<AccountLimitSnapshot>,
 }
 
-fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
+fn catalog_model_json(entry: &CatalogModelEntry, origin: &str) -> Value {
     let has_zero_effective_price = entry.offering.access_kind.has_zero_effective_price();
     let model_id = model_resource_id(entry.offering);
     let reference_input = entry
@@ -1515,7 +1521,7 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
         "id": model_id,
         "object": "model",
         "links": {
-            "self": model_detail_path(entry.offering),
+            "self": model_detail_path(entry.offering, origin),
         },
         "model": {
             "name": entry.offering.model,
@@ -1586,75 +1592,21 @@ fn model_resource_id(offering: &CatalogOffering) -> String {
     format!("{}/{}", offering.provider, offering.model)
 }
 
-fn model_detail_path(offering: &CatalogOffering) -> String {
-    catalog_model_link(offering)
+fn model_detail_path(offering: &CatalogOffering, origin: &str) -> String {
+    catalog_model_link(offering, origin)
 }
 
-fn catalog_model_summary_json(entry: &CatalogModelEntry) -> Value {
-    let model_id = model_resource_id(entry.offering);
-    let has_zero_effective_price = entry.offering.access_kind.has_zero_effective_price();
-    let input_price = if has_zero_effective_price {
-        Some(0.0)
-    } else {
-        entry
-            .price
-            .as_ref()
-            .map(|price| price.input_price_per_million)
-            .or(entry.offering.input_price_per_million)
-            .or_else(|| entry.benchmark.and_then(|b| b.input_price_per_million))
-    };
-    let output_price = if has_zero_effective_price {
-        Some(0.0)
-    } else {
-        entry
-            .price
-            .as_ref()
-            .map(|price| price.output_price_per_million)
-            .or(entry.offering.output_price_per_million)
-            .or_else(|| entry.benchmark.and_then(|b| b.output_price_per_million))
-    };
-    let price_source = if has_zero_effective_price {
-        Some(match entry.offering.access_kind {
-            AccessKind::ZeroPrice => "provider_free",
-            AccessKind::QuotaLimitedFreeTier => "free_tier",
-            AccessKind::SubscriptionIncluded => "subscription",
-            AccessKind::Paid | AccessKind::Unknown => "unknown",
-        })
-    } else {
-        entry.price.as_ref().map(|price| price.source.as_str())
-    };
-    let overage = match entry.offering.access_kind {
-        AccessKind::ZeroPrice | AccessKind::QuotaLimitedFreeTier => "gateway_blocked",
-        AccessKind::SubscriptionIncluded => "subscription_limited",
-        AccessKind::Paid | AccessKind::Unknown => "paid",
-    };
-    let mut response = json!({
-        "id": model_id,
-        "object": "model",
-        "provider": entry.offering.provider,
-        "model": entry.offering.model,
+fn catalog_model_summary_json(entry: &CatalogModelEntry, origin: &str) -> Value {
+    json!({
+        "id": model_resource_id(entry.offering),
+        "links": {
+            "self": model_detail_path(entry.offering, origin),
+        },
         "quality": {
             "score": entry.composite_quality,
             "rank": entry.rank,
         },
-        "pricing": {
-            "input": input_price,
-            "output": output_price,
-            "source": price_source,
-            "eligible": input_price.is_some() && output_price.is_some(),
-        },
-        "access": {
-            "kind": entry.offering.access_kind,
-            "overage": overage,
-        },
-        "links": {
-            "self": model_detail_path(entry.offering),
-        },
-    });
-    if let Some(capabilities) = catalog_capabilities_json(entry.offering) {
-        response["capabilities"] = capabilities;
-    }
-    response
+    })
 }
 
 fn catalog_capabilities_json(offering: &CatalogOffering) -> Option<Value> {
@@ -1847,16 +1799,33 @@ fn encode_uri_component(value: &str, allow_slash: bool) -> String {
     encoded
 }
 
-fn catalog_model_link(offering: &CatalogOffering) -> String {
-    catalog_model_link_parts(&offering.provider, &offering.model)
+fn catalog_model_link(offering: &CatalogOffering, origin: &str) -> String {
+    catalog_model_link_parts(&offering.provider, &offering.model, origin)
 }
 
-fn catalog_model_link_parts(provider: &str, model: &str) -> String {
+fn catalog_model_link_parts(provider: &str, model: &str, origin: &str) -> String {
     format!(
-        "/v1/catalog/models/{}/{}",
+        "{}/v1/catalog/models/{}/{}",
+        origin,
         encode_uri_component(provider, false),
         encode_uri_component(model, false)
     )
+}
+
+fn public_origin(headers: &HeaderMap) -> String {
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("http");
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("localhost");
+    format!("{scheme}://{host}")
 }
 
 fn catalog_links(
@@ -1866,6 +1835,7 @@ fn catalog_links(
     offset: usize,
     limit: usize,
     total: usize,
+    origin: &str,
 ) -> Value {
     let query_url = |cursor: Option<String>| {
         let mut params = vec![format!("access={}", catalog_access_name(access))];
@@ -1888,7 +1858,7 @@ fn catalog_links(
         if let Some(cursor) = cursor {
             params.push(format!("cursor={}", encode_uri_component(&cursor, false)));
         }
-        format!("/v1/catalog/models?{}", params.join("&"))
+        format!("{origin}/v1/catalog/models?{}", params.join("&"))
     };
     let mut links = serde_json::Map::from_iter([(
         "self".to_owned(),
@@ -2025,6 +1995,7 @@ fn catalog_model_response(
     rank: usize,
     account_limit: Option<AccountLimitSnapshot>,
     view: ModelView,
+    origin: &str,
 ) -> Value {
     let composite_quality = candidate.benchmark.as_ref().and_then(composite_quality);
     let effort_level = candidate
@@ -2043,9 +2014,9 @@ fn catalog_model_response(
         account_limit,
     };
     if view.is_full() {
-        catalog_model_json(&entry)
+        catalog_model_json(&entry, origin)
     } else {
-        catalog_model_summary_json(&entry)
+        catalog_model_summary_json(&entry, origin)
     }
 }
 
@@ -2435,9 +2406,15 @@ fn collect_paid_candidates(
 
 async fn list_auto_models(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<AutoModelsQuery>,
 ) -> Response {
     let view = query.view.unwrap_or_default();
+    let origin = public_origin(&headers);
+    let response_context = ModelResponseContext {
+        view,
+        origin: &origin,
+    };
     let cfg = &state.config.server;
     let benchmark_max_age = cfg.benchmark_max_age_seconds;
     let catalog_max_age = cfg.catalog_max_age_seconds;
@@ -2513,7 +2490,7 @@ async fn list_auto_models(
                 cfg.free_models_quality.min_composite_quality,
                 None,
                 Some(cfg.free_models_quality.max_quality_regret),
-                view,
+                response_context,
             ),
         );
     }
@@ -2528,7 +2505,7 @@ async fn list_auto_models(
                 cfg.efficient_quality_floor,
                 Some(cfg.balanced_quality_floor),
                 None,
-                view,
+                response_context,
             ),
         );
     }
@@ -2543,7 +2520,7 @@ async fn list_auto_models(
                 cfg.balanced_quality_floor,
                 Some(cfg.frontier_quality_floor_single),
                 None,
-                view,
+                response_context,
             ),
         );
     }
@@ -2558,7 +2535,7 @@ async fn list_auto_models(
                 cfg.frontier_quality_floor_single,
                 None,
                 None,
-                view,
+                response_context,
             ),
         );
     }
@@ -2573,7 +2550,7 @@ fn select_mode_models(
     quality_floor: f64,
     quality_ceiling: Option<f64>,
     max_quality_regret: Option<f64>,
-    view: ModelView,
+    response_context: ModelResponseContext<'_>,
 ) -> Value {
     let mut scored: Vec<ScoredCandidate<ModeModelValue<'_>>> = Vec::new();
 
@@ -2678,9 +2655,12 @@ fn select_mode_models(
 
     let mut iter = ranked.into_iter();
     let primary = iter.next();
-    let fallbacks: Vec<Value> = iter.take(2).map(|f| mode_model_entry(&f, view)).collect();
+    let fallbacks: Vec<Value> = iter
+        .take(2)
+        .map(|f| mode_model_entry(&f, response_context))
+        .collect();
 
-    let primary_entry = primary.map(|p| mode_model_entry(&p, view));
+    let primary_entry = primary.map(|p| mode_model_entry(&p, response_context));
 
     json!({
         "label": label,
@@ -2693,13 +2673,29 @@ fn select_mode_models(
     })
 }
 
-fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>, view: ModelView) -> Value {
-    let mut entry = json!({
-        "id": format!("{}/{}", candidate.value.provider, candidate.value.model),
+fn mode_model_entry(
+    candidate: &ScoredCandidate<ModeModelValue<'_>>,
+    response_context: ModelResponseContext<'_>,
+) -> Value {
+    let id = format!("{}/{}", candidate.value.provider, candidate.value.model);
+    let link = catalog_model_link_parts(
+        candidate.value.provider,
+        candidate.value.model,
+        response_context.origin,
+    );
+    if !response_context.view.is_full() {
+        return json!({
+            "id": id,
+            "links": {"self": link},
+            "quality": candidate.quality,
+        });
+    }
+    let entry = json!({
+        "id": id,
         "model": candidate.value.model,
         "provider": candidate.value.provider,
         "links": {
-            "self": catalog_model_link_parts(candidate.value.provider, candidate.value.model),
+            "self": link,
         },
         "quality": candidate.quality,
         "expected_cost_microusd": if candidate.value.access_kind.has_zero_effective_price() {
@@ -2750,13 +2746,6 @@ fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>, view: Model
             }))
         },
     });
-    if !view.is_full() {
-        if let Some(object) = entry.as_object_mut() {
-            object.remove("benchmark_match");
-            object.remove("price_per_million");
-            object.remove("reference_price_per_million");
-        }
-    }
     entry
 }
 
@@ -2765,6 +2754,7 @@ async fn list_catalog_models(
     headers: HeaderMap,
     query: Result<Query<CatalogModelsQuery>, QueryRejection>,
 ) -> Response {
+    let origin = public_origin(&headers);
     let Query(query) = match query {
         Ok(query) => query,
         Err(rejection) => return catalog_query_error(rejection),
@@ -2874,6 +2864,7 @@ async fn list_catalog_models(
                     .get(&candidate.offering.provider)
                     .copied(),
                 view,
+                &origin,
             )
         })
         .collect::<Vec<_>>();
@@ -2889,7 +2880,15 @@ async fn list_catalog_models(
                 "limit": limit,
                 "returned": data.len(),
             },
-            "links": catalog_links(&query, access, &snapshot.token, offset, limit, total),
+            "links": catalog_links(
+                &query,
+                access,
+                &snapshot.token,
+                offset,
+                limit,
+                total,
+                &origin,
+            ),
             "data": data,
         }),
         &headers,
@@ -2974,12 +2973,13 @@ async fn get_catalog_model(
         rank + 1,
         snapshot.account_limits.get(provider).copied(),
         ModelView::Full,
+        &public_origin(&headers),
     );
     cached_json_response(
         json!({
             "object": "model",
             "id": model_resource_id(&candidate.offering),
-            "links": {"self": catalog_model_link(&candidate.offering)},
+            "links": {"self": catalog_model_link(&candidate.offering, &public_origin(&headers))},
             "data": resource,
             "meta": {"snapshot": snapshot.token},
         }),
