@@ -1200,18 +1200,26 @@ struct CatalogModelEntry<'a> {
 }
 
 fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
-    let input_price = entry
-        .price
-        .as_ref()
-        .map(|price| price.input_price_per_million)
-        .or(entry.offering.input_price_per_million)
-        .or_else(|| entry.benchmark.and_then(|b| b.input_price_per_million));
-    let output_price = entry
-        .price
-        .as_ref()
-        .map(|price| price.output_price_per_million)
-        .or(entry.offering.output_price_per_million)
-        .or_else(|| entry.benchmark.and_then(|b| b.output_price_per_million));
+    let input_price = if entry.offering.is_free {
+        Some(0.0)
+    } else {
+        entry
+            .price
+            .as_ref()
+            .map(|price| price.input_price_per_million)
+            .or(entry.offering.input_price_per_million)
+            .or_else(|| entry.benchmark.and_then(|b| b.input_price_per_million))
+    };
+    let output_price = if entry.offering.is_free {
+        Some(0.0)
+    } else {
+        entry
+            .price
+            .as_ref()
+            .map(|price| price.output_price_per_million)
+            .or(entry.offering.output_price_per_million)
+            .or_else(|| entry.benchmark.and_then(|b| b.output_price_per_million))
+    };
     json!({
         "model": {
             "name": entry.offering.model,
@@ -1237,8 +1245,16 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
         "price_per_million": {
             "input": input_price,
             "output": output_price,
-            "source": entry.price.as_ref().map(|price| price.source.clone()),
-            "estimated": entry.price.as_ref().map(|price| price.estimated),
+            "source": if entry.offering.is_free {
+                Some("provider_free")
+            } else {
+                entry.price.as_ref().map(|price| price.source.as_str())
+            },
+            "estimated": if entry.offering.is_free {
+                Some(false)
+            } else {
+                entry.price.as_ref().map(|price| price.estimated)
+            },
             "pricing_eligible": input_price.is_some() && output_price.is_some(),
         },
         "benchmark_match": entry.match_kind.map(ModelMatchKind::as_str),
@@ -1380,12 +1396,14 @@ struct PaidCandidateContext<'a> {
     mappings: &'a IdentityMappingIndexes,
 }
 
+#[derive(Clone, Copy)]
 struct ModeModelValue<'a> {
     model: &'a str,
     provider: &'a str,
     price: Option<&'a EffectivePrice>,
     pricing_eligible: bool,
     match_kind: Option<ModelMatchKind>,
+    is_free: bool,
 }
 
 fn collect_free_candidates(
@@ -1746,17 +1764,31 @@ fn select_mode_models(
                 price: candidate.price.as_ref(),
                 pricing_eligible: candidate.offering.is_free || candidate.price.is_some(),
                 match_kind: candidate.match_kind,
+                is_free: candidate.offering.is_free,
             },
         });
     }
 
-    let mut ranked = pareto_rank(scored);
-    ranked.sort_by(|a, b| {
+    let eligible = scored;
+    let mut ranked = pareto_rank(eligible.clone());
+    let rank_order = |a: &ScoredCandidate<ModeModelValue<'_>>,
+                      b: &ScoredCandidate<ModeModelValue<'_>>| {
         a.expected_cost_microusd
             .cmp(&b.expected_cost_microusd)
             .then_with(|| a.latency_seconds.total_cmp(&b.latency_seconds))
             .then_with(|| b.quality.total_cmp(&a.quality))
-    });
+    };
+    ranked.sort_by(rank_order);
+    let selected = ranked
+        .iter()
+        .map(|candidate| (candidate.value.provider, candidate.value.model))
+        .collect::<BTreeSet<_>>();
+    let mut dominated = eligible
+        .into_iter()
+        .filter(|candidate| !selected.contains(&(candidate.value.provider, candidate.value.model)))
+        .collect::<Vec<_>>();
+    dominated.sort_by(rank_order);
+    ranked.extend(dominated);
 
     let mut iter = ranked.into_iter();
     let primary = iter.next();
@@ -1783,12 +1815,21 @@ fn mode_model_entry(candidate: &ScoredCandidate<ModeModelValue<'_>>) -> Value {
         "latency_seconds": candidate.latency_seconds,
         "pricing_eligible": candidate.value.pricing_eligible,
         "benchmark_match": candidate.value.match_kind.map(ModelMatchKind::as_str),
-        "price_per_million": candidate.value.price.map(|price| json!({
-            "input": price.input_price_per_million,
-            "output": price.output_price_per_million,
-            "source": price.source,
-            "estimated": price.estimated,
-        })),
+        "price_per_million": if candidate.value.is_free {
+            Some(json!({
+                "input": 0.0,
+                "output": 0.0,
+                "source": "provider_free",
+                "estimated": false,
+            }))
+        } else {
+            candidate.value.price.map(|price| json!({
+                "input": price.input_price_per_million,
+                "output": price.output_price_per_million,
+                "source": price.source,
+                "estimated": price.estimated,
+            }))
+        },
     })
 }
 
@@ -3390,23 +3431,49 @@ async fn resolve_benchmark_targets(
         }
         None => None,
     };
-    let mut targets = pareto_rank(candidates)
-        .into_iter()
-        .map(|candidate| candidate.value)
-        .collect::<Vec<_>>();
-    targets.sort_by(|left, right| {
+    let eligible = candidates;
+    let mut ranked = pareto_rank(eligible.clone());
+    let rank_order = |left: &ScoredCandidate<SelectedTarget>,
+                      right: &ScoredCandidate<SelectedTarget>| {
         let left_pinned = pinned
             .as_ref()
-            .is_some_and(|pin| pin.0 == left.provider && pin.1 == left.model);
+            .is_some_and(|pin| pin.0 == left.value.provider && pin.1 == left.value.model);
         let right_pinned = pinned
             .as_ref()
-            .is_some_and(|pin| pin.0 == right.provider && pin.1 == right.model);
+            .is_some_and(|pin| pin.0 == right.value.provider && pin.1 == right.value.model);
         left.expected_cost_microusd
             .cmp(&right.expected_cost_microusd)
             .then_with(|| right_pinned.cmp(&left_pinned))
-            .then_with(|| (&left.provider, &left.model).cmp(&(&right.provider, &right.model)))
-    });
-    Ok(targets)
+            .then_with(|| {
+                (&left.value.provider, &left.value.model)
+                    .cmp(&(&right.value.provider, &right.value.model))
+            })
+    };
+    ranked.sort_by(rank_order);
+    let selected = ranked
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.value.provider.as_str(),
+                candidate.value.model.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let mut dominated = eligible
+        .into_iter()
+        .filter(|candidate| {
+            !selected.contains(&(
+                candidate.value.provider.as_str(),
+                candidate.value.model.as_str(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    dominated.sort_by(rank_order);
+    ranked.extend(dominated);
+    Ok(ranked
+        .into_iter()
+        .map(|candidate| candidate.value)
+        .collect())
 }
 
 fn is_reasoning_effort(effort: &str) -> bool {

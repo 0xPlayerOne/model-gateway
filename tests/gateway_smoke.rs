@@ -657,6 +657,12 @@ async fn opencode_zen_free_models_recover_only_reviewed_benchmarks() {
             )
         })
         .collect::<BTreeMap<_, _>>();
+    for entry in body["data"].as_array().expect("model array") {
+        assert_eq!(entry["price_per_million"]["input"], 0.0);
+        assert_eq!(entry["price_per_million"]["output"], 0.0);
+        assert_eq!(entry["price_per_million"]["source"], "provider_free");
+        assert_eq!(entry["price_per_million"]["estimated"], false);
+    }
     assert_eq!(models.len(), 7);
     assert_eq!(models["deepseek-v4-flash-free"], Some("exact"));
     assert_eq!(models["north-mini-code-free"], Some("exact"));
@@ -782,6 +788,14 @@ async fn auto_models_include_free_candidates_without_price_observations() {
         body["routes"]["free"]["primary"]["expected_cost_microusd"],
         0
     );
+    assert_eq!(
+        body["routes"]["free"]["primary"]["price_per_million"]["input"],
+        0.0
+    );
+    assert_eq!(
+        body["routes"]["free"]["primary"]["price_per_million"]["source"],
+        "provider_free"
+    );
 }
 
 #[tokio::test]
@@ -853,6 +867,79 @@ async fn auto_models_keep_base_and_pro_variants_in_separate_modes() {
         body["routes"]["balanced"]["primary"]["benchmark_match"],
         "exact"
     );
+}
+
+#[tokio::test]
+async fn auto_models_fill_fallback_slots_beyond_pareto_frontier() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    let models = [
+        ("efficient-a", 41.0, 0.10, 1.0),
+        ("efficient-b", 40.0, 0.20, 2.0),
+        ("efficient-c", 39.0, 0.30, 3.0),
+        ("efficient-d", 38.0, 0.40, 4.0),
+    ];
+    store
+        .replace_catalog(
+            "paid-provider",
+            &models
+                .iter()
+                .map(|(model, _, price, _)| CatalogRecord {
+                    model: (*model).to_owned(),
+                    is_free: false,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(*price),
+                    output_price_per_million: Some(*price),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .expect("catalog");
+    let benchmarks = models
+        .iter()
+        .map(|(model, quality, price, latency)| {
+            let mut benchmark =
+                BenchmarkModel::fixture(model, *quality, *quality, *quality, *price, *price);
+            benchmark.latency_seconds = Some(*latency);
+            benchmark
+        })
+        .collect::<Vec<_>>();
+    store
+        .replace_benchmarks("fixture", "Fixture", &benchmarks)
+        .expect("benchmarks");
+    drop(store);
+
+    let mut paid = provider("https://example.com/v1".to_owned());
+    paid.billing_mode = BillingMode::Paid;
+    let mut config = config_for(
+        BTreeMap::from([("paid-provider".to_owned(), paid)]),
+        vec![TargetConfig {
+            provider: "paid-provider".to_owned(),
+            model: "efficient-a".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/auto-models?route=efficient"))
+        .send()
+        .await
+        .expect("auto models response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("auto models body");
+    assert_eq!(
+        body["routes"]["efficient"]["primary"]["model"],
+        "efficient-a"
+    );
+    let fallbacks = body["routes"]["efficient"]["fallbacks"]
+        .as_array()
+        .expect("fallback array");
+    assert_eq!(fallbacks.len(), 2);
+    assert_eq!(fallbacks[0]["model"], "efficient-b");
+    assert_eq!(fallbacks[1]["model"], "efficient-c");
 }
 
 #[tokio::test]
