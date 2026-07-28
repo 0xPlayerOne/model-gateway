@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::BytesRejection;
-use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -197,6 +197,7 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
         .route("/v1/models", get(list_models))
+        .route("/v1/models/{*model_id}", get(get_model))
         .route("/v1/providers", get(list_providers))
         .route("/v1/rankings", get(list_rankings))
         .route("/v1/auto-models", get(list_auto_models))
@@ -1304,6 +1305,27 @@ struct PaidModelsQuery {
     task: Option<String>,
     limit: Option<usize>,
     provider: Option<String>,
+    page: Option<usize>,
+    view: Option<ModelView>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ModelView {
+    Summary,
+    Full,
+}
+
+impl ModelView {
+    fn is_full(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+impl Default for ModelView {
+    fn default() -> Self {
+        Self::Summary
+    }
 }
 
 async fn list_rankings(
@@ -1538,6 +1560,166 @@ fn catalog_model_json(entry: &CatalogModelEntry) -> Value {
         "benchmark_match": entry.match_kind.map(ModelMatchKind::as_str),
         "benchmark_id": entry.benchmark.map(|benchmark| benchmark.id.clone()),
     })
+}
+
+fn model_resource_id(offering: &CatalogOffering) -> String {
+    format!("{}/{}", offering.provider, offering.model)
+}
+
+fn model_detail_path(offering: &CatalogOffering) -> String {
+    format!("/v1/models/{}", model_resource_id(offering))
+}
+
+fn catalog_model_summary_json(entry: &CatalogModelEntry) -> Value {
+    let full = catalog_model_json(entry);
+    let model_id = model_resource_id(entry.offering);
+    json!({
+        "id": model_id,
+        "object": "model",
+        "provider": entry.offering.provider,
+        "model": entry.offering.model,
+        "quality": {
+            "score": entry.composite_quality,
+            "rank": entry.rank,
+        },
+        "capabilities": full["capabilities"].clone(),
+        "pricing": {
+            "input": full["price_per_million"]["input"].clone(),
+            "output": full["price_per_million"]["output"].clone(),
+            "source": full["price_per_million"]["source"].clone(),
+            "eligible": full["price_per_million"]["pricing_eligible"].clone(),
+        },
+        "access": {
+            "kind": full["access"]["kind"].clone(),
+            "overage": full["access"]["overage"].clone(),
+        },
+        "links": {
+            "self": model_detail_path(entry.offering),
+        },
+    })
+}
+
+fn ranked_paid_candidates(
+    mut candidates: Vec<ModelCandidate>,
+    task: TaskKind,
+) -> Vec<ModelCandidate> {
+    candidates.sort_by(|left, right| {
+        let left_quality = left.benchmark.as_ref().and_then(|b| quality_for(b, task));
+        let right_quality = right.benchmark.as_ref().and_then(|b| quality_for(b, task));
+        match (left_quality, right_quality) {
+            (Some(left_quality), Some(right_quality)) => right_quality
+                .total_cmp(&left_quality)
+                .then_with(|| left.offering.model.cmp(&right.offering.model)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.offering.model.cmp(&right.offering.model),
+        }
+        .then_with(|| left.offering.provider.cmp(&right.offering.provider))
+    });
+
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|candidate| {
+        seen.insert((
+            candidate.offering.provider.clone(),
+            normalize_identifier(&candidate.offering.model),
+        ))
+    });
+    candidates
+}
+
+async fn load_paid_candidates(
+    state: &AppState,
+    provider_filter: Option<&str>,
+) -> Result<Vec<ModelCandidate>, ()> {
+    let max_age = state.config.server.catalog_max_age_seconds;
+    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
+    let (offerings, benchmarks) = tokio::try_join!(
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.all_candidates(max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.benchmark_models(benchmark_max_age)
+        })
+    )
+    .map_err(|_| ())?;
+
+    let mut benchmark_map = BTreeMap::new();
+    for benchmark in benchmarks {
+        benchmark_map
+            .entry(benchmark.id.clone())
+            .or_insert_with(Vec::new)
+            .push(benchmark);
+    }
+    let mappings = identity_mapping_indexes(&state.routing);
+    Ok(collect_paid_candidates(
+        &offerings,
+        &benchmark_map,
+        PaidCandidateContext {
+            providers: &state.config.providers,
+            runtimes: &state.providers,
+            cfg: &state.config.server,
+            provider_filter,
+            routing: &state.routing,
+            pricing_max_age_seconds: state.config.server.pricing_max_age_seconds,
+            mappings: &mappings,
+        },
+    ))
+}
+
+fn catalog_model_response(candidate: &ModelCandidate, rank: usize, view: ModelView) -> Value {
+    let composite_quality = candidate.benchmark.as_ref().and_then(composite_quality);
+    let effort_level = candidate
+        .benchmark
+        .as_ref()
+        .and_then(|benchmark| benchmark.reasoning_effort.as_deref());
+    let entry = CatalogModelEntry {
+        offering: &candidate.offering,
+        benchmark: candidate.benchmark.as_ref(),
+        price: candidate.price.clone(),
+        composite_quality,
+        rank,
+        effort_level,
+        parameters: None,
+        match_kind: candidate.match_kind,
+        account_limit: None,
+    };
+    if view.is_full() {
+        catalog_model_json(&entry)
+    } else {
+        catalog_model_summary_json(&entry)
+    }
+}
+
+fn paged_links(query: &PaidModelsQuery, page: usize, pages: usize) -> Value {
+    let page_url = |target_page: usize| {
+        let mut params = vec![format!("page={target_page}")];
+        if let Some(limit) = query.limit {
+            params.push(format!("limit={limit}"));
+        }
+        if let Some(task) = query.task.as_deref() {
+            params.push(format!("task={task}"));
+        }
+        if let Some(provider) = query.provider.as_deref() {
+            params.push(format!("provider={provider}"));
+        }
+        if let Some(view) = query.view {
+            params.push(format!(
+                "view={}",
+                if view.is_full() { "full" } else { "summary" }
+            ));
+        }
+        format!("/v1/paid-models?{}", params.join("&"))
+    };
+
+    let mut links =
+        serde_json::Map::from_iter([("self".to_owned(), Value::String(page_url(page)))]);
+    if page > 1 {
+        links.insert("prev".to_owned(), Value::String(page_url(page - 1)));
+    }
+    if page < pages {
+        links.insert("next".to_owned(), Value::String(page_url(page + 1)));
+    }
+    Value::Object(links)
 }
 
 struct ModelCandidate {
@@ -2510,20 +2692,14 @@ async fn list_paid_models(
                 .into_response();
         }
     };
-    let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
+    let limit = query.limit.unwrap_or(25).clamp(1, 100);
+    let page = query.page.unwrap_or(1).max(1);
+    let view = query.view.unwrap_or_default();
     let max_age = state.config.server.catalog_max_age_seconds;
     let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
-
-    let (offerings, benchmarks) = match tokio::try_join!(
-        routing_operation(state.routing.clone(), move |routing| {
-            routing.all_candidates(max_age)
-        }),
-        routing_operation(state.routing.clone(), move |routing| {
-            routing.benchmark_models(benchmark_max_age)
-        })
-    ) {
-        Ok(v) => v,
-        Err(_) => {
+    let candidates = match load_paid_candidates(&state, provider_filter).await {
+        Ok(candidates) => candidates,
+        Err(()) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
@@ -2537,34 +2713,10 @@ async fn list_paid_models(
                 .into_response();
         }
     };
-
-    let mut benchmark_map = BTreeMap::new();
-    for b in &benchmarks {
-        benchmark_map
-            .entry(b.id.clone())
-            .or_insert_with(Vec::new)
-            .push(b.clone());
-    }
-    let mappings = identity_mapping_indexes(&state.routing);
-
-    let candidates = collect_paid_candidates(
-        &offerings,
-        &benchmark_map,
-        PaidCandidateContext {
-            providers: &state.config.providers,
-            runtimes: &state.providers,
-            cfg: &state.config.server,
-            provider_filter,
-            routing: &state.routing,
-            pricing_max_age_seconds: state.config.server.pricing_max_age_seconds,
-            mappings: &mappings,
-        },
-    );
+    let ranked = ranked_paid_candidates(candidates, task);
 
     let mut providers = BTreeMap::new();
-    let mut data = Vec::new();
-
-    for candidate in &candidates {
+    for candidate in &ranked {
         let Some(config) = state.config.providers.get(&candidate.offering.provider) else {
             continue;
         };
@@ -2584,73 +2736,119 @@ async fn list_paid_models(
                     "billing_mode": billing_label,
                 })
             });
-
-        data.push((
-            candidate
-                .benchmark
-                .as_ref()
-                .and_then(|benchmark| quality_for(benchmark, task)),
-            candidate.benchmark.clone(),
-            candidate.price.clone(),
-            candidate.offering.clone(),
-            candidate.match_kind,
-        ));
     }
 
-    data.sort_by(|left, right| {
-        let (left_quality, _, _, left_offering, _) = left;
-        let (right_quality, _, _, right_offering, _) = right;
-        match (left_quality, right_quality) {
-            (Some(lq), Some(rq)) => rq
-                .total_cmp(lq)
-                .then_with(|| left_offering.model.cmp(&right_offering.model)),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => left_offering.model.cmp(&right_offering.model),
-        }
-    });
-
-    let mut seen = std::collections::HashSet::new();
-    data.retain(|(_, _, _, offering, _)| {
-        seen.insert((
-            offering.provider.clone(),
-            normalize_identifier(&offering.model),
-        ))
-    });
-
-    let ranked = data
-        .into_iter()
-        .enumerate()
-        .take(limit)
-        .map(
-            |(index, (_quality, benchmark, price, offering, match_kind))| {
-                let composite_quality = benchmark.as_ref().and_then(composite_quality);
-                let effort_level = benchmark
-                    .as_ref()
-                    .and_then(|b| b.reasoning_effort.as_deref());
-                catalog_model_json(&CatalogModelEntry {
-                    offering: &offering,
-                    benchmark: benchmark.as_ref(),
-                    price,
-                    composite_quality,
-                    rank: index + 1,
-                    effort_level,
-                    parameters: None,
-                    match_kind,
-                    account_limit: None,
-                })
-            },
-        )
-        .collect::<Vec<_>>();
+    let total = ranked.len();
+    let pages = total.div_ceil(limit).max(1);
+    let start = page.saturating_sub(1).saturating_mul(limit);
+    let data = if start >= total {
+        Vec::new()
+    } else {
+        ranked
+            .iter()
+            .skip(start)
+            .take(limit)
+            .enumerate()
+            .map(|(index, candidate)| catalog_model_response(candidate, start + index + 1, view))
+            .collect::<Vec<_>>()
+    };
 
     Json(json!({
         "object": "paid-models",
         "task": task.as_str(),
         "provider": provider_filter,
+        "view": if view.is_full() { "full" } else { "summary" },
+        "page": page,
+        "per_page": limit,
+        "total": total,
+        "pages": pages,
+        "links": paged_links(&query, page, pages),
         "catalog_max_age_seconds": max_age,
         "benchmark_max_age_seconds": benchmark_max_age,
         "providers": providers,
-        "data": ranked
+        "data": data
+    }))
+    .into_response()
+}
+
+async fn get_model(State(state): State<AppState>, Path(model_id): Path<String>) -> Response {
+    let Some((provider, model)) = model_id.split_once('/') else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "model ID must use the provider/model form",
+                    "type": "invalid_request_error",
+                    "code": "invalid_model_id"
+                }
+            })),
+        )
+            .into_response();
+    };
+    if !state.config.providers.contains_key(provider) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("model '{model_id}' was not found"),
+                    "type": "invalid_request_error",
+                    "code": "model_not_found"
+                }
+            })),
+        )
+            .into_response();
+    }
+    let candidates = match load_paid_candidates(&state, Some(provider)).await {
+        Ok(candidates) => candidates,
+        Err(()) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "message": "routing state is unavailable",
+                        "type": "server_error",
+                        "code": "routing_state_unavailable"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let Some(candidate) = ranked_paid_candidates(candidates, TaskKind::General)
+        .into_iter()
+        .find(|candidate| candidate.offering.model == model)
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("model '{model_id}' was not found"),
+                    "type": "invalid_request_error",
+                    "code": "model_not_found"
+                }
+            })),
+        )
+            .into_response();
+    };
+    let resource = catalog_model_json(&CatalogModelEntry {
+        offering: &candidate.offering,
+        benchmark: candidate.benchmark.as_ref(),
+        price: candidate.price,
+        composite_quality: candidate.benchmark.as_ref().and_then(composite_quality),
+        rank: 1,
+        effort_level: candidate
+            .benchmark
+            .as_ref()
+            .and_then(|benchmark| benchmark.reasoning_effort.as_deref()),
+        parameters: None,
+        match_kind: candidate.match_kind,
+        account_limit: None,
+    });
+    Json(json!({
+        "object": "model",
+        "id": model_id,
+        "links": {"self": model_detail_path(&candidate.offering)},
+        "data": resource,
     }))
     .into_response()
 }

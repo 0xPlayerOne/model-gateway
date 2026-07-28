@@ -121,7 +121,10 @@ Supported tasks: `general`, `coding`, `agentic`. Provider values match configure
 Query models from explicitly authorized paid providers:
 
 ```bash
-curl /v1/paid-models?task=coding&limit=50
+curl /v1/paid-models?task=coding&limit=25
+
+# Fetch complete metadata for one model from its summary link
+curl /v1/models/provider/model
 ```
 
 Only appears when at least one provider has `billing_mode = "paid"` or `"subscription"`. Providers default to free except the generated CLIProxyAPI subscription profile. Enable paid APIs with:
