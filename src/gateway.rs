@@ -858,8 +858,14 @@ fn strip_model_noise(model: &str) -> String {
             let normalized = normalize_identifier(segment);
             let mut tokens: Vec<&str> = normalized.split('-').collect();
 
-            // Remove transport/billing decorations, never semantic variants.
-            tokens.retain(|t| !NOISE_TOKENS.contains(t));
+            // Remove terminal transport/billing decorations, never semantic
+            // tokens that happen to use the same word internally.
+            while tokens
+                .last()
+                .is_some_and(|token| NOISE_TOKENS.contains(token))
+            {
+                tokens.pop();
+            }
 
             tokens.join("-")
         })
@@ -968,9 +974,15 @@ fn normalized_identifier_variants(identifier: &str) -> Vec<String> {
         .map(normalize_identifier)
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
-    (0..segments.len())
-        .map(|index| segments[index..].join("-"))
-        .collect()
+    let full = segments.join("-");
+    let mut variants = vec![full];
+    // A provider namespace is the only prefix that exact identity matching may
+    // discard. Removing arbitrary suffixes makes unrelated IDs such as
+    // `vendor-a/model:free` and `vendor-b/other:free` collide.
+    if segments.len() > 1 {
+        variants.push(segments[1..].join("-"));
+    }
+    variants
 }
 
 fn normalize_identifier(identifier: &str) -> String {
@@ -5547,11 +5559,11 @@ mod tests {
         expected_cost_microusd, find_all_matching_benchmarks, find_benchmark,
         find_exact_matching_benchmarks, find_exact_matching_benchmarks_indexed,
         find_suggested_benchmark, footer_sse_event, has_dynamic_or_release_suffix, header_value,
-        identity_mapping_indexes, is_fallback_status, is_model_denied, is_provider_auto_route,
-        is_reasoning_effort, log_request, malformed_sse_event, parse_json_usage, parse_sse_usage,
-        parse_usage_value, rank_benchmark_models, rate_limit_reset_delay, request_id,
-        request_id_from_response, session_material, sse_model, strip_model_noise, take_sse_event,
-        transform_sse_event,
+        identity_mapping_indexes, is_exact_model_identity, is_fallback_status, is_model_denied,
+        is_provider_auto_route, is_reasoning_effort, log_request, malformed_sse_event,
+        parse_json_usage, parse_sse_usage, parse_usage_value, rank_benchmark_models,
+        rate_limit_reset_delay, request_id, request_id_from_response, session_material, sse_model,
+        strip_model_noise, take_sse_event, transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
     use crate::identity::{
@@ -6127,6 +6139,22 @@ mod tests {
     }
 
     #[test]
+    fn exact_identity_does_not_collide_on_shared_suffixes() {
+        assert!(!is_exact_model_identity(
+            "nvidia/nemotron-3-nano:free",
+            "baidu/cobuddy:free"
+        ));
+        assert!(!is_exact_model_identity(
+            "vendor-a/model:free",
+            "vendor-b/other:free"
+        ));
+        assert!(is_exact_model_identity(
+            "models/gemini-2.5-flash",
+            "gemini-2-5-flash"
+        ));
+    }
+
+    #[test]
     fn benchmark_price_matching_stays_exact_even_when_quality_can_match_safely() {
         let benchmark = BenchmarkModel::fixture("gemini-2-5-flash", 50.0, 50.0, 50.0, 1.2, 3.4);
         assert!(benchmark_price_for_model("GEMINI-2-5-FLASH", &benchmark).is_some());
@@ -6463,6 +6491,15 @@ mod tests {
         );
         // No /, single segment, no noise
         assert_eq!(strip_model_noise("gemini-2-5-flash"), "gemini-2-5-flash");
+    }
+
+    #[test]
+    fn strip_model_noise_preserves_internal_noise_tokens() {
+        assert_eq!(
+            strip_model_noise("free-model-fp8-instruct"),
+            "free-model-fp8-instruct"
+        );
+        assert_eq!(strip_model_noise("model-int8-chat"), "model-int8-chat");
     }
 
     #[test]

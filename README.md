@@ -69,8 +69,8 @@ Each mode picks ONE model from the Pareto frontier. Session pinning keeps you on
 |---|---|---|---|
 | `local` | — | Relays the only model from an OpenAI-compatible endpoint (default `127.0.0.1:8000`). | No |
 | `auto-free` | Free quality bar | Best free model. Falls back to `local`. | Recommended |
-| `auto-efficient` | 40 | Best bang-for-buck. Pareto ranks by composite quality, cost, latency. Falls back to `auto-free`, then `local`. | **Yes** |
-| `auto-balanced` | 60 | Mid-range quality. Great models, affordable pricing. Falls back to `auto-free`, then `local`. | **Yes** |
+| `auto-efficient` | 35 | Best bang-for-buck. Pareto ranks by composite quality, cost, latency. Falls back to `auto-free`, then `local`. | **Yes** |
+| `auto-balanced` | 42 | Mid-range quality. Great models, affordable pricing. Falls back to `auto-free`, then `local`. | **Yes** |
 | `auto-frontier` | 50 | Top tier. Highest quality floor. Never falls back. | **Yes** |
 
 Composite quality score: `0.80*intelligence + 0.10*coding + 0.10*agentic` — heavily weighted toward general intelligence.
@@ -97,7 +97,7 @@ Provider overrides use the normalized provider name (e.g., `MODEL_GATEWAY_OPENRO
 
 ## Benchmarks
 
-Quality benchmarks are sourced from [Artificial Analysis](https://artificialanalysis.ai/) and are **required** for `auto-efficient` and `auto-frontier` routing. Set up your API key:
+Quality benchmarks are sourced from [Artificial Analysis](https://artificialanalysis.ai/) and are **required** for `auto-efficient`, `auto-balanced`, and `auto-frontier` routing. Set up your API key:
 
 ```bash
 export ARTIFICIAL_ANALYSIS_API_KEY="your-key"

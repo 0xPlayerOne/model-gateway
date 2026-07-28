@@ -187,7 +187,7 @@ impl ManualPriceImport {
             source_kind: PriceSourceKind::Manual,
             scope: PriceScope::RuntimeProvider,
             provider_key: Some(self.provider.trim().to_ascii_lowercase()),
-            model_id: self.model,
+            model_id: self.model.trim().to_owned(),
             rates: PriceRates {
                 input_price_per_million: Some(self.input_price_per_million),
                 output_price_per_million: Some(self.output_price_per_million),
@@ -380,8 +380,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PriceObservation, PriceRates, PriceScope, PriceSourceKind, parse_models_dev,
-        summarize_pricing,
+        ManualPriceImport, PriceObservation, PriceRates, PriceScope, PriceSourceKind,
+        parse_models_dev, summarize_pricing,
     };
 
     #[test]
@@ -441,6 +441,75 @@ mod tests {
             attribution: None,
         };
         assert!(super::EffectivePrice::from_observation(&observation, true).is_none());
+    }
+
+    #[test]
+    fn models_dev_parser_preserves_extended_rate_fields_and_string_numbers() {
+        let observations = parse_models_dev(
+            &json!({"provider": {"models": {
+                "model": {"cost": {
+                    "input": "1.0", "output": "2.0", "cache_read": "0.1",
+                    "cache_write": 0.2, "reasoning": 3.0, "input_audio": 4.0,
+                    "output_audio": 5.0, "request": "0.01", "tiers": [{"limit": 1000}]
+                }}
+            }}}),
+            100,
+        )
+        .expect("extended models.dev pricing");
+        let rates = &observations[0].rates;
+        assert_eq!(rates.input_price_per_million, Some(1.0));
+        assert_eq!(rates.cache_read_price_per_million, Some(0.1));
+        assert_eq!(rates.cache_write_price_per_million, Some(0.2));
+        assert_eq!(rates.reasoning_price_per_million, Some(3.0));
+        assert_eq!(rates.input_audio_price_per_million, Some(4.0));
+        assert_eq!(rates.output_audio_price_per_million, Some(5.0));
+        assert_eq!(rates.request_price, Some(0.01));
+        assert!(rates.modifiers.contains_key("tiers"));
+    }
+
+    #[test]
+    fn manual_import_normalizes_provider_and_preserves_billing_windows() {
+        let observation = ManualPriceImport {
+            provider: "  Fixture ".to_owned(),
+            model: "  model  ".to_owned(),
+            input_price_per_million: 1.0,
+            output_price_per_million: 2.0,
+            cache_read_price_per_million: Some(0.5),
+            cache_write_price_per_million: Some(0.75),
+            reasoning_price_per_million: Some(3.0),
+            valid_from: Some(10),
+            valid_until: Some(20),
+            attribution: Some("fixture".to_owned()),
+        }
+        .observation(15);
+        assert_eq!(observation.provider_key.as_deref(), Some("fixture"));
+        assert_eq!(observation.model_id, "model");
+        assert!(observation.is_valid_at(15));
+        assert!(!observation.is_valid_at(20));
+        assert_eq!(observation.rates.reasoning_price_per_million, Some(3.0));
+    }
+
+    #[test]
+    fn pricing_validation_rejects_invalid_windows_and_negative_rates() {
+        let mut observation = PriceObservation {
+            source: "fixture".to_owned(),
+            source_kind: PriceSourceKind::Manual,
+            scope: PriceScope::RuntimeProvider,
+            provider_key: Some("fixture".to_owned()),
+            model_id: "model".to_owned(),
+            rates: PriceRates {
+                input_price_per_million: Some(-1.0),
+                ..PriceRates::default()
+            },
+            fetched_at: Some(100),
+            as_of: None,
+            valid_from: Some(20),
+            valid_until: Some(10),
+            attribution: None,
+        };
+        assert!(observation.validate().is_err());
+        observation.rates.input_price_per_million = Some(1.0);
+        assert!(observation.validate().is_err());
     }
 
     #[test]
@@ -521,5 +590,21 @@ mod tests {
         assert!(observation.validate().is_err());
         observation.rates.input_price_per_million = Some(1.0);
         assert!(observation.validate().is_ok());
+    }
+
+    #[test]
+    fn models_dev_parser_rejects_invalid_provider_shapes_and_skips_unpriced_models() {
+        assert!(parse_models_dev(&json!([]), 100).is_err());
+        assert!(parse_models_dev(&json!({"provider": {}}), 100).is_err());
+        let observations = parse_models_dev(
+            &json!({"provider": {"models": {
+                "unpriced": {"name": "no cost"},
+                "priced": {"cost": {"input": 1.0, "output": 2.0}}
+            }}}),
+            100,
+        )
+        .expect("models.dev pricing");
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].model_id, "priced");
     }
 }

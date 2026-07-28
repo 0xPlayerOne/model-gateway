@@ -458,4 +458,48 @@ mod tests {
                 .any(|entity| entity.id == "canonical:poolside/laguna-s-2.1")
         );
     }
+
+    #[test]
+    fn identity_parsers_fail_closed_on_invalid_source_shapes() {
+        assert!(parse_models_dev_identities(&json!([]), 100).is_err());
+        assert!(parse_models_dev_identities(&json!({"provider": {}}), 100).is_err());
+        assert!(parse_openrouter_identities(&json!({}), 100).is_err());
+        assert!(parse_openrouter_identities(&json!({"data":[{}]}), 100).is_err());
+        assert!(parse_models_dev_canonical_identities(&json!([]), 100).is_err());
+    }
+
+    #[test]
+    fn canonical_merge_keeps_unrelated_aliases_source_scoped() {
+        let mut models_dev = parse_models_dev_identities(
+            &json!({"provider-a":{"models":{
+                "vendor/model-a":{"family":"a"},
+                "plain-model":{"family":"plain"}
+            }}}),
+            100,
+        )
+        .expect("models.dev");
+        let openrouter = parse_openrouter_identities(
+            &json!({"data":[{
+                "id":"vendor/model-a",
+                "hugging_face_id":"Vendor/Model-A"
+            }]}),
+            100,
+        )
+        .expect("OpenRouter");
+        merge_canonical_references(&mut models_dev, &openrouter);
+        let joined = models_dev
+            .aliases
+            .iter()
+            .find(|alias| alias.provider_model_id == "vendor/model-a")
+            .expect("joined alias");
+        assert_eq!(joined.entity_id, "hf:vendor/model-a");
+        assert_eq!(joined.confidence, IdentityConfidence::CanonicalReference);
+        let plain = models_dev
+            .aliases
+            .iter()
+            .find(|alias| alias.provider_model_id == "plain-model")
+            .expect("plain alias");
+        assert_eq!(plain.confidence, IdentityConfidence::SourceExact);
+        assert_ne!(plain.entity_id, joined.entity_id);
+    }
 }
