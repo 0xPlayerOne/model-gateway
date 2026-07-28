@@ -2983,6 +2983,114 @@ mod tests {
     }
 
     #[test]
+    fn expired_target_price_falls_back_to_fresh_canonical_price() {
+        let store = RoutingStore::open(None).expect("store");
+        let now = super::epoch_seconds();
+        store
+            .replace_pricing(
+                "manual-target",
+                PriceSourceKind::Manual,
+                "fixture",
+                &[PriceObservation {
+                    source: "manual-target".to_owned(),
+                    source_kind: PriceSourceKind::Manual,
+                    scope: PriceScope::RuntimeProvider,
+                    provider_key: Some("runtime".to_owned()),
+                    model_id: "alias".to_owned(),
+                    rates: PriceRates {
+                        input_price_per_million: Some(1.0),
+                        output_price_per_million: Some(2.0),
+                        ..PriceRates::default()
+                    },
+                    fetched_at: Some(now),
+                    as_of: None,
+                    valid_from: None,
+                    valid_until: Some(now),
+                    attribution: None,
+                }],
+            )
+            .expect("target pricing");
+        store
+            .replace_pricing(
+                "manual-canonical",
+                PriceSourceKind::Manual,
+                "fixture",
+                &[PriceObservation {
+                    source: "manual-canonical".to_owned(),
+                    source_kind: PriceSourceKind::Manual,
+                    scope: PriceScope::Canonical,
+                    provider_key: Some("canonical".to_owned()),
+                    model_id: "model".to_owned(),
+                    rates: PriceRates {
+                        input_price_per_million: Some(3.0),
+                        output_price_per_million: Some(4.0),
+                        ..PriceRates::default()
+                    },
+                    fetched_at: Some(now),
+                    as_of: None,
+                    valid_from: None,
+                    valid_until: None,
+                    attribution: None,
+                }],
+            )
+            .expect("canonical pricing");
+        let price = store
+            .effective_price("runtime", None, "alias", Some("canonical/model"), 60)
+            .expect("resolve")
+            .expect("canonical fallback");
+        assert_eq!(price.source, "manual-canonical");
+        assert_eq!(price.input_price_per_million, 3.0);
+        assert!(price.estimated);
+    }
+
+    #[test]
+    fn future_target_price_is_not_effective() {
+        let store = RoutingStore::open(None).expect("store");
+        let now = super::epoch_seconds();
+        let mut observation = profile_price("profile", "model", 1.0, 2.0);
+        observation.valid_from = Some(now + 60);
+        store
+            .replace_pricing(
+                "fixture",
+                PriceSourceKind::ModelsDev,
+                "fixture",
+                &[observation],
+            )
+            .expect("pricing");
+        assert!(
+            store
+                .effective_price("runtime", Some("profile"), "model", None, 60)
+                .expect("resolve")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn invalid_pricing_snapshot_is_rejected_without_replacing_active_data() {
+        let store = RoutingStore::open(None).expect("store");
+        store
+            .replace_pricing(
+                "fixture",
+                PriceSourceKind::ModelsDev,
+                "fixture",
+                &[profile_price("profile", "model", 1.0, 2.0)],
+            )
+            .expect("valid pricing");
+        let mut invalid = profile_price("profile", "model", 1.0, 2.0);
+        invalid.rates.output_price_per_million = Some(-1.0);
+        assert!(
+            store
+                .replace_pricing("fixture", PriceSourceKind::ModelsDev, "fixture", &[invalid],)
+                .is_err()
+        );
+        let price = store
+            .effective_price("runtime", Some("profile"), "model", None, 60)
+            .expect("resolve")
+            .expect("active pricing preserved");
+        assert_eq!(price.output_price_per_million, 2.0);
+    }
+
+    #[test]
     fn cooldown_prevents_a_new_reservation() {
         let store = RoutingStore::open(None).expect("store");
         store
