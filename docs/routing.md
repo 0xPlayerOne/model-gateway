@@ -163,21 +163,15 @@ When a request succeeds, the session is pinned to `(provider, model)` for 30 min
 
 ## Listing Endpoints
 
-### `/v1/free-models`
+### `/v1/catalog/models`
 
-Returns all currently eligible free models filtered by the quality bar. Supports `?provider=`, `?task=`, `?limit=` query parameters. Task filters are for discovery/rankings display — routing uses composite quality. Each result includes `access.kind`, `overage: "gateway_blocked"`, effective zero pricing, reference pricing, and recorded account remaining/free-tier/fetch-time values when available.
+The canonical model discovery collection. Use `?access=free|paid|all`, `?task=`, `?provider=`, `?limit=`, `?cursor=`, and `?view=summary|full`. The default is a compact summary of at most 25 models. Cursors are bound to the catalog snapshot; a refresh invalidates an old cursor with `409 stale_cursor`. Responses include `meta.snapshot`, `meta.total`, navigable links, `ETag`, `Last-Modified`, and conditional `304 Not Modified` support.
 
-### `/v1/paid-models`
+### `/v1/catalog/models/{provider}/{model}`
 
-Returns a compact, paginated summary of non-free models from paid/subscription providers. Supports `?task=`, `?limit=`, `?page=`, and `?provider=` query parameters. `limit` defaults to 25 and is capped at 100. Every result includes a `links.self` URL for its complete resource.
+Returns one complete model resource, including benchmark matching, cache pricing, reference pricing, access limits, freshness, and provenance. The model portion may contain additional path segments; use the exact encoded resource link returned by the collection.
 
-Use `?view=full` when a collection response must include the complete pricing, benchmark, capability, access, and provenance fields. Prefer the individual resource for one model:
-
-### `/v1/models/{provider}/{model}`
-
-Returns the complete model resource, including benchmark matching, cache pricing, reference pricing, access limits, freshness, and provenance. The `{model}` portion may contain additional path segments; the resource ID is the exact `provider/model` identifier returned by `/v1/paid-models`.
-
-Collection responses include `page`, `per_page`, `total`, `pages`, and `links.self`/`links.prev`/`links.next` metadata. Links preserve the active filters and view, so clients can follow them without reconstructing request parameters.
+`/v1/free-models` and `/v1/paid-models` remain migration aliases. The old `/v1/models/{provider}/{model}` detail route is removed; new integrations should use the canonical catalog paths and `/openapi.json`.
 
 ### `/v1/auto-models`
 

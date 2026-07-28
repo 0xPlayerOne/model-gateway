@@ -3897,6 +3897,17 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     let gateway = spawn_gateway(config).await;
     let client = reqwest::Client::new();
 
+    let openapi: Value = client
+        .get(format!("{gateway}/openapi.json"))
+        .send()
+        .await
+        .expect("OpenAPI response")
+        .json()
+        .await
+        .expect("OpenAPI JSON");
+    assert_eq!(openapi["openapi"], "3.1.0");
+    assert!(openapi["paths"]["/v1/catalog/models"].is_object());
+
     let response = client
         .get(format!("{gateway}/v1/paid-models"))
         .send()
@@ -3916,7 +3927,10 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     assert_eq!(body["data"][0]["provider"], "paid");
     assert_eq!(body["data"][0]["model"], "gpt-4o");
     assert_eq!(body["data"][0]["id"], "paid/gpt-4o");
-    assert_eq!(body["data"][0]["links"]["self"], "/v1/models/paid/gpt-4o");
+    assert_eq!(
+        body["data"][0]["links"]["self"],
+        "/v1/catalog/models/paid/gpt-4o"
+    );
     assert!(body["data"][0]["price_per_million"].is_null());
     assert_eq!(body["data"][0]["pricing"]["input"], 2.5);
     assert_eq!(body["providers"]["paid"]["billing_mode"], "paid");
@@ -3926,7 +3940,7 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     );
 
     let detail: Value = client
-        .get(format!("{gateway}/v1/models/paid/gpt-4o"))
+        .get(format!("{gateway}/v1/catalog/models/paid/gpt-4o"))
         .send()
         .await
         .expect("model detail response")
@@ -3938,6 +3952,63 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     assert_eq!(detail["data"]["model"]["name"], "gpt-4o");
     assert_eq!(detail["data"]["price_per_million"]["cache_read"], 1.25);
     assert_eq!(detail["data"]["price_per_million"]["cache_write"], 3.75);
+
+    let collection = client
+        .get(format!("{gateway}/v1/catalog/models?access=all&limit=1"))
+        .send()
+        .await
+        .expect("catalog collection response");
+    assert_eq!(collection.status(), StatusCode::OK);
+    assert!(collection.headers().get("etag").is_some());
+    assert!(collection.headers().get("last-modified").is_some());
+    let etag = collection
+        .headers()
+        .get("etag")
+        .expect("etag")
+        .to_str()
+        .expect("etag value")
+        .to_owned();
+    let collection_body: Value = collection.json().await.expect("catalog collection JSON");
+    assert_eq!(collection_body["object"], "model.collection");
+    assert_eq!(collection_body["meta"]["total"], 2);
+    assert_eq!(collection_body["data"].as_array().map(Vec::len), Some(1));
+    assert!(collection_body["links"]["next"].is_string());
+    let next_link = collection_body["links"]["next"]
+        .as_str()
+        .expect("next link");
+    let cursor = next_link.split("cursor=").nth(1).expect("cursor");
+    let stale_cursor = client
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=paid&limit=1&cursor={cursor}"
+        ))
+        .send()
+        .await
+        .expect("stale cursor response");
+    assert_eq!(stale_cursor.status(), StatusCode::CONFLICT);
+
+    let not_modified = client
+        .get(format!("{gateway}/v1/catalog/models?access=all&limit=1"))
+        .header("if-none-match", etag)
+        .send()
+        .await
+        .expect("conditional catalog response");
+    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+
+    let free_detail = client
+        .get(format!("{gateway}/v1/catalog/models/free/gemini-free"))
+        .send()
+        .await
+        .expect("free model detail response");
+    assert_eq!(free_detail.status(), StatusCode::OK);
+    let free_detail_body: Value = free_detail.json().await.expect("free model detail JSON");
+    assert_eq!(free_detail_body["data"]["id"], "free/gemini-free");
+
+    let legacy_detail = client
+        .get(format!("{gateway}/v1/models/paid/gpt-4o"))
+        .send()
+        .await
+        .expect("legacy model detail response");
+    assert_eq!(legacy_detail.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
