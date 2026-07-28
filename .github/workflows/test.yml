@@ -17,10 +17,10 @@ concurrency:
 jobs:
   test:
     name: Test
-    uses: 0xPlayerOne/code-foundry/.github/workflows/test.yml@v0.26.0
+    uses: 0xPlayerOne/code-foundry/.github/workflows/test.yml@v0.27.0
     with:
       runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: v0.26.0
+      runtime-ref: v0.27.0
       runner: ubuntu-latest
       unit-runner: ubuntu-slim
     secrets: inherit
