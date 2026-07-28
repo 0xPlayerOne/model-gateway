@@ -4,23 +4,19 @@ on:
   push:
     branches: [main, staging]
   pull_request:
-    branches: [staging, main]
+    branches: [staging]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   test:
     name: Test
-    uses: 0xPlayerOne/code-foundry/.github/workflows/test.yml@v0.27.0
+    uses: 0xPlayerOne/code-foundry/.github/workflows/test.yml@v0.27.9
     with:
       runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: v0.27.0
+      runtime-ref: v0.27.9
       runner: ubuntu-latest
       unit-runner: ubuntu-slim
     secrets: inherit
