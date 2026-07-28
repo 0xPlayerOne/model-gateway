@@ -91,12 +91,18 @@ NODE
 
 package_manager() {
   local configured=""
-  if [ -f .github/template.yml ]; then
-    configured="$(awk -F': ' '/^package_manager:/ {print $2; exit}' .github/template.yml)"
-    case "$configured" in
-      bun|pnpm|yarn|npm) echo "$configured"; return ;;
-    esac
+  if [ -x .github/scripts/profile.sh ]; then
+    configured="$(bash .github/scripts/profile.sh get package_manager 2>/dev/null || true)"
+  else
+    config_file=.github/code-foundry.yml
+    [ -f "$config_file" ] || config_file=.github/template.yml
+    if [ -f "$config_file" ]; then
+      configured="$(awk -F': ' '/^package_manager:/ {print $2; exit}' "$config_file")"
+    fi
   fi
+  case "$configured" in
+    bun|pnpm|yarn|npm) echo "$configured"; return ;;
+  esac
   if [ -f bun.lock ] || [ -f bun.lockb ]; then echo bun
   elif [ -f pnpm-lock.yaml ]; then echo pnpm
   elif [ -f yarn.lock ]; then echo yarn

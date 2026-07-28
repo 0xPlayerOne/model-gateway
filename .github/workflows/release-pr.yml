@@ -8,59 +8,10 @@ permissions:
   contents: read
   pull-requests: write
 
-env:
-  GH_TOKEN: ${{ github.token }}
-
 jobs:
-  create-release-pr:
-    name: Create
-    runs-on: ubuntu-slim
-    timeout-minutes: 10
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}
-      cancel-in-progress: true
-    steps:
-      - name: Check
-        id: check-pr
-        run: |
-          EXISTING=$(gh pr list --limit 1 --base main --head staging --state open --json number 2>/dev/null | jq 'length')
-          echo "existing=$EXISTING" >> "$GITHUB_OUTPUT"
-
-      - name: Create
-        if: steps.check-pr.outputs.existing == '0'
-        run: |
-          DATE=$(date +%Y-%m-%d)
-          BODY_FILE="$RUNNER_TEMP/release-pr.md"
-          COMPARE_URL="repos/${GITHUB_REPOSITORY}/compare/main...staging"
-          COMPARE_FILE="$RUNNER_TEMP/release-compare.json"
-          gh api "$COMPARE_URL?per_page=100" > "$COMPARE_FILE"
-          TOTAL_COMMITS=$(jq -r '.total_commits // 0' "$COMPARE_FILE")
-          if [ "$TOTAL_COMMITS" -gt 100 ]; then
-            LAST_PAGE=$(( (TOTAL_COMMITS + 99) / 100 ))
-            gh api "$COMPARE_URL?per_page=100&page=$LAST_PAGE" > "$COMPARE_FILE"
-          fi
-          COMMITS=$(jq -r '.commits[] | "- \(.commit.message | split("\\n")[0]) (\(.sha[0:7]))"' "$COMPARE_FILE")
-          if [ -z "$COMMITS" ]; then
-            COMMITS='- No commits found since main.'
-          fi
-
-          cat > "$BODY_FILE" <<EOF
-          ## Release summary
-
-          Automated release PR from \`staging\` into \`main\` created on $DATE.
-
-          ### Changes since main
-
-          $COMMITS
-
-          ### Validation
-
-          - CI and security checks must pass before merge.
-          - Review migrations, configuration changes, and rollback notes.
-          EOF
-
-          gh pr create \
-            --base main \
-            --head staging \
-            --title "Release: staging -> main ($DATE)" \
-            --body-file "$BODY_FILE"
+  release-pr:
+    name: Release PR
+    uses: 0xPlayerOne/code-foundry/.github/workflows/reusable-release-pr.yml@v0.22.0
+    with:
+      runner: ubuntu-slim
+    secrets: inherit
