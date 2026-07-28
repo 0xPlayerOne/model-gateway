@@ -78,7 +78,7 @@ The `classify()` function maps each request to one of three task types, and `qua
 | `Coding` — code/implement/debug/refactor/test keywords | `coding_quality` (falls back to `intelligence`) |
 | `Agentic` — multi-step/tool/agent/workflow keywords or `tools` array | `agentic_quality` (falls back to `intelligence`) |
 
-Task-specific quality is used for response headers and listing endpoints (`/v1/free-models`, `/v1/paid-models`).
+Task-specific quality is used for response headers and the `/v1/catalog/models` collection.
 
 ### Composite Quality (Used for Routing)
 
