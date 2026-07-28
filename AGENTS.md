@@ -7,7 +7,8 @@ They complement `CONTRIBUTING.md`. More specific instructions in nested `AGENTS.
 ## Mission
 
 - Keep formatting, linting, type checking, builds, tests, and coverage reproducible locally and in CI.
-- Prefer the versions pinned in `.mise.toml`.
+- Prefer the repository's configured toolchain; `toolchain: auto` uses native
+  tools unless an existing `.mise.toml` is present.
 - Do not commit secrets, generated credentials, local environment files, or machine-specific paths.
 - Add tests for behavior changes and keep coverage thresholds explicit in the project configuration.
 - Make the smallest complete, well-tested change that solves the requested problem without disturbing unrelated work.
@@ -62,7 +63,7 @@ Ask for clarification when a missing decision would materially change the implem
 2. Inspect before editing; preserve unrelated work.
 3. Plan the smallest coherent change.
 4. Implement with existing project patterns.
-5. Run bash .github/scripts/bootstrap.sh for a new checkout, or bash .github/scripts/doctor.sh to diagnose setup drift.
+5. Run `npx code-foundry init` for a new checkout, or `npx code-foundry doctor` to diagnose setup drift.
 6. Run focused checks while iterating.
 7. Inspect the final diff for accidental changes, secrets, formatting, and generated files.
 8. Run the broadest applicable validation available.
@@ -72,7 +73,9 @@ For normal feature work, branch from `staging` and target pull requests at `stag
 
 ## Toolchain and dependencies
 
-- Use the versions pinned in `.mise.toml`; run `mise install` when needed.
+- Follow `toolchain: auto` in `.github/code-foundry.yml`; use native tools by
+  default and reuse mise only when the repository already has `.mise.toml`.
+- If `toolchain: mise` is selected, run `mise install` before validation.
 - Use the package manager indicated by the existing lockfile:
   - `bun.lock` or `bun.lockb` → Bun
   - `pnpm-lock.yaml` → pnpm
@@ -88,15 +91,15 @@ For normal feature work, branch from `staging` and target pull requests at `stag
 Use the shared scripts when present. They detect supported tools and skip inapplicable checks:
 
 ```sh
-bash .github/scripts/ci.sh format
-bash .github/scripts/ci.sh lint
-bash .github/scripts/ci.sh type_check
-bash .github/scripts/ci.sh build
-bash .github/scripts/ci.sh unit
-bash .github/scripts/ci.sh integration
-bash .github/scripts/ci.sh e2e
-bash .github/scripts/ci.sh smoke
-bash .github/scripts/security.sh
+node src/runtime.mjs ci format
+node src/runtime.mjs ci lint
+node src/runtime.mjs ci type_check
+node src/runtime.mjs ci build
+node src/runtime.mjs ci unit
+node src/runtime.mjs ci integration
+node src/runtime.mjs ci e2e
+node src/runtime.mjs ci smoke
+Security and dependency audits run through the GitHub Security workflow.
 ```
 
 Run focused tests first, then the complete applicable set for release, security, workflow, dependency, and configuration changes.

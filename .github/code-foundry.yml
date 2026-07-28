@@ -23,3 +23,6 @@ npm_publish: false
 license: agpl-3.0-or-later
 git_workflow: staging-release
 merge_strategy: rebase
+codeql: auto
+dependency_review: auto
+toolchain: auto
