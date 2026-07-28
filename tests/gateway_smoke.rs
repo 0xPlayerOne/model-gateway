@@ -271,29 +271,33 @@ async fn free_models_can_be_filtered_by_provider() {
     let gateway = spawn_gateway(config).await;
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("{gateway}/v1/free-models?provider=alpha&limit=10"))
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&provider=alpha&limit=10&view=full"
+        ))
         .send()
         .await
         .expect("provider-filtered response");
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.expect("provider-filtered body");
-    assert_eq!(body["provider"], "alpha");
+    assert_eq!(body["data"][0]["model"]["provider"], "alpha");
     assert_eq!(body["data"].as_array().expect("data").len(), 1);
     assert_eq!(body["data"][0]["model"]["provider"], "alpha");
-    assert!(body["providers"].get("beta").is_none());
 
     let all_response = client
-        .get(format!("{gateway}/v1/free-models?provider=all&limit=10"))
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&provider=all&limit=10&view=full"
+        ))
         .send()
         .await
         .expect("all-provider response");
     assert_eq!(all_response.status(), StatusCode::OK);
     let all_body: Value = all_response.json().await.expect("all-provider body");
-    assert!(all_body["provider"].is_null());
     assert_eq!(all_body["data"].as_array().expect("all data").len(), 2);
 
     let unfiltered_response = client
-        .get(format!("{gateway}/v1/free-models?limit=10"))
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&limit=10&view=full"
+        ))
         .send()
         .await
         .expect("unfiltered response");
@@ -301,7 +305,9 @@ async fn free_models_can_be_filtered_by_provider() {
     assert_eq!(all_body["data"], unfiltered_body["data"]);
 
     let response = client
-        .get(format!("{gateway}/v1/free-models?provider=missing"))
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&provider=missing"
+        ))
         .send()
         .await
         .expect("unknown provider response");
@@ -369,7 +375,9 @@ async fn quota_limited_free_access_preserves_reference_prices_and_blocks_paid_re
     free_config.server.state_path = Some(state_path.clone());
     let gateway = spawn_gateway(free_config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/free-models?provider=ollama-cloud"))
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&provider=ollama-cloud&view=full"
+        ))
         .send()
         .await
         .expect("free models response");
@@ -397,7 +405,9 @@ async fn quota_limited_free_access_preserves_reference_prices_and_blocks_paid_re
     paid_config.server.state_path = Some(state_path);
     let gateway = spawn_gateway(paid_config).await;
     let free_response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/free-models?provider=ollama-cloud"))
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&provider=ollama-cloud&view=full"
+        ))
         .send()
         .await
         .expect("paid-account free response");
@@ -457,7 +467,9 @@ async fn exhausted_account_snapshot_excludes_quota_limited_free_models() {
     config.server.state_path = Some(state_path);
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/free-models?provider=ollama-cloud"))
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&provider=ollama-cloud"
+        ))
         .send()
         .await
         .expect("free models response");
@@ -515,7 +527,9 @@ async fn persisted_access_kind_does_not_override_current_provider_configuration(
     config.server.state_path = Some(state_path);
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/free-models?provider=custom"))
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&provider=custom&view=full"
+        ))
         .send()
         .await
         .expect("free models response");
@@ -586,7 +600,9 @@ async fn free_models_quality_bar_filters_low_quality_models() {
 
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/free-models?limit=10"))
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&limit=10&view=full"
+        ))
         .send()
         .await
         .expect("free models response");
@@ -658,7 +674,9 @@ async fn free_model_listing_task_changes_ranking_not_identity() {
 
     for (task, expected) in [("general", "general-model"), ("coding", "coding-model")] {
         let response = reqwest::Client::new()
-            .get(format!("{gateway}/v1/free-models?task={task}"))
+            .get(format!(
+                "{gateway}/v1/catalog/models?access=free&task={task}&view=full"
+            ))
             .send()
             .await
             .expect("free models response");
@@ -716,7 +734,7 @@ async fn paid_model_listing_task_changes_ranking_not_identity() {
     for (task, expected) in [("general", "general-model"), ("coding", "coding-model")] {
         let response = reqwest::Client::new()
             .get(format!(
-                "{gateway}/v1/paid-models?provider=paid-provider&task={task}&view=full"
+                "{gateway}/v1/catalog/models?access=paid&provider=paid-provider&task={task}&view=full"
             ))
             .send()
             .await
@@ -854,7 +872,7 @@ async fn opencode_zen_free_models_recover_only_reviewed_benchmarks() {
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
         .get(format!(
-            "{gateway}/v1/free-models?provider=opencode-zen&task=general&limit=100"
+            "{gateway}/v1/catalog/models?access=free&provider=opencode-zen&task=general&limit=100&view=full"
         ))
         .send()
         .await
@@ -931,7 +949,9 @@ async fn free_models_keep_a_high_quality_effort_variant() {
     config.server.free_models_quality.max_age_months = 0;
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/free-models?provider=provider-a"))
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&provider=provider-a&view=full"
+        ))
         .send()
         .await
         .expect("free models response");
@@ -3907,37 +3927,32 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         .expect("OpenAPI JSON");
     assert_eq!(openapi["openapi"], "3.1.0");
     assert!(openapi["paths"]["/v1/catalog/models"].is_object());
+    assert!(openapi["paths"]["/v1/catalog/models/{provider}/{model}"].is_object());
 
     let response = client
-        .get(format!("{gateway}/v1/paid-models"))
+        .get(format!("{gateway}/v1/catalog/models?access=paid&view=full"))
         .send()
         .await
         .expect("paid-models response");
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.expect("json");
-    assert_eq!(body["object"], "paid-models");
-    assert_eq!(body["view"], "summary");
-    assert_eq!(body["per_page"], 25);
+    assert_eq!(body["object"], "model.collection");
+    assert_eq!(body["view"], "full");
+    assert_eq!(body["meta"]["limit"], 25);
     // Only the paid provider's models should appear (free provider excluded)
     assert_eq!(
         body["data"].as_array().map(|a| a.len()),
         Some(1),
         "should only include the paid (non-free) model"
     );
-    assert_eq!(body["data"][0]["provider"], "paid");
-    assert_eq!(body["data"][0]["model"], "gpt-4o");
+    assert_eq!(body["data"][0]["model"]["provider"], "paid");
+    assert_eq!(body["data"][0]["model"]["name"], "gpt-4o");
     assert_eq!(body["data"][0]["id"], "paid/gpt-4o");
     assert_eq!(
         body["data"][0]["links"]["self"],
         "/v1/catalog/models/paid/gpt-4o"
     );
-    assert!(body["data"][0]["price_per_million"].is_null());
-    assert_eq!(body["data"][0]["pricing"]["input"], 2.5);
-    assert_eq!(body["providers"]["paid"]["billing_mode"], "paid");
-    assert!(
-        body["providers"].get("free").is_none(),
-        "free provider should not appear in paid-models listing"
-    );
+    assert_eq!(body["data"][0]["price_per_million"]["input"], 2.5);
 
     let detail: Value = client
         .get(format!("{gateway}/v1/catalog/models/paid/gpt-4o"))
@@ -3968,10 +3983,21 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         .to_str()
         .expect("etag value")
         .to_owned();
+    let last_modified = collection
+        .headers()
+        .get("last-modified")
+        .expect("last-modified")
+        .to_str()
+        .expect("last-modified value")
+        .to_owned();
     let collection_body: Value = collection.json().await.expect("catalog collection JSON");
     assert_eq!(collection_body["object"], "model.collection");
+    assert_eq!(collection_body["view"], "summary");
     assert_eq!(collection_body["meta"]["total"], 2);
     assert_eq!(collection_body["data"].as_array().map(Vec::len), Some(1));
+    assert!(collection_body["data"][0]["id"].is_string());
+    assert_eq!(collection_body["data"][0]["object"], "model");
+    assert!(collection_body["data"][0]["links"]["self"].is_string());
     assert!(collection_body["links"]["next"].is_string());
     let next_link = collection_body["links"]["next"]
         .as_str()
@@ -3994,6 +4020,14 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         .expect("conditional catalog response");
     assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
 
+    let not_modified_since = client
+        .get(format!("{gateway}/v1/catalog/models?access=all&limit=1"))
+        .header("if-modified-since", last_modified)
+        .send()
+        .await
+        .expect("if-modified-since catalog response");
+    assert_eq!(not_modified_since.status(), StatusCode::NOT_MODIFIED);
+
     let free_detail = client
         .get(format!("{gateway}/v1/catalog/models/free/gemini-free"))
         .send()
@@ -4009,6 +4043,24 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         .await
         .expect("legacy model detail response");
     assert_eq!(legacy_detail.status(), StatusCode::NOT_FOUND);
+
+    for path in ["/v1/free-models", "/v1/paid-models"] {
+        let legacy_collection = client
+            .get(format!("{gateway}{path}"))
+            .send()
+            .await
+            .expect("legacy collection response");
+        assert_eq!(legacy_collection.status(), StatusCode::NOT_FOUND);
+    }
+
+    let invalid_query = client
+        .get(format!("{gateway}/v1/catalog/models?access=invalid"))
+        .send()
+        .await
+        .expect("invalid catalog query response");
+    assert_eq!(invalid_query.status(), StatusCode::BAD_REQUEST);
+    let invalid_query_body: Value = invalid_query.json().await.expect("invalid query JSON");
+    assert_eq!(invalid_query_body["error"]["code"], "invalid_query");
 }
 
 #[tokio::test]
@@ -4054,7 +4106,7 @@ async fn subscription_models_report_zero_effective_and_reference_prices() {
 
     let response = reqwest::Client::new()
         .get(format!(
-            "{gateway}/v1/paid-models?provider=cli-proxy&view=full"
+            "{gateway}/v1/catalog/models?access=paid&provider=cli-proxy&view=full"
         ))
         .send()
         .await
@@ -4069,7 +4121,9 @@ async fn subscription_models_report_zero_effective_and_reference_prices() {
     assert_eq!(model["reference_price_per_million"]["output"], 10.0);
 
     let response = reqwest::Client::new()
-        .get(format!("{gateway}/v1/free-models?provider=cli-proxy"))
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&provider=cli-proxy&view=full"
+        ))
         .send()
         .await
         .expect("free models response");
