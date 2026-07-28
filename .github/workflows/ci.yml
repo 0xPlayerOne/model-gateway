@@ -40,7 +40,9 @@ jobs:
           install-python: false
           install-rust: false
           cache-build: false
-          cache-save: false
+          # Warm the format cache on branch pushes without adding archive
+          # time to pull-request checks.
+          cache-save: ${{ github.event_name == 'push' }}
           cache-format: true
           task: format
       - name: Format
@@ -66,7 +68,9 @@ jobs:
           install: true
           install-python: false
           cache-build: false
-          cache-save: false
+          # Warm the lint cache on branch pushes without adding archive time
+          # to pull-request checks.
+          cache-save: ${{ github.event_name == 'push' }}
           cache-lint: true
           task: lint
       - name: Lint
@@ -92,7 +96,7 @@ jobs:
           install: true
           install-python: false
           cache-build: ${{ steps.applicability.outputs.rust == 'true' || vars.REPO_FOUNDRY_CACHE_BUILD == 'true' }}
-          cache-save: false
+          cache-save: ${{ github.event_name == 'push' }}
           task: type_check
       - name: Type-Check
         if: steps.applicability.outputs.applicable == 'true'
@@ -117,7 +121,7 @@ jobs:
           install: true
           install-python: false
           cache-build: ${{ steps.applicability.outputs.rust == 'true' || vars.REPO_FOUNDRY_CACHE_BUILD == 'true' }}
-          cache-save: false
+          cache-save: ${{ github.event_name == 'push' }}
           task: build
       - name: Build
         if: steps.applicability.outputs.applicable == 'true'
