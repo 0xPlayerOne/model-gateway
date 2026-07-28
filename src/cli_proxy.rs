@@ -1,11 +1,9 @@
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -102,12 +100,6 @@ impl OAuthProvider {
             (Self::Codex, true) => Ok("-codex-device-login"),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct AccountSummary {
-    pub provider: String,
-    pub accounts: usize,
 }
 
 struct ReleaseAsset {
@@ -263,31 +255,6 @@ pub fn serve(paths: &CliProxyPaths) -> Result<(), CliProxyError> {
     } else {
         Err(CliProxyError::CommandFailed(status))
     }
-}
-
-pub fn account_summary(paths: &CliProxyPaths) -> Result<Vec<AccountSummary>, CliProxyError> {
-    let mut counts = BTreeMap::<String, usize>::new();
-    if !paths.auth_dir.exists() {
-        return Ok(Vec::new());
-    }
-    for entry in fs::read_dir(&paths.auth_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file()
-            || entry.path().extension().and_then(|value| value.to_str()) != Some("json")
-        {
-            continue;
-        }
-        let value: serde_json::Value = serde_json::from_slice(&fs::read(entry.path())?)?;
-        let provider = value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown");
-        *counts.entry(provider.to_owned()).or_default() += 1;
-    }
-    Ok(counts
-        .into_iter()
-        .map(|(provider, accounts)| AccountSummary { provider, accounts })
-        .collect())
 }
 
 pub fn generated_config(paths: &CliProxyPaths, api_key: &str) -> Result<String, CliProxyError> {
@@ -452,8 +419,8 @@ fn set_executable(_path: &Path) -> Result<(), CliProxyError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliProxyError, CliProxyPaths, OAuthProvider, VERSION, account_summary, generated_config,
-        hex, initialize, install, login_command, release_asset,
+        CliProxyError, CliProxyPaths, OAuthProvider, VERSION, generated_config, hex, initialize,
+        install, login_command, release_asset,
     };
 
     #[test]
@@ -475,40 +442,6 @@ mod tests {
         assert!(config.contains("session-affinity: true"));
         assert!(!config.contains("latest"));
         assert!(config.contains(&format!("v{VERSION}")));
-    }
-
-    #[test]
-    fn account_summary_reports_only_provider_counts() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let auth_dir = directory.path().join("auth");
-        std::fs::create_dir(&auth_dir).expect("auth dir");
-        std::fs::write(
-            auth_dir.join("claude-a.json"),
-            r#"{"type":"claude","access_token":"secret-a"}"#,
-        )
-        .expect("claude auth");
-        std::fs::write(
-            auth_dir.join("claude-b.json"),
-            r#"{"type":"claude","refresh_token":"secret-b"}"#,
-        )
-        .expect("claude auth");
-        std::fs::write(
-            auth_dir.join("codex.json"),
-            r#"{"type":"codex","access_token":"secret-c"}"#,
-        )
-        .expect("codex auth");
-        let paths = CliProxyPaths {
-            root: directory.path().to_path_buf(),
-            binary: directory.path().join("binary"),
-            config: directory.path().join("config.yaml"),
-            auth_dir,
-        };
-        let summary = account_summary(&paths).expect("summary");
-        assert_eq!(summary[0].provider, "claude");
-        assert_eq!(summary[0].accounts, 2);
-        assert_eq!(summary[1].provider, "codex");
-        assert_eq!(summary[1].accounts, 1);
-        assert!(!serde_json::to_string(&summary).unwrap().contains("secret"));
     }
 
     #[test]

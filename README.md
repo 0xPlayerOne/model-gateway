@@ -166,8 +166,7 @@ Or per-provider: `MODEL_GATEWAY_OPENAI_API_BILLING_MODE=paid`. See [docs/configu
 | `cli-proxy login claude` | Add a Claude OAuth account |
 | `cli-proxy login codex [--device]` | Add a ChatGPT/Codex OAuth account |
 | `cli-proxy serve` | Run the loopback CLIProxyAPI sidecar |
-| `cli-proxy status` | Check sidecar readiness, models, and account counts |
-| `cli-proxy accounts` | Show provider-level account counts without token data |
+| `cli-proxy status` | Check authenticated sidecar readiness and model count |
 | `healthcheck` | Verify the server is running |
 
 ## Development
