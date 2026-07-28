@@ -48,15 +48,15 @@ docs/*  test/*  refactor/*         │              │
 | `staging`                                                      | Integration branch       | Target normal pull requests here. Required checks must pass before merge. |
 | `feat/*`, `fix/*`, `chore/*`, `refactor/*`, `docs/*`, `test/*` | Focused work             | Branch from `staging`; keep changes small and reviewable.                 |
 
-Use squash merges unless the repository documents another strategy. Re-align `staging` with `main` after a release when needed.
+The default Git workflow is `staging-release`: topic branches merge into `staging`, then a promotion PR moves validated changes into `main`, followed by the versioned release PR. The default merge strategy is `rebase`, which preserves the linear Conventional Commit history. Configure `merge_strategy` as `squash` or `merge` in `.github/code-foundry.yml` when the repository intentionally uses another policy. Re-align `staging` with `main` after a release when needed.
 
 ## Before you start
 
 ### Toolchain
 
-1. Install [mise](https://mise.jdx.dev/).
-2. Run `bash .github/scripts/bootstrap.sh` to install the pinned toolchain, enable hooks, and validate the checkout.
-3. Use `bash .github/scripts/doctor.sh` when setup, lockfiles, or hooks appear out of sync.
+1. Run `npx code-foundry init` to detect the repository and enable hooks.
+2. Follow `toolchain: auto` in `.github/code-foundry.yml`; install mise only if the repository already uses it or explicitly selects it.
+3. Use `npx code-foundry doctor` when setup, lockfiles, or hooks appear out of sync.
 4. Use the repository's existing package manager and lockfile. Do not introduce a second package manager.
 5. Copy `.env.example` to the appropriate local environment file when provided. Never commit the copy.
 
@@ -74,18 +74,15 @@ If the worktree is dirty, stop and understand the existing changes before switch
 
 ## Local validation
 
-The template scripts detect supported tools and skip checks that do not apply:
+The repository runtime detects supported tools and skips checks that do not apply:
 
 ```sh
-bash .github/scripts/ci.sh format
-bash .github/scripts/ci.sh lint
-bash .github/scripts/ci.sh type_check
-bash .github/scripts/ci.sh build
-bash .github/scripts/ci.sh unit
-bash .github/scripts/ci.sh integration
-bash .github/scripts/ci.sh e2e
-bash .github/scripts/ci.sh smoke
-bash .github/scripts/security.sh
+npx code-foundry doctor
+npm run format:check   # or the package manager's equivalent
+npm run lint
+npm run type-check
+npm test
+Security and dependency audits run through the GitHub Security workflow.
 ```
 
 Run the checks relevant to the change. For a release or security-sensitive change, run the complete set. Record the commands and results in the pull request.
@@ -110,7 +107,7 @@ For maintainers, trusted contributors, and automation agents:
 
 8. Push the branch and open a pull request into `staging`.
 9. Address review feedback and failed checks on the same branch.
-10. Squash-merge only after required checks pass and the change is ready.
+10. Merge using the repository's configured `merge_strategy` after required checks pass and the change is ready.
 
 ### Internal agent handoff
 
@@ -170,7 +167,7 @@ Required checks are enforced by branch protection. Do not duplicate their checkl
 
 ### Release conventions
 
-Use Conventional Commits so the release automation can determine the next version: `fix:` produces a patch release, `feat:` produces a minor release, and `!` or `BREAKING CHANGE:` produces a major release. Add `Release-As: x.y.z` only when a deliberate version override is needed. The release workflow maintains the changelog and GitHub release after changes land on `main`; npm publication is opt-in through `.github/template.yml`.
+Use Conventional Commits so the release automation can determine the next version: `fix:` produces a patch release, `feat:` produces a minor release, and `!` or `BREAKING CHANGE:` produces a major release. Add `Release-As: x.y.z` only when a deliberate version override is needed. The release workflow maintains the changelog and GitHub release after changes land on `main`; npm publication is opt-in through `.github/code-foundry.yml`.
 
 Security checks can be skipped when repository visibility or the GitHub plan does not support a feature. A skipped optional check must not be configured as a required status check.
 
