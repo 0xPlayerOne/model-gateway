@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.12.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.11.0...v0.12.0) (2026-07-28)
+
+
+### Features
+
+* **api:** add compact linked model resources ([#56](https://github.com/0xPlayerOne/model-gateway/issues/56)) ([055b2b6](https://github.com/0xPlayerOne/model-gateway/commit/055b2b6957f21fc67a629c4f99e4dec68b7efb77))
+* reduce code-foundry consumer footprint ([0b5b08b](https://github.com/0xPlayerOne/model-gateway/commit/0b5b08be48778462527ff1946a84370b22729b91))
+
+
+### Bug Fixes
+
+* remove obsolete consumer helper ([5293809](https://github.com/0xPlayerOne/model-gateway/commit/52938093c654d408fd6c9271abcfde57894592e1))
+
 ## [0.11.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.10.1...v0.11.0) (2026-07-28)
 
 
