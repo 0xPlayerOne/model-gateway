@@ -22,6 +22,7 @@ min_composite_quality = 30.0
 max_age_months = 18
 max_input_price_per_million = 2.0
 max_output_price_per_million = 10.0
+max_quality_regret = 8.0
 
 [providers.openrouter]
 profile = "open_router"

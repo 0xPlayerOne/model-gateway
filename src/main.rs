@@ -23,7 +23,7 @@ use model_gateway::providers::{
     BuiltinProvider, ConnectionCheck, fetch_account_limit, fetch_catalog,
 };
 use model_gateway::routing::{
-    CatalogRecord, RoutingStore, is_verified_free, provider_limit_reference,
+    CatalogRecord, RoutingStore, classify_access, provider_limit_reference,
 };
 use model_gateway::secrets::SecretResolver;
 use serde_json::Value;
@@ -682,11 +682,11 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
                 let models = models
                     .into_iter()
                     .map(|model| {
-                        let is_free =
-                            is_verified_free(provider_config, &model.id, model.zero_priced);
+                        let access_kind =
+                            classify_access(provider_config, &model.id, model.zero_priced);
                         CatalogRecord {
                             model: model.id,
-                            is_free,
+                            access_kind,
                             context_length: model.context_length,
                             supports_tools: model.supports_tools,
                             supports_vision: model.supports_vision,
@@ -1181,7 +1181,7 @@ fn config_check(online: bool) -> Result<(), Box<dyn Error>> {
                             let records = models
                                 .into_iter()
                                 .map(|model| CatalogRecord {
-                                    is_free: is_verified_free(
+                                    access_kind: classify_access(
                                         provider,
                                         &model.id,
                                         model.zero_priced,

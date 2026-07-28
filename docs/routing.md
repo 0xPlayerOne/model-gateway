@@ -86,19 +86,23 @@ Relays the only model reported by an OpenAI-compatible endpoint. Default endpoin
 
 Selects the best free model. Filter + rank pipeline:
 
-1. **`free_candidates`** — models from `catalog_models WHERE is_free = 1`
-2. **Quality bar** — `free_models_quality.passes()` filters by minimum composite quality (default 25), max age, max price ($2 input, $10 output), min context length, min model size
-3. **Composite quality** — `composite_quality()` for Pareto ranking
-4. **Pareto ranking** — `pareto_rank(composite_quality, cost=0, latency)`
-   - For free models (cost=0), degenerates to quality vs latency
-   - Faster models with sufficient quality beat slower overqualified models
-5. **Sort** — pinned first → cost → latency → quality
-6. **Fallback** — eligible dominated models → unbenchmarked models → local
+1. **Access classification** — derive `zero_price`, `quota_limited_free_tier`, or `paid` from the catalog signal and current provider billing mode
+2. **Availability** — exclude quota-tier models when a recorded account snapshot reports no remaining free quota or a paid account; exhausted state remains blocking until explicitly refreshed
+3. **Quality bar** — `free_models_quality.passes()` filters by minimum composite quality (default 30), max age, reference price ($2 input, $10 output), min context length, and min model size
+4. **Quality regret** — exclude benchmarked models more than `max_quality_regret` points (default 8) below the best currently available candidate
+5. **Pareto ranking** — `pareto_rank(composite_quality, reference quota cost, latency)`
+   - Explicit zero-price models use cost 0
+   - Quota-tier models use their list-price expected cost as a scarcity proxy
+   - Latency chooses among models with reasonably comparable quality
+6. **Sort** — pinned first → reference quota cost → latency → quality
+7. **Fallback** — Pareto candidates → unbenchmarked models → local
 
 Free-tier eligibility rules are provider-specific. See [providers.md](providers.md).
-Free catalog and route responses expose effective input/output prices as zero
-with `source: "provider_free"`. Benchmark list prices remain benchmark metadata
-and never affect free routing cost or classify a free offering as paid.
+Free catalog and route responses expose effective input/output prices as zero.
+`zero_price` uses `source: "provider_free"`; quota-tier access uses
+`source: "free_tier"`. `reference_price_per_million` preserves provider or
+benchmark list prices for price caps and quota-conservation ranking. Reference
+prices never classify a free offering as paid.
 
 ## `auto-efficient`
 
@@ -152,7 +156,7 @@ When a request succeeds, the session is pinned to `(provider, model)` for 30 min
 
 ### `/v1/free-models`
 
-Returns all free models filtered by the quality bar. Supports `?provider=`, `?task=`, `?limit=` query parameters. Task filters are for discovery/rankings display — routing uses composite quality. Every returned offering has an effective zero price with `source: "provider_free"`; benchmark list prices are not exposed as offering prices.
+Returns all currently eligible free models filtered by the quality bar. Supports `?provider=`, `?task=`, `?limit=` query parameters. Task filters are for discovery/rankings display — routing uses composite quality. Each result includes `access.kind`, `overage: "gateway_blocked"`, effective zero pricing, reference pricing, and recorded account remaining/free-tier/fetch-time values when available.
 
 ### `/v1/paid-models`
 

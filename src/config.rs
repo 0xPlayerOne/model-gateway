@@ -105,6 +105,8 @@ pub struct FreeModelsQualityBar {
     pub max_input_price_per_million: f64,
     #[serde(default = "default_free_quality_max_output_price")]
     pub max_output_price_per_million: f64,
+    #[serde(default = "default_free_quality_max_regret")]
+    pub max_quality_regret: f64,
 }
 
 impl Default for FreeModelsQualityBar {
@@ -116,6 +118,7 @@ impl Default for FreeModelsQualityBar {
             max_age_months: default_free_quality_max_age_months(),
             max_input_price_per_million: default_free_quality_max_input_price(),
             max_output_price_per_million: default_free_quality_max_output_price(),
+            max_quality_regret: default_free_quality_max_regret(),
         }
     }
 }
@@ -939,6 +942,10 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
         "MODEL_GATEWAY_FREE_QUALITY_MAX_OUTPUT_PRICE",
         &mut server.free_models_quality.max_output_price_per_million,
     )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_FREE_QUALITY_MAX_REGRET",
+        &mut server.free_models_quality.max_quality_regret,
+    )?;
     if let Ok(value) = env::var("MODEL_GATEWAY_MODEL_DENYLIST") {
         server.model_denylist = value
             .split(',')
@@ -1069,6 +1076,14 @@ fn validate_server(server: &ServerConfig) -> Result<(), ConfigError> {
     {
         return Err(ConfigError::Invalid(
             "free_models_quality.max_output_price_per_million must be non-negative".to_owned(),
+        ));
+    }
+    if !server.free_models_quality.max_quality_regret.is_finite()
+        || server.free_models_quality.max_quality_regret < 0.0
+        || server.free_models_quality.max_quality_regret > 100.0
+    {
+        return Err(ConfigError::Invalid(
+            "free_models_quality.max_quality_regret must be between 0 and 100".to_owned(),
         ));
     }
     Ok(())
@@ -1359,6 +1374,10 @@ const fn default_free_quality_max_output_price() -> f64 {
     10.0
 }
 
+const fn default_free_quality_max_regret() -> f64 {
+    8.0
+}
+
 const fn default_true() -> bool {
     true
 }
@@ -1545,6 +1564,7 @@ mod tests {
         assert_eq!(quality.max_age_months, 18);
         assert_eq!(quality.max_input_price_per_million, 2.0);
         assert_eq!(quality.max_output_price_per_million, 10.0);
+        assert_eq!(quality.max_quality_regret, 8.0);
     }
 
     #[test]
@@ -1557,6 +1577,7 @@ mod tests {
                 max_age_months: 12,
                 max_input_price_per_million: 10.0,
                 max_output_price_per_million: 20.0,
+                max_quality_regret: 8.0,
             },
             ..ServerConfig::default()
         };
@@ -1585,6 +1606,20 @@ mod tests {
     }
 
     #[test]
+    fn free_models_quality_bar_rejects_invalid_quality_regret() {
+        for max_quality_regret in [-1.0, 101.0, f64::NAN] {
+            let server = ServerConfig {
+                free_models_quality: super::FreeModelsQualityBar {
+                    max_quality_regret,
+                    ..super::FreeModelsQualityBar::default()
+                },
+                ..ServerConfig::default()
+            };
+            assert!(validate_server(&server).is_err());
+        }
+    }
+
+    #[test]
     fn free_models_quality_bar_passes_unbenchmarked_models() {
         let quality = super::FreeModelsQualityBar {
             min_composite_quality: 50.0,
@@ -1606,6 +1641,7 @@ mod tests {
             max_age_months: 0,                // disable age filter
             max_input_price_per_million: 0.0, // disable price filter
             max_output_price_per_million: 0.0,
+            max_quality_regret: 8.0,
         };
         let model = BenchmarkModel::fixture("weak-model", 30.0, 10.0, 5.0, 1.0, 1.0);
         assert!(!quality.passes(Some(&model), 9999999999, Some(1.0), Some(1.0), None, "test"));
@@ -1622,6 +1658,7 @@ mod tests {
             max_age_months: 0,
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
+            max_quality_regret: 8.0,
         };
         let model = BenchmarkModel::fixture("strong-model", 80.0, 85.0, 70.0, 1.0, 1.0);
         assert!(quality.passes(Some(&model), 9999999999, Some(1.0), Some(1.0), None, "test"));
@@ -1637,6 +1674,7 @@ mod tests {
             max_age_months: 0,
             max_input_price_per_million: 2.0,
             max_output_price_per_million: 10.0,
+            max_quality_regret: 8.0,
         };
         let model = BenchmarkModel::fixture("expensive-model", 70.0, 70.0, 70.0, 0.5, 15.0);
         // Output price (15.0) exceeds limit (10.0)
@@ -1668,6 +1706,7 @@ mod tests {
             max_age_months: 12, // 1 year
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
+            max_quality_regret: 8.0,
         };
         // Model with recent release_date passes
         let recent = BenchmarkModel {
@@ -1707,6 +1746,7 @@ mod tests {
             max_age_months: 6, // 6 months
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
+            max_quality_regret: 8.0,
         };
         let model = BenchmarkModel::fixture("any", 70.0, 70.0, 70.0, 1.0, 1.0);
 
@@ -1733,6 +1773,7 @@ mod tests {
             max_age_months: 0,
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
+            max_quality_regret: 8.0,
         };
 
         // composite = 0.80*20 + 0.10*20 + 0.10*12 = 19.2 < 25
@@ -1819,6 +1860,7 @@ mod tests {
             max_age_months: 24,
             max_input_price_per_million: 3.0,
             max_output_price_per_million: 12.0,
+            max_quality_regret: 6.0,
         };
         let encoded = toml::to_string(&original).expect("serialize");
         let decoded: super::FreeModelsQualityBar = toml::from_str(&encoded).expect("deserialize");
@@ -1826,6 +1868,7 @@ mod tests {
         assert_eq!(decoded.max_age_months, 24);
         assert_eq!(decoded.max_input_price_per_million, 3.0);
         assert_eq!(decoded.max_output_price_per_million, 12.0);
+        assert_eq!(decoded.max_quality_regret, 6.0);
     }
 
     #[test]
@@ -1838,6 +1881,7 @@ mod tests {
             max_age_months: 0,
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
+            max_quality_regret: 8.0,
         };
         // Model with all null scores
         let model = BenchmarkModel {
@@ -1867,6 +1911,7 @@ mod tests {
             max_age_months: 12, // 1 year
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
+            max_quality_regret: 8.0,
         };
         let old_refreshed = now - 365 * 86400 * 2; // 2 years old
         // If release_date is recent, model passes even with ancient refreshed_at
@@ -2167,6 +2212,7 @@ mod tests {
             max_age_months: 0,
             max_input_price_per_million: 0.0,
             max_output_price_per_million: 0.0,
+            max_quality_regret: 8.0,
         };
         let model = BenchmarkModel::fixture("m", 50.0, 50.0, 50.0, 1.0, 1.0);
         assert!(!filter.passes(Some(&model), 9999999999, None, None, Some(4096), "test",));

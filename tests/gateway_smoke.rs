@@ -20,7 +20,8 @@ use model_gateway::gateway::build_app;
 use model_gateway::identity::{
     IdentityAliasRecord, IdentityConfidence, IdentityEntityRecord, IdentityImport,
 };
-use model_gateway::routing::{CatalogRecord, RoutingStore};
+use model_gateway::providers::AccountLimit;
+use model_gateway::routing::{AccessKind, CatalogRecord, RoutingStore};
 use model_gateway::secrets::SecretResolver;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -240,7 +241,7 @@ async fn free_models_can_be_filtered_by_provider() {
             "alpha",
             &[CatalogRecord {
                 model: "shared-free".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: None,
                 supports_tools: None,
                 supports_vision: None,
@@ -255,7 +256,7 @@ async fn free_models_can_be_filtered_by_provider() {
             "beta",
             &[CatalogRecord {
                 model: "shared-free".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: None,
                 supports_tools: None,
                 supports_vision: None,
@@ -309,6 +310,219 @@ async fn free_models_can_be_filtered_by_provider() {
 }
 
 #[tokio::test]
+async fn quota_limited_free_access_preserves_reference_prices_and_blocks_paid_reclassification() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "ollama-cloud",
+            &[CatalogRecord {
+                model: "quota-model".to_owned(),
+                access_kind: AccessKind::QuotaLimitedFreeTier,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: Some(1.0),
+                output_price_per_million: Some(5.0),
+            }],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "quota-model",
+                60.0,
+                60.0,
+                60.0,
+                1.0,
+                5.0,
+            )],
+        )
+        .expect("benchmarks");
+    store
+        .record_account_limit(
+            "ollama-cloud",
+            &AccountLimit {
+                limit: Some(100.0),
+                usage: Some(58.0),
+                remaining: Some(42.0),
+                is_free_tier: Some(true),
+            },
+        )
+        .expect("account limit");
+    drop(store);
+
+    let mut free_provider = provider("https://example.com/v1".to_owned());
+    free_provider.profile = Some(ProviderProfileId::OllamaCloud);
+    let mut free_config = config_for(
+        BTreeMap::from([("ollama-cloud".to_owned(), free_provider.clone())]),
+        vec![TargetConfig {
+            provider: "ollama-cloud".to_owned(),
+            model: "quota-model".to_owned(),
+        }],
+    );
+    free_config.server.state_path = Some(state_path.clone());
+    let gateway = spawn_gateway(free_config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/free-models?provider=ollama-cloud"))
+        .send()
+        .await
+        .expect("free models response");
+    let body: Value = response.json().await.expect("free models body");
+    assert_eq!(body["data"][0]["access"]["kind"], "quota_limited_free_tier");
+    assert_eq!(body["data"][0]["access"]["overage"], "gateway_blocked");
+    assert_eq!(body["data"][0]["access"]["remaining"], 42.0);
+    assert_eq!(body["data"][0]["access"]["is_free_tier"], true);
+    assert_eq!(body["data"][0]["price_per_million"]["input"], 0.0);
+    assert_eq!(body["data"][0]["price_per_million"]["source"], "free_tier");
+    assert_eq!(body["data"][0]["reference_price_per_million"]["input"], 1.0);
+    assert_eq!(
+        body["data"][0]["reference_price_per_million"]["output"],
+        5.0
+    );
+
+    free_provider.billing_mode = BillingMode::Paid;
+    let mut paid_config = config_for(
+        BTreeMap::from([("ollama-cloud".to_owned(), free_provider)]),
+        vec![TargetConfig {
+            provider: "ollama-cloud".to_owned(),
+            model: "quota-model".to_owned(),
+        }],
+    );
+    paid_config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(paid_config).await;
+    let free_response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/free-models?provider=ollama-cloud"))
+        .send()
+        .await
+        .expect("paid-account free response");
+    let free_body: Value = free_response.json().await.expect("paid-account free body");
+    assert!(free_body["data"].as_array().is_some_and(Vec::is_empty));
+}
+
+#[tokio::test]
+async fn exhausted_account_snapshot_excludes_quota_limited_free_models() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "ollama-cloud",
+            &[CatalogRecord {
+                model: "quota-model".to_owned(),
+                access_kind: AccessKind::QuotaLimitedFreeTier,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: Some(0.5),
+                output_price_per_million: Some(2.0),
+            }],
+        )
+        .expect("catalog");
+    store
+        .record_account_limit(
+            "ollama-cloud",
+            &AccountLimit {
+                limit: Some(100.0),
+                usage: Some(100.0),
+                remaining: Some(0.0),
+                is_free_tier: Some(true),
+            },
+        )
+        .expect("account limit");
+    drop(store);
+    rusqlite::Connection::open(&state_path)
+        .expect("database")
+        .execute(
+            "UPDATE provider_account_limits SET fetched_at = 1 WHERE provider = 'ollama-cloud'",
+            [],
+        )
+        .expect("stale account snapshot");
+
+    let mut ollama = provider("https://example.com/v1".to_owned());
+    ollama.profile = Some(ProviderProfileId::OllamaCloud);
+    let mut config = config_for(
+        BTreeMap::from([("ollama-cloud".to_owned(), ollama)]),
+        vec![TargetConfig {
+            provider: "ollama-cloud".to_owned(),
+            model: "quota-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/free-models?provider=ollama-cloud"))
+        .send()
+        .await
+        .expect("free models response");
+    let body: Value = response.json().await.expect("free models body");
+    assert!(body["data"].as_array().is_some_and(Vec::is_empty));
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/providers"))
+        .send()
+        .await
+        .expect("providers response");
+    let body: Value = response.json().await.expect("providers body");
+    let ollama = body["data"]
+        .as_array()
+        .and_then(|providers| {
+            providers
+                .iter()
+                .find(|provider| provider["id"] == "ollama-cloud")
+        })
+        .expect("Ollama provider");
+    assert_eq!(ollama["free_model_count"], 0);
+}
+
+#[tokio::test]
+async fn persisted_access_kind_does_not_override_current_provider_configuration() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "custom",
+            &[CatalogRecord {
+                model: "formerly-free".to_owned(),
+                access_kind: AccessKind::ZeroPrice,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(false),
+                supports_structured_output: Some(false),
+                input_price_per_million: None,
+                output_price_per_million: None,
+            }],
+        )
+        .expect("catalog");
+    drop(store);
+
+    let mut config = config_for(
+        BTreeMap::from([(
+            "custom".to_owned(),
+            provider("https://example.com/v1".to_owned()),
+        )]),
+        vec![TargetConfig {
+            provider: "custom".to_owned(),
+            model: "formerly-free".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/free-models?provider=custom"))
+        .send()
+        .await
+        .expect("free models response");
+    let body: Value = response.json().await.expect("free models body");
+    assert!(body["data"].as_array().is_some_and(Vec::is_empty));
+}
+
+#[tokio::test]
 async fn free_models_quality_bar_filters_low_quality_models() {
     let directory = tempfile::tempdir().expect("state directory");
     let state_path = directory.path().join("routing.sqlite3");
@@ -319,7 +533,7 @@ async fn free_models_quality_bar_filters_low_quality_models() {
             &[
                 CatalogRecord {
                     model: "great-model".to_owned(),
-                    is_free: true,
+                    access_kind: AccessKind::QuotaLimitedFreeTier,
                     context_length: None,
                     supports_tools: None,
                     supports_vision: None,
@@ -329,7 +543,7 @@ async fn free_models_quality_bar_filters_low_quality_models() {
                 },
                 CatalogRecord {
                     model: "weak-model".to_owned(),
-                    is_free: true,
+                    access_kind: AccessKind::QuotaLimitedFreeTier,
                     context_length: None,
                     supports_tools: None,
                     supports_vision: None,
@@ -348,7 +562,7 @@ async fn free_models_quality_bar_filters_low_quality_models() {
     drop(store);
 
     let mut p = provider("https://example.com/v1".to_owned());
-    p.profile = Some(ProviderProfileId::OpenRouter);
+    p.profile = Some(ProviderProfileId::OllamaCloud);
     let mut config = config_for(
         BTreeMap::from([("provider-a".to_owned(), p)]),
         vec![TargetConfig {
@@ -400,7 +614,7 @@ async fn free_model_listing_task_changes_ranking_not_identity() {
     let store = RoutingStore::open(Some(&state_path)).expect("routing store");
     let catalog = |model: &str| CatalogRecord {
         model: model.to_owned(),
-        is_free: true,
+        access_kind: AccessKind::ZeroPrice,
         context_length: Some(128_000),
         supports_tools: Some(true),
         supports_vision: Some(false),
@@ -460,7 +674,7 @@ async fn paid_model_listing_task_changes_ranking_not_identity() {
     let store = RoutingStore::open(Some(&state_path)).expect("routing store");
     let catalog = |model: &str| CatalogRecord {
         model: model.to_owned(),
-        is_free: false,
+        access_kind: AccessKind::Paid,
         context_length: Some(128_000),
         supports_tools: Some(true),
         supports_vision: Some(false),
@@ -519,7 +733,7 @@ async fn opencode_zen_free_models_recover_only_reviewed_benchmarks() {
     let store = RoutingStore::open(Some(&state_path)).expect("routing store");
     let free_catalog = |model: &str| CatalogRecord {
         model: model.to_owned(),
-        is_free: true,
+        access_kind: AccessKind::ZeroPrice,
         context_length: Some(128_000),
         supports_tools: Some(true),
         supports_vision: Some(false),
@@ -683,7 +897,7 @@ async fn free_models_keep_a_high_quality_effort_variant() {
             "provider-a",
             &[CatalogRecord {
                 model: "variant-model".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(false),
@@ -737,7 +951,7 @@ async fn auto_models_include_free_candidates_without_price_observations() {
             "free-provider",
             &[CatalogRecord {
                 model: "free-model".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(false),
@@ -799,13 +1013,149 @@ async fn auto_models_include_free_candidates_without_price_observations() {
 }
 
 #[tokio::test]
+async fn auto_free_uses_reference_cost_for_quota_limited_models() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "ollama-cloud",
+            &[
+                CatalogRecord {
+                    model: "cheap-model".to_owned(),
+                    access_kind: AccessKind::QuotaLimitedFreeTier,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(0.1),
+                    output_price_per_million: Some(0.2),
+                },
+                CatalogRecord {
+                    model: "expensive-model".to_owned(),
+                    access_kind: AccessKind::QuotaLimitedFreeTier,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(1.0),
+                    output_price_per_million: Some(2.0),
+                },
+            ],
+        )
+        .expect("catalog");
+    let mut cheap = BenchmarkModel::fixture("cheap-model", 50.0, 50.0, 50.0, 0.1, 0.2);
+    cheap.latency_seconds = Some(1.0);
+    let mut expensive = BenchmarkModel::fixture("expensive-model", 52.0, 52.0, 52.0, 1.0, 2.0);
+    expensive.latency_seconds = Some(1.0);
+    store
+        .replace_benchmarks("fixture", "Fixture", &[cheap, expensive])
+        .expect("benchmarks");
+    drop(store);
+
+    let mut ollama = provider("https://example.com/v1".to_owned());
+    ollama.profile = Some(ProviderProfileId::OllamaCloud);
+    let mut config = config_for(
+        BTreeMap::from([("ollama-cloud".to_owned(), ollama)]),
+        vec![TargetConfig {
+            provider: "ollama-cloud".to_owned(),
+            model: "cheap-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/auto-models?route=free"))
+        .send()
+        .await
+        .expect("auto models response");
+    let body: Value = response.json().await.expect("auto models body");
+    let primary = &body["routes"]["free"]["primary"];
+    assert_eq!(primary["model"], "cheap-model");
+    assert_eq!(primary["expected_cost_microusd"], 0);
+    assert!(
+        primary["reference_cost_microusd"]
+            .as_u64()
+            .is_some_and(|cost| cost > 0)
+    );
+    assert_eq!(primary["access"]["kind"], "quota_limited_free_tier");
+}
+
+#[tokio::test]
+async fn auto_free_quota_cost_uses_request_token_estimates() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "ollama-cloud",
+            &[
+                CatalogRecord {
+                    model: "input-cheap".to_owned(),
+                    access_kind: AccessKind::QuotaLimitedFreeTier,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(0.1),
+                    output_price_per_million: Some(2.0),
+                },
+                CatalogRecord {
+                    model: "output-cheap".to_owned(),
+                    access_kind: AccessKind::QuotaLimitedFreeTier,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(false),
+                    supports_structured_output: Some(false),
+                    input_price_per_million: Some(1.0),
+                    output_price_per_million: Some(0.1),
+                },
+            ],
+        )
+        .expect("catalog");
+    let mut input_cheap = BenchmarkModel::fixture("input-cheap", 50.0, 50.0, 50.0, 0.1, 2.0);
+    input_cheap.latency_seconds = Some(1.0);
+    let mut output_cheap = BenchmarkModel::fixture("output-cheap", 50.0, 50.0, 50.0, 1.0, 0.1);
+    output_cheap.latency_seconds = Some(1.0);
+    store
+        .replace_benchmarks("fixture", "Fixture", &[input_cheap, output_cheap])
+        .expect("benchmarks");
+    drop(store);
+
+    let mut ollama = provider(format!("http://{upstream}/v1"));
+    ollama.profile = Some(ProviderProfileId::OllamaCloud);
+    let mut config = config_for(
+        BTreeMap::from([("ollama-cloud".to_owned(), ollama)]),
+        vec![TargetConfig {
+            provider: "ollama-cloud".to_owned(),
+            model: "input-cheap".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-free",
+            "messages": [{"role": "user", "content": "x".repeat(10_000)}]
+        }))
+        .send()
+        .await
+        .expect("auto-free response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("auto-free body");
+    assert_eq!(body["model"], "input-cheap");
+}
+
+#[tokio::test]
 async fn auto_models_keep_base_and_pro_variants_in_separate_modes() {
     let directory = tempfile::tempdir().expect("state directory");
     let state_path = directory.path().join("routing.sqlite3");
     let store = RoutingStore::open(Some(&state_path)).expect("routing store");
     let catalog = |model: &str, input, output| CatalogRecord {
         model: model.to_owned(),
-        is_free: false,
+        access_kind: AccessKind::Paid,
         context_length: Some(128_000),
         supports_tools: Some(true),
         supports_vision: Some(false),
@@ -887,7 +1237,7 @@ async fn auto_models_fill_fallback_slots_beyond_pareto_frontier() {
                 .iter()
                 .map(|(model, _, price, _)| CatalogRecord {
                     model: (*model).to_owned(),
-                    is_free: false,
+                    access_kind: AccessKind::Paid,
                     context_length: Some(128_000),
                     supports_tools: Some(true),
                     supports_vision: Some(false),
@@ -1417,7 +1767,7 @@ async fn auto_free_filters_catalog_capability_mismatches() {
             "unsupported",
             &[CatalogRecord {
                 model: "no-tools".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: Some(128_000),
                 supports_tools: Some(false),
                 supports_vision: Some(false),
@@ -1432,7 +1782,7 @@ async fn auto_free_filters_catalog_capability_mismatches() {
             "supported",
             &[CatalogRecord {
                 model: "with-tools".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(false),
@@ -1443,16 +1793,14 @@ async fn auto_free_filters_catalog_capability_mismatches() {
         )
         .expect("supported catalog");
     drop(store);
+    let mut unsupported_config = provider(format!("http://{unsupported}/v1"));
+    unsupported_config.free_models = vec!["no-tools".to_owned()];
+    let mut supported_config = provider(format!("http://{supported}/v1"));
+    supported_config.free_models = vec!["with-tools".to_owned()];
     let mut config = config_for(
         BTreeMap::from([
-            (
-                "unsupported".to_owned(),
-                provider(format!("http://{unsupported}/v1")),
-            ),
-            (
-                "supported".to_owned(),
-                provider(format!("http://{supported}/v1")),
-            ),
+            ("unsupported".to_owned(), unsupported_config),
+            ("supported".to_owned(), supported_config),
         ]),
         vec![TargetConfig {
             provider: "unsupported".to_owned(),
@@ -1605,7 +1953,7 @@ async fn auto_free_prefers_higher_quality_model() {
                 provider,
                 &[CatalogRecord {
                     model: model.to_owned(),
-                    is_free: true,
+                    access_kind: AccessKind::ZeroPrice,
                     context_length: Some(128_000),
                     supports_tools: Some(true),
                     supports_vision: Some(false),
@@ -1661,7 +2009,7 @@ async fn auto_free_quality_bar_filters_low_quality() {
             "free",
             &[CatalogRecord {
                 model: "low-quality-model".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: Some(128_000),
                 supports_tools: Some(false),
                 supports_vision: Some(false),
@@ -1725,7 +2073,7 @@ async fn auto_free_selects_highest_composite_quality_model() {
                 provider,
                 &[CatalogRecord {
                     model: model.to_owned(),
-                    is_free: true,
+                    access_kind: AccessKind::ZeroPrice,
                     context_length: Some(128_000),
                     supports_tools: Some(true),
                     supports_vision: Some(false),
@@ -1811,7 +2159,7 @@ async fn auto_free_emits_selection_headers() {
             "free",
             &[CatalogRecord {
                 model: "benchmarked-free".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(false),
@@ -1896,7 +2244,7 @@ async fn auto_free_falls_back_through_multiple_providers() {
                 prov,
                 &[CatalogRecord {
                     model: model.to_owned(),
-                    is_free: true,
+                    access_kind: AccessKind::ZeroPrice,
                     context_length: Some(128_000),
                     supports_tools: Some(true),
                     supports_vision: Some(false),
@@ -1957,7 +2305,7 @@ async fn auto_free_quality_bar_filters_by_context() {
             "free",
             &[CatalogRecord {
                 model: "tiny-context".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: Some(4_096),
                 supports_tools: Some(false),
                 supports_vision: Some(false),
@@ -2065,7 +2413,7 @@ async fn auto_free_abandons_pin_on_auth_failure() {
                 prov,
                 &[CatalogRecord {
                     model: model.to_owned(),
-                    is_free: true,
+                    access_kind: AccessKind::ZeroPrice,
                     context_length: Some(128_000),
                     supports_tools: Some(true),
                     supports_vision: Some(false),
@@ -2136,7 +2484,7 @@ async fn auto_free_prefers_fast_model_for_simple_task() {
                 prov,
                 &[CatalogRecord {
                     model: model.to_owned(),
-                    is_free: true,
+                    access_kind: AccessKind::ZeroPrice,
                     context_length: Some(128_000),
                     supports_tools: Some(true),
                     supports_vision: Some(false),
@@ -2147,7 +2495,7 @@ async fn auto_free_prefers_fast_model_for_simple_task() {
             )
             .expect("catalog");
     }
-    let mut fast_bench = BenchmarkModel::fixture("fast-model", 60.0, 55.0, 50.0, 0.0, 0.0);
+    let mut fast_bench = BenchmarkModel::fixture("fast-model", 75.0, 75.0, 75.0, 0.0, 0.0);
     fast_bench.latency_seconds = Some(0.5);
     let mut slow_bench = BenchmarkModel::fixture("slow-model", 80.0, 75.0, 70.0, 0.0, 0.0);
     slow_bench.latency_seconds = Some(5.0);
@@ -2190,7 +2538,7 @@ async fn auto_free_prefers_quality_model_for_complex_task() {
                 prov,
                 &[CatalogRecord {
                     model: model.to_owned(),
-                    is_free: true,
+                    access_kind: AccessKind::ZeroPrice,
                     context_length: Some(128_000),
                     supports_tools: Some(true),
                     supports_vision: Some(false),
@@ -2232,8 +2580,8 @@ async fn auto_free_prefers_quality_model_for_complex_task() {
         .await
         .expect("auto-free response");
     assert_eq!(response.status(), StatusCode::OK);
-    // For free models (cost=0), Pareto prefers faster model (latency tiebreak)
-    assert_eq!(response.headers()["x-model-gateway-provider"], "fast");
+    // The fast model is outside the quality-regret window, so quality wins.
+    assert_eq!(response.headers()["x-model-gateway-provider"], "slow");
 }
 
 #[tokio::test]
@@ -2249,7 +2597,7 @@ async fn auto_free_quality_bar_filters_low_quality_composite() {
                 prov,
                 &[CatalogRecord {
                     model: model.to_owned(),
-                    is_free: true,
+                    access_kind: AccessKind::ZeroPrice,
                     context_length: Some(128_000),
                     supports_tools: Some(true),
                     supports_vision: Some(false),
@@ -2307,7 +2655,7 @@ async fn auto_free_pareto_dominance_prunes_slow_models() {
                 prov,
                 &[CatalogRecord {
                     model: model.to_owned(),
-                    is_free: true,
+                    access_kind: AccessKind::ZeroPrice,
                     context_length: Some(128_000),
                     supports_tools: Some(true),
                     supports_vision: Some(false),
@@ -2401,7 +2749,7 @@ async fn auto_efficient_uses_cost_then_quality_floor() {
             "cheap",
             &[CatalogRecord {
                 model: "cheap-model".to_owned(),
-                is_free: false,
+                access_kind: AccessKind::Paid,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(false),
@@ -2416,7 +2764,7 @@ async fn auto_efficient_uses_cost_then_quality_floor() {
             "strong",
             &[CatalogRecord {
                 model: "strong-model".to_owned(),
-                is_free: false,
+                access_kind: AccessKind::Paid,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(false),
@@ -2494,7 +2842,7 @@ async fn auto_efficient_honors_explicit_paid_authorization_and_spend_caps() {
             "paid",
             &[CatalogRecord {
                 model: "paid-model".to_owned(),
-                is_free: false,
+                access_kind: AccessKind::Paid,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(true),
@@ -2564,7 +2912,7 @@ async fn auto_efficient_uses_canonical_mapping_and_reasoning_effort() {
             "paid",
             &[CatalogRecord {
                 model: "provider/model-v1".to_owned(),
-                is_free: false,
+                access_kind: AccessKind::Paid,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(true),
@@ -2671,7 +3019,7 @@ async fn auto_frontier_selects_cheapest_paid_model_above_floor() {
                 provider,
                 &[CatalogRecord {
                     model: model.to_owned(),
-                    is_free: false,
+                    access_kind: AccessKind::Paid,
                     context_length: Some(128_000),
                     supports_tools: Some(true),
                     supports_vision: Some(true),
@@ -2735,7 +3083,7 @@ async fn auto_frontier_skips_free_models_and_free_providers() {
             "free-provider",
             &[CatalogRecord {
                 model: "free-model".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(true),
@@ -2750,7 +3098,7 @@ async fn auto_frontier_skips_free_models_and_free_providers() {
             "paid-provider",
             &[CatalogRecord {
                 model: "paid-model".to_owned(),
-                is_free: false,
+                access_kind: AccessKind::Paid,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(true),
@@ -2825,7 +3173,7 @@ async fn auto_frontier_reroutes_same_canonical_model_before_output() {
                 provider,
                 &[CatalogRecord {
                     model: "carrier-model".to_owned(),
-                    is_free: false,
+                    access_kind: AccessKind::Paid,
                     context_length: Some(128_000),
                     supports_tools: Some(true),
                     supports_vision: Some(true),
@@ -2890,7 +3238,7 @@ async fn auto_frontier_skips_free_billing_providers() {
             "frontier",
             &[CatalogRecord {
                 model: "gpt-preview".to_owned(),
-                is_free: false,
+                access_kind: AccessKind::Paid,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(true),
@@ -2961,7 +3309,7 @@ async fn auto_frontier_reports_quality_and_capability_exclusions() {
     let store = RoutingStore::open(Some(&state_path)).expect("routing store");
     let catalog = |supports_tools| CatalogRecord {
         model: "gpt-frontier".to_owned(),
-        is_free: false,
+        access_kind: AccessKind::Paid,
         context_length: Some(128_000),
         supports_tools: Some(supports_tools),
         supports_vision: Some(true),
@@ -3493,7 +3841,7 @@ async fn paid_models_lists_only_paid_provider_offerings() {
             "paid",
             &[CatalogRecord {
                 model: "gpt-4o".to_owned(),
-                is_free: false,
+                access_kind: AccessKind::Paid,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(true),
@@ -3508,7 +3856,7 @@ async fn paid_models_lists_only_paid_provider_offerings() {
             "free",
             &[CatalogRecord {
                 model: "gemini-free".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(true),
@@ -3556,7 +3904,7 @@ async fn auto_balanced_selects_mid_range_model() {
             "paid",
             &[CatalogRecord {
                 model: "balanced-model".to_owned(),
-                is_free: false,
+                access_kind: AccessKind::Paid,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(true),
@@ -3615,7 +3963,7 @@ async fn auto_balanced_disabled_when_config_says_so() {
             "paid",
             &[CatalogRecord {
                 model: "model".to_owned(),
-                is_free: false,
+                access_kind: AccessKind::Paid,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(true),
@@ -3707,7 +4055,7 @@ async fn auto_balanced_falls_back_to_auto_free() {
             "free-prov",
             &[CatalogRecord {
                 model: "free-model".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(false),
@@ -3783,7 +4131,7 @@ async fn runtime_rejects_suggestions_until_mapping_is_approved() {
             "paid-provider",
             &[CatalogRecord {
                 model: "model-family".to_owned(),
-                is_free: false,
+                access_kind: AccessKind::Paid,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(false),
@@ -3863,7 +4211,7 @@ async fn canonical_entity_link_propagates_to_exact_provider_alias() {
             "paid-provider",
             &[CatalogRecord {
                 model: "Vendor/Canonical-Model".to_owned(),
-                is_free: false,
+                access_kind: AccessKind::Paid,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(false),
@@ -3957,7 +4305,7 @@ async fn auto_efficient_falls_back_to_auto_free() {
             "free-prov",
             &[CatalogRecord {
                 model: "free-model".to_owned(),
-                is_free: true,
+                access_kind: AccessKind::ZeroPrice,
                 context_length: Some(128_000),
                 supports_tools: Some(true),
                 supports_vision: Some(false),
