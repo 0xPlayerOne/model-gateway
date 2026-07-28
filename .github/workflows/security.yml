@@ -101,7 +101,9 @@ jobs:
 
   dependency-audit-rust:
     name: Dependency Audit (Rust)
-    runs-on: ubuntu-slim
+    # ubuntu-latest ships with Cargo/Rust; use it for the audit-only job and
+    # fall back to the repository toolchain when the image lacks Rust.
+    runs-on: ${{ vars.REPO_FOUNDRY_RUST_AUDIT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -120,8 +122,22 @@ jobs:
       - name: Detect
         id: applicability
         run: bash .github/scripts/security.sh should_run rust >> "$GITHUB_OUTPUT"
-      - name: Setup
+      - name: Check Rust
+        id: system-rust
         if: steps.applicability.outputs.applicable == 'true'
+        shell: bash
+        run: |
+          if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
+            cargo --version
+            rustc --version
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Setup
+        if: >-
+          steps.applicability.outputs.applicable == 'true' &&
+          steps.system-rust.outputs.available != 'true'
         uses: ./.github/actions/setup
         with:
           mise-scope: rust
