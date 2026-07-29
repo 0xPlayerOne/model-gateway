@@ -1,4 +1,4 @@
-name: Release
+name: Code Foundry
 
 on:
   push:
@@ -14,7 +14,7 @@ permissions:
 jobs:
   release:
     name: Release
-    uses: 0xPlayerOne/code-foundry/.github/workflows/release.yml@v0.27.9
+    uses: 0xPlayerOne/code-foundry/.github/workflows/release.yml@v0.27.11
     with:
       runner: ubuntu-slim
     secrets: inherit

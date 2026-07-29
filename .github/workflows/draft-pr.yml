@@ -1,4 +1,4 @@
-name: Draft PR
+name: Code Foundry
 
 on:
   push:
@@ -18,7 +18,7 @@ permissions:
 jobs:
   draft-pr:
     name: Draft PR
-    uses: 0xPlayerOne/code-foundry/.github/workflows/draft-pr.yml@v0.27.9
+    uses: 0xPlayerOne/code-foundry/.github/workflows/draft-pr.yml@v0.27.11
     with:
       runner: ubuntu-slim
     secrets: inherit
