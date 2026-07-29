@@ -131,6 +131,10 @@ Best bang-for-buck. Quality floor: **35**. Pipeline:
 7. **Session pin** — pinned models sort first within their rank group
 8. **Fallback** — `auto-free` → `local`
 
+`auto-efficient` retains cost-first ordering. `auto-frontier` uses the same
+strict Pareto filtering but applies the latency-aware selection policy described
+above.
+
 Expected cost uses Artificial Analysis' measured cost per Intelligence Index
 task when available, then falls back to the offering's input/output prices and
 estimated request tokens. Cost-based quota windows impose spend caps. Effective
@@ -138,6 +142,20 @@ subscription price remains zero for billing, while the measured task cost is
 used for efficiency ranking.
 
 Models from profiles with known included-subscription semantics report effective cost zero with `source: "subscription"`, while reference prices remain available for Pareto efficiency ranking and diagnostics. They are eligible for efficient/balanced/frontier routes, never `auto-free`. A generic provider configured with `billing_mode = "subscription"` remains priced unless its profile explicitly supports included inference.
+
+### Frontier selection policy
+
+`auto-frontier` preserves the exact three-axis Pareto frontier, then orders
+those non-dominated candidates with a transparent latency-aware utility:
+
+- quality: 50%
+- measured task-cost efficiency: 25%
+- latency efficiency: 25%
+
+Cost and latency efficiencies are normalized against the best frontier
+candidate, so a very slow model cannot win solely because it is cheaper. This
+does not remove a legitimate cost/quality tradeoff from the frontier; it only
+prevents cost-first sorting from always selecting the cheapest point.
 
 ## `auto-balanced`
 

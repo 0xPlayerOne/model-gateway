@@ -24,6 +24,10 @@ use crate::benchmarks::{
     BenchmarkImport, BenchmarkModel, ScoredCandidate, TaskKind, classify, composite_quality,
     pareto_rank, parse_artificial_analysis, quality_for,
 };
+
+const FRONTIER_QUALITY_WEIGHT: f64 = 0.50;
+const FRONTIER_COST_WEIGHT: f64 = 0.25;
+const FRONTIER_LATENCY_WEIGHT: f64 = 0.25;
 use crate::config::{
     BillingMode, Config, ProviderConfig, ProviderProfileId, ServerConfig, TargetConfig,
 };
@@ -2709,7 +2713,31 @@ fn select_mode_models(
             .then_with(|| a.latency_seconds.total_cmp(&b.latency_seconds))
             .then_with(|| b.quality.total_cmp(&a.quality))
     };
-    ranked.sort_by(rank_order);
+    if mode == "auto-frontier" {
+        let minimum_cost = ranked
+            .iter()
+            .map(|candidate| candidate.expected_cost_microusd)
+            .filter(|cost| *cost < u64::MAX)
+            .min()
+            .unwrap_or(u64::MAX);
+        let minimum_latency = ranked
+            .iter()
+            .map(|candidate| candidate.latency_seconds)
+            .filter(|latency| latency.is_finite())
+            .min_by(|left, right| left.total_cmp(right))
+            .unwrap_or(f64::MAX);
+        ranked.sort_by(|left, right| {
+            frontier_selection_score(right, minimum_cost, minimum_latency)
+                .total_cmp(&frontier_selection_score(
+                    left,
+                    minimum_cost,
+                    minimum_latency,
+                ))
+                .then_with(|| rank_order(left, right))
+        });
+    } else {
+        ranked.sort_by(rank_order);
+    }
     let selected = ranked
         .iter()
         .map(|candidate| (candidate.value.provider, candidate.value.model))
@@ -2736,9 +2764,47 @@ fn select_mode_models(
         "mode": mode,
         "quality_floor": quality_floor,
         "max_quality_regret": max_quality_regret,
+        "selection_policy": if mode == "auto-frontier" {
+            Some(json!({
+                "strategy": "latency_aware_pareto",
+                "weights": {
+                    "quality": FRONTIER_QUALITY_WEIGHT,
+                    "task_cost": FRONTIER_COST_WEIGHT,
+                    "latency": FRONTIER_LATENCY_WEIGHT,
+                },
+            }))
+        } else {
+            None
+        },
         "primary": primary_entry,
         "fallbacks": fallbacks,
     })
+}
+
+fn frontier_selection_score(
+    candidate: &ScoredCandidate<ModeModelValue<'_>>,
+    minimum_cost: u64,
+    minimum_latency: f64,
+) -> f64 {
+    let cost_efficiency =
+        if minimum_cost == u64::MAX || candidate.expected_cost_microusd == u64::MAX {
+            0.0
+        } else if minimum_cost == 0 {
+            1.0
+        } else {
+            (minimum_cost as f64 / candidate.expected_cost_microusd.max(1) as f64).min(1.0)
+        };
+    let latency_efficiency = if !minimum_latency.is_finite()
+        || !candidate.latency_seconds.is_finite()
+        || minimum_latency <= 0.0
+    {
+        0.0
+    } else {
+        (minimum_latency / candidate.latency_seconds.max(f64::EPSILON)).min(1.0)
+    };
+    FRONTIER_QUALITY_WEIGHT * (candidate.quality / 100.0).clamp(0.0, 1.0)
+        + FRONTIER_COST_WEIGHT * cost_efficiency
+        + FRONTIER_LATENCY_WEIGHT * latency_efficiency
 }
 
 fn mode_model_entry(

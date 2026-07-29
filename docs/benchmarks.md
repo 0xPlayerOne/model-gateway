@@ -268,7 +268,12 @@ The Pareto ranking algorithm (`pareto_rank` in `src/benchmarks.rs`) uses three a
 3. **Latency** — end-to-end response seconds when available, otherwise time to
    first token (lower is better)
 
-A candidate is **dominated** if another model is at least as good on all axes and strictly better on at least one. Dominated candidates are removed. The surviving frontier is sorted by cost → latency → quality.
+A candidate is **dominated** if another model is at least as good on all axes and strictly better on at least one. Dominated candidates are removed. The resulting frontier is exact and preserves every non-dominated quality/cost/latency tradeoff.
+
+For `auto-frontier`, the non-dominated candidates are then ordered with a
+latency-aware utility: 50% quality, 25% measured task-cost efficiency, and 25%
+latency efficiency. Other auto modes retain their documented mode-specific
+cost/latency/quality ordering.
 
 Effective provider price remains zero for free and included-subscription
 routes, but measured task cost is retained as the reference efficiency cost.
