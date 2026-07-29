@@ -1,4 +1,4 @@
-name: CI
+name: Code Foundry
 
 on:
   push:
@@ -13,9 +13,9 @@ permissions:
 jobs:
   ci:
     name: CI
-    uses: 0xPlayerOne/code-foundry/.github/workflows/ci.yml@v0.27.9
+    uses: 0xPlayerOne/code-foundry/.github/workflows/ci.yml@v0.27.11
     with:
       runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: v0.27.9
+      runtime-ref: v0.27.11
       runner: ubuntu-latest
     secrets: inherit

@@ -1,4 +1,4 @@
-name: Security
+name: Code Foundry
 
 on:
   push:
@@ -13,9 +13,9 @@ permissions:
 jobs:
   security:
     name: Security
-    uses: 0xPlayerOne/code-foundry/.github/workflows/security.yml@v0.27.9
+    uses: 0xPlayerOne/code-foundry/.github/workflows/security.yml@v0.27.11
     with:
       runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: v0.27.9
+      runtime-ref: v0.27.11
       runner: ubuntu-slim
     secrets: inherit
