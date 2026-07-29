@@ -13,9 +13,9 @@ permissions:
 jobs:
   security:
     name: Security
-    uses: 0xPlayerOne/code-foundry/.github/workflows/security.yml@v0.27.11
+    uses: 0xPlayerOne/code-foundry/.github/workflows/security.yml@v0.27.14
     with:
       runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: v0.27.11
+      runtime-ref: v0.27.14
       runner: ubuntu-slim
     secrets: inherit
