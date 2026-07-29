@@ -29,6 +29,6 @@ toolchain: auto
 post_release: false
 post_release_workflow:
 post_release_mode: auto
-opencode_security: false
+opencode_security: true
 sync_mode: overlay
 custom_workflows: preserve
