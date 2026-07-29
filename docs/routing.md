@@ -149,9 +149,9 @@ Mid-range quality. Quality floor: **42**. Same pipeline as auto-efficient with a
 
 ## `auto-frontier`
 
-Top tier. Quality floor: **50**. Same pipeline as auto-efficient/balanced — all paid models, differentiated by quality floor.
+Top tier. Quality floor: **52**. Same pipeline as auto-efficient/balanced — all paid models, differentiated by quality floor.
 
-- Quality floor: `frontier_quality_floor_single` (default 50.0)
+- Quality floor: `frontier_quality_floor_single` (default 52.0)
 - **Never falls back** — returns a generic error when no candidate is available
 
 ## Session Pinning
