@@ -15,6 +15,16 @@ CLI_PROXY_HOME="${MODEL_GATEWAY_CLI_PROXY_HOME:-$HOME/.config/model-gateway/cli-
 LOG="${MODEL_GATEWAY_CLI_PROXY_LOG:-$CLI_PROXY_HOME/server.log}"
 PIDFILE="${MODEL_GATEWAY_CLI_PROXY_PIDFILE:-$CLI_PROXY_HOME/server.pid}"
 
+is_cli_proxy_process() {
+    local pid="$1"
+    local command
+    command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    case "$command" in
+        *model-gateway[[:space:]]cli-proxy[[:space:]]serve*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 FOLLOW=false
 OPTIONAL=false
 if [ "${1:-}" = "--follow" ] || [ "${1:-}" = "-f" ]; then
@@ -38,6 +48,10 @@ fi
 LISTENER_PIDS=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
 if [ -n "$LISTENER_PIDS" ]; then
     LISTENER_PID="$(printf '%s\n' "$LISTENER_PIDS" | head -n 1)"
+    if ! is_cli_proxy_process "$LISTENER_PID"; then
+        echo "CLIProxy port $PORT is occupied by a non-CLIProxy process (PID $LISTENER_PID); refusing to start." >&2
+        exit 1
+    fi
     printf '%s\n' "$LISTENER_PID" > "$PIDFILE"
     echo "CLIProxyAPI is already running (PID $LISTENER_PID, port $PORT)."
     if [ "$OPTIONAL" = true ]; then
@@ -48,7 +62,7 @@ fi
 
 if [ -f "$PIDFILE" ]; then
     OLD_PID=$(cat "$PIDFILE")
-    if kill -0 "$OLD_PID" 2>/dev/null; then
+    if kill -0 "$OLD_PID" 2>/dev/null && is_cli_proxy_process "$OLD_PID"; then
         for _ in $(seq 1 20); do
             LISTENER_PIDS=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
             if [ -n "$LISTENER_PIDS" ]; then

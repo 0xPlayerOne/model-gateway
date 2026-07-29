@@ -65,7 +65,15 @@
         "summary": "Proxy an OpenAI-compatible chat completion",
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "type": "object" } } }
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "reasoning_effort": {
+                "type": "string",
+                "enum": ["low", "medium", "high", "xhigh", "max"]
+              }
+            }
+          } } }
         },
         "responses": {
           "200": { "description": "OpenAI-compatible completion or event stream." },
@@ -323,7 +331,6 @@
               "rank": { "type": "integer" }
             }
           },
-          "benchmarks": { "$ref": "#/components/schemas/BenchmarkMetrics" },
           "reasoning_effort": { "type": ["string", "null"] }
         }
       },

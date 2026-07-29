@@ -1637,7 +1637,6 @@ fn catalog_model_summary_json(entry: &CatalogModelEntry, origin: &str) -> Value 
             "rank": entry.rank,
         },
         "reasoning_effort": entry.effort_level,
-        "benchmarks": benchmark_metrics_json(entry.benchmark),
     })
 }
 
@@ -1866,7 +1865,7 @@ fn public_origin(headers: &HeaderMap) -> String {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(',').next())
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|value| matches!(*value, "http" | "https"))
         .unwrap_or("http");
     let host = headers
         .get(header::HOST)
@@ -3219,7 +3218,7 @@ async fn chat_completions(
             );
         }
     };
-    let request: Value = match serde_json::from_slice::<Value>(&body) {
+    let mut request: Value = match serde_json::from_slice::<Value>(&body) {
         Ok(value) if value.is_object() => value,
         Ok(_) => {
             log_request(
@@ -3301,6 +3300,27 @@ async fn chat_completions(
             );
         }
     };
+    if let Some(effort) = request.get("reasoning_effort") {
+        let Some(effort) = effort.as_str() else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                request_id,
+                "field 'reasoning_effort' must be one of low, medium, high, xhigh, or max",
+                "invalid_request_error",
+                Some("reasoning_effort"),
+            );
+        };
+        if !is_reasoning_effort(effort) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                request_id,
+                "field 'reasoning_effort' must be one of low, medium, high, xhigh, or max",
+                "invalid_request_error",
+                Some("reasoning_effort"),
+            );
+        }
+        request["reasoning_effort"] = Value::String(effort.to_ascii_lowercase());
+    }
     let session_hash = match session_material(&headers, &request) {
         Some(material) => routing_operation(state.routing.clone(), move |routing| {
             routing.session_hash(&material)
@@ -5788,7 +5808,7 @@ mod tests {
         find_suggested_benchmark, footer_sse_event, has_dynamic_or_release_suffix, header_value,
         identity_mapping_indexes, is_exact_model_identity, is_fallback_status, is_model_denied,
         is_provider_auto_route, is_reasoning_effort, log_request, malformed_sse_event,
-        parse_json_usage, parse_sse_usage, parse_usage_value, rank_benchmark_models,
+        parse_json_usage, parse_sse_usage, parse_usage_value, public_origin, rank_benchmark_models,
         rate_limit_reset_delay, request_id, request_id_from_response, session_material, sse_model,
         strip_model_noise, take_sse_event, transform_sse_event,
     };
@@ -5833,6 +5853,17 @@ mod tests {
         );
         assert_eq!(encode_uri_component("model/name", true), "model/name");
         assert_eq!(encode_uri_component("coding task", false), "coding%20task");
+    }
+
+    #[test]
+    fn public_origin_rejects_untrusted_forwarded_schemes() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("localhost:8008"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("javascript"));
+        assert_eq!(public_origin(&headers), "http://localhost:8008");
+
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert_eq!(public_origin(&headers), "https://localhost:8008");
     }
 
     fn resolves_single(catalog_id: &str, benchmark_id: &str) -> bool {

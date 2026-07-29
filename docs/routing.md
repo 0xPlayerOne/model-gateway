@@ -191,7 +191,7 @@ When a request succeeds, the session is pinned to `(provider, model)` for 30 min
 
 ### `/v1/catalog/models`
 
-The canonical model discovery collection. Use `?access=free|paid|all`, `?task=`, `?provider=`, `?limit=`, `?cursor=`, `?view=summary|full`, and `?variants=collapsed|all`. The default is a compact summary of at most 25 models; each item contains `id`, `quality`, separate `reasoning_effort`, compact benchmark metrics, and an absolute clickable `links.self` URL. Use `?view=full&variants=all` to inspect every reasoning-effort benchmark variant instead of one variant per provider/model. Cursors are bound to the catalog snapshot; a refresh invalidates an old cursor with `409 stale_cursor`. Responses include `meta.snapshot`, `meta.total`, navigable links, `ETag`, `Last-Modified`, and conditional `304 Not Modified` support.
+The canonical model discovery collection. Use `?access=free|paid|all`, `?task=`, `?provider=`, `?limit=`, `?cursor=`, `?view=summary|full`, and `?variants=collapsed|all`. The default is a compact summary of at most 25 models; each item contains only `id`, separate `reasoning_effort`, `quality`, and an absolute clickable `links.self` URL. Use the linked model resource or `?view=full&variants=all` to inspect benchmark metrics and every reasoning-effort variant. Cursors are bound to the catalog snapshot; a refresh invalidates an old cursor with `409 stale_cursor`. Responses include `meta.snapshot`, `meta.total`, navigable links, `ETag`, `Last-Modified`, and conditional `304 Not Modified` support.
 
 ### `/v1/catalog/models/{provider}/{model}`
 
