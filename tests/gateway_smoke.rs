@@ -3106,6 +3106,14 @@ async fn auto_frontier_keeps_effort_variants_as_distinct_candidates() {
     assert_eq!(primary["reasoning_effort"], "medium");
     assert_eq!(primary["benchmark_cost_per_task_usd"], 0.01);
     assert_eq!(primary["latency_seconds"], 40.0);
+    assert_eq!(
+        body["routes"]["frontier"]["selection_policy"]["strategy"],
+        "latency_aware_pareto"
+    );
+    assert_eq!(
+        body["routes"]["frontier"]["selection_policy"]["weights"]["latency"],
+        0.25
+    );
 
     let catalog: Value = reqwest::Client::new()
         .get(format!(
