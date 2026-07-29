@@ -1337,6 +1337,15 @@ struct CatalogModelsQuery {
     limit: Option<usize>,
     cursor: Option<String>,
     view: Option<ModelView>,
+    variants: Option<CatalogVariants>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CatalogVariants {
+    #[default]
+    Collapsed,
+    All,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -1755,6 +1764,7 @@ fn catalog_snapshot(
     account_limits: BTreeMap<String, AccountLimitSnapshot>,
     access: CatalogAccess,
     task: TaskKind,
+    include_variants: bool,
 ) -> CatalogSnapshot {
     candidates.sort_by(|left, right| {
         let left_quality = left.benchmark.as_ref().and_then(|b| quality_for(b, task));
@@ -1769,16 +1779,18 @@ fn catalog_snapshot(
             .then_with(|| left.offering.provider.cmp(&right.offering.provider))
             .then_with(|| left.offering.model.cmp(&right.offering.model))
     });
-    let mut seen = std::collections::HashSet::new();
-    candidates.retain(|candidate| {
-        seen.insert((
-            candidate.offering.provider.clone(),
-            normalize_identifier(&candidate.offering.model),
-        ))
-    });
+    if !include_variants {
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|candidate| {
+            seen.insert((
+                candidate.offering.provider.clone(),
+                normalize_identifier(&candidate.offering.model),
+            ))
+        });
+    }
 
     let mut hasher = Sha256::new();
-    hasher.update(format!("{:?}:{:?}", access, task));
+    hasher.update(format!("{:?}:{:?}:{include_variants}", access, task));
     hasher.update(format!("{:?}", account_limits).as_bytes());
     let mut last_modified = 0;
     for candidate in &candidates {
@@ -1886,6 +1898,9 @@ fn catalog_links(
                 "view={}",
                 if view.is_full() { "full" } else { "summary" }
             ));
+        }
+        if matches!(query.variants, Some(CatalogVariants::All)) {
+            params.push("variants=all".to_owned());
         }
         if let Some(cursor) = cursor {
             params.push(format!("cursor={}", encode_uri_component(&cursor, false)));
@@ -2001,6 +2016,7 @@ async fn load_catalog_snapshot(
     access: CatalogAccess,
     provider_filter: Option<&str>,
     task: TaskKind,
+    include_variants: bool,
 ) -> Result<CatalogSnapshot, ()> {
     let (mut candidates, account_limits) = match access {
         CatalogAccess::Free => load_free_candidates(state, provider_filter).await?,
@@ -2019,7 +2035,13 @@ async fn load_catalog_snapshot(
     if matches!(access, CatalogAccess::Paid) {
         candidates.retain(|candidate| candidate.offering.access_kind.is_paid_route_eligible());
     }
-    Ok(catalog_snapshot(candidates, account_limits, access, task))
+    Ok(catalog_snapshot(
+        candidates,
+        account_limits,
+        access,
+        task,
+        include_variants,
+    ))
 }
 
 fn catalog_model_response(
@@ -2839,7 +2861,16 @@ async fn list_catalog_models(
     };
     let limit = query.limit.unwrap_or(25).clamp(1, 100);
     let view = query.view.unwrap_or_default();
-    let snapshot = match load_catalog_snapshot(&state, access, provider_filter, task).await {
+    let include_variants = matches!(query.variants, Some(CatalogVariants::All));
+    let snapshot = match load_catalog_snapshot(
+        &state,
+        access,
+        provider_filter,
+        task,
+        include_variants,
+    )
+    .await
+    {
         Ok(snapshot) => snapshot,
         Err(()) => {
             return (
@@ -2928,6 +2959,7 @@ async fn list_catalog_models(
             "view": if view.is_full() { "full" } else { "summary" },
             "access": catalog_access_name(access),
             "task": task.as_str(),
+            "variants": if include_variants { "all" } else { "collapsed" },
             "meta": {
                 "snapshot": snapshot.token,
                 "total": total,
@@ -2986,6 +3018,7 @@ async fn get_catalog_model(
         CatalogAccess::All,
         Some(provider),
         TaskKind::General,
+        false,
     )
     .await
     {

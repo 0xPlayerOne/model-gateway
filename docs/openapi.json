@@ -110,7 +110,8 @@
           { "$ref": "#/components/parameters/Provider" },
           { "$ref": "#/components/parameters/Limit" },
           { "$ref": "#/components/parameters/Cursor" },
-          { "$ref": "#/components/parameters/View" }
+          { "$ref": "#/components/parameters/View" },
+          { "$ref": "#/components/parameters/Variants" }
         ],
         "responses": {
           "200": { "$ref": "#/components/responses/CatalogCollection" },
@@ -176,6 +177,13 @@
         "name": "view",
         "in": "query",
         "schema": { "type": "string", "enum": ["summary", "full"], "default": "summary" }
+      }
+      ,
+      "Variants": {
+        "name": "variants",
+        "in": "query",
+        "description": "Use all reasoning-effort benchmark variants instead of one variant per provider/model.",
+        "schema": { "type": "string", "enum": ["collapsed", "all"], "default": "collapsed" }
       }
     },
     "responses": {

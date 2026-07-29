@@ -3106,6 +3106,23 @@ async fn auto_frontier_keeps_effort_variants_as_distinct_candidates() {
     assert_eq!(primary["reasoning_effort"], "medium");
     assert_eq!(primary["benchmark_cost_per_task_usd"], 0.01);
     assert_eq!(primary["latency_seconds"], 40.0);
+
+    let catalog: Value = reqwest::Client::new()
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=paid&provider=cli-proxy&task=general&limit=100&view=full&variants=all"
+        ))
+        .send()
+        .await
+        .expect("expanded catalog response")
+        .json()
+        .await
+        .expect("expanded catalog body");
+    assert_eq!(catalog["variants"], "all");
+    assert_eq!(catalog["meta"]["total"], 2);
+    assert_eq!(catalog["data"][0]["model"]["effort_level"], "max");
+    assert_eq!(catalog["data"][0]["benchmarks"]["cost_per_task_usd"], 0.50);
+    assert_eq!(catalog["data"][1]["model"]["effort_level"], "medium");
+    assert_eq!(catalog["data"][1]["benchmarks"]["cost_per_task_usd"], 0.01);
 }
 
 #[tokio::test]
