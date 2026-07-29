@@ -13,9 +13,9 @@ permissions:
 jobs:
   ci:
     name: CI
-    uses: 0xPlayerOne/code-foundry/.github/workflows/ci.yml@v0.27.15
+    uses: 0xPlayerOne/code-foundry/.github/workflows/ci.yml@v0.30.3
     with:
       runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: v0.27.15
+      runtime-ref: v0.30.3
       runner: ubuntu-latest
     secrets: inherit
