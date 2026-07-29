@@ -26,3 +26,9 @@ merge_strategy: rebase
 codeql: auto
 dependency_review: auto
 toolchain: auto
+post_release: false
+post_release_workflow:
+post_release_mode: auto
+opencode_security: false
+sync_mode: overlay
+custom_workflows: preserve
