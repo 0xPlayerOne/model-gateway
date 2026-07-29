@@ -1551,11 +1551,21 @@ fn catalog_model_json(entry: &CatalogModelEntry, origin: &str) -> Value {
             "cache_read": entry
                 .price
                 .as_ref()
-                .and_then(|price| price.cache_read_price_per_million),
+                .and_then(|price| price.cache_read_price_per_million)
+                .or_else(|| {
+                    entry
+                        .benchmark
+                        .and_then(|benchmark| benchmark.cache_read_price_per_million)
+                }),
             "cache_write": entry
                 .price
                 .as_ref()
-                .and_then(|price| price.cache_write_price_per_million),
+                .and_then(|price| price.cache_write_price_per_million)
+                .or_else(|| {
+                    entry
+                        .benchmark
+                        .and_then(|benchmark| benchmark.cache_write_price_per_million)
+                }),
             "source": if has_zero_effective_price {
                 Some(match entry.offering.access_kind {
                     AccessKind::ZeroPrice => "provider_free",
@@ -1591,6 +1601,7 @@ fn catalog_model_json(entry: &CatalogModelEntry, origin: &str) -> Value {
         },
         "benchmark_match": entry.match_kind.map(ModelMatchKind::as_str),
         "benchmark_id": entry.benchmark.map(|benchmark| benchmark.id.clone()),
+        "benchmarks": benchmark_metrics_json(entry.benchmark),
     })
 }
 
@@ -1613,6 +1624,20 @@ fn catalog_model_summary_json(entry: &CatalogModelEntry, origin: &str) -> Value 
             "rank": entry.rank,
         },
         "reasoning_effort": entry.effort_level,
+        "benchmarks": benchmark_metrics_json(entry.benchmark),
+    })
+}
+
+fn benchmark_metrics_json(benchmark: Option<&BenchmarkModel>) -> Value {
+    json!({
+        "cost_per_task_usd": benchmark.and_then(|b| b.cost_per_task_usd),
+        "latency_seconds": benchmark.and_then(|b| b.latency_seconds),
+        "time_to_first_answer_seconds": benchmark
+            .and_then(|b| b.time_to_first_answer_seconds),
+        "end_to_end_response_seconds": benchmark
+            .and_then(|b| b.end_to_end_response_seconds),
+        "output_tokens_per_second": benchmark
+            .and_then(|b| b.output_tokens_per_second),
     })
 }
 

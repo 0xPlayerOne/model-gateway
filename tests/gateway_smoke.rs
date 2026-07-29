@@ -4020,6 +4020,17 @@ async fn paid_models_lists_only_paid_provider_offerings() {
             }],
         )
         .expect("pricing fixture");
+    let mut benchmark = BenchmarkModel::fixture("gpt-4o", 82.0, 80.0, 78.0, 2.5, 10.0);
+    benchmark.cost_per_task_usd = Some(0.042);
+    benchmark.latency_seconds = Some(0.7);
+    benchmark.time_to_first_answer_seconds = Some(1.8);
+    benchmark.end_to_end_response_seconds = Some(3.6);
+    benchmark.output_tokens_per_second = Some(125.0);
+    benchmark.cache_read_price_per_million = Some(1.1);
+    benchmark.cache_write_price_per_million = Some(3.3);
+    store
+        .replace_benchmarks("artificial-analysis", "Fixture benchmark", &[benchmark])
+        .expect("benchmark fixture");
     let effective = store
         .effective_price("paid", Some("openrouter"), "gpt-4o", None, 604_800)
         .expect("effective fixture price")
@@ -4087,6 +4098,15 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     assert_eq!(body["data"][0]["price_per_million"]["cache_read"], 1.25);
     assert_eq!(body["data"][0]["price_per_million"]["cache_write"], 3.75);
     assert_eq!(body["data"][0]["price_per_million"]["input"], 2.5);
+    assert_eq!(body["data"][0]["benchmarks"]["cost_per_task_usd"], 0.042);
+    assert_eq!(
+        body["data"][0]["benchmarks"]["end_to_end_response_seconds"],
+        3.6
+    );
+    assert_eq!(
+        body["data"][0]["benchmarks"]["output_tokens_per_second"],
+        125.0
+    );
 
     let detail: Value = client
         .get(format!("{gateway}/v1/catalog/models/paid/gpt-4o"))
@@ -4101,6 +4121,11 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     assert_eq!(detail["data"]["model"]["name"], "gpt-4o");
     assert_eq!(detail["data"]["price_per_million"]["cache_read"], 1.25);
     assert_eq!(detail["data"]["price_per_million"]["cache_write"], 3.75);
+    assert_eq!(detail["data"]["benchmarks"]["cost_per_task_usd"], 0.042);
+    assert_eq!(
+        detail["data"]["benchmarks"]["time_to_first_answer_seconds"],
+        1.8
+    );
 
     let collection = client
         .get(format!("{gateway}/v1/catalog/models?access=all&limit=1"))
@@ -4133,10 +4158,20 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         collection_body["data"][0]
             .as_object()
             .map(|object| object.keys().map(String::as_str).collect::<Vec<_>>()),
-        Some(vec!["id", "links", "quality", "reasoning_effort"])
+        Some(vec![
+            "benchmarks",
+            "id",
+            "links",
+            "quality",
+            "reasoning_effort"
+        ])
     );
     assert!(collection_body["data"][0]["links"]["self"].is_string());
     assert!(collection_body["data"][0]["quality"].is_object());
+    assert_eq!(
+        collection_body["data"][0]["benchmarks"]["cost_per_task_usd"],
+        0.042
+    );
     assert!(collection_body["links"]["next"].is_string());
     let next_link = collection_body["links"]["next"]
         .as_str()
