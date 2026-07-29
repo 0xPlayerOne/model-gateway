@@ -2233,6 +2233,8 @@ struct ModeModelValue<'a> {
     reference_input_price: Option<f64>,
     reference_output_price: Option<f64>,
     benchmark_cost_per_task_usd: Option<f64>,
+    measured_cost_microusd: Option<u64>,
+    estimated_cost_microusd: Option<u64>,
     time_to_first_answer_seconds: Option<f64>,
     end_to_end_response_seconds: Option<f64>,
     output_tokens_per_second: Option<f64>,
@@ -2671,6 +2673,8 @@ fn select_mode_models(
             .and_then(BenchmarkModel::cost_per_task_microusd)
             .or_else(token_cost)
             .unwrap_or(u64::MAX);
+        let measured_cost_microusd = benchmark.and_then(BenchmarkModel::cost_per_task_microusd);
+        let estimated_cost_microusd = measured_cost_microusd.is_none().then(token_cost).flatten();
         scored.push(ScoredCandidate {
             quality,
             expected_cost_microusd,
@@ -2686,6 +2690,8 @@ fn select_mode_models(
                 reference_input_price,
                 reference_output_price,
                 benchmark_cost_per_task_usd: benchmark.and_then(|b| b.cost_per_task_usd),
+                measured_cost_microusd,
+                estimated_cost_microusd,
                 time_to_first_answer_seconds: benchmark
                     .and_then(|b| b.time_to_first_answer_seconds),
                 end_to_end_response_seconds: benchmark.and_then(|b| b.end_to_end_response_seconds),
@@ -2702,6 +2708,16 @@ fn select_mode_models(
             .reduce(f64::max)
         {
             scored.retain(|candidate| best_quality - candidate.quality <= max_regret);
+        }
+    }
+    let has_measured_cost = scored
+        .iter()
+        .any(|candidate| candidate.value.measured_cost_microusd.is_some());
+    if has_measured_cost && mode != "auto-free" {
+        for candidate in &mut scored {
+            if candidate.value.measured_cost_microusd.is_none() {
+                candidate.expected_cost_microusd = u64::MAX;
+            }
         }
     }
     let eligible = scored;
@@ -2837,14 +2853,30 @@ fn mode_model_entry(
         "reasoning_effort": candidate.value.reasoning_effort,
         "quality": candidate.quality,
         "expected_cost_microusd": if candidate.value.access_kind.has_zero_effective_price() {
-            0
+            Some(0)
         } else {
-            candidate.expected_cost_microusd
+            (candidate.expected_cost_microusd != u64::MAX)
+                .then_some(candidate.expected_cost_microusd)
         },
         "reference_cost_microusd": if candidate.value.access_kind.uses_reference_cost() {
-            (candidate.expected_cost_microusd != u64::MAX).then_some(candidate.expected_cost_microusd)
+            candidate
+                .value
+                .measured_cost_microusd
+                .or_else(|| {
+                    (candidate.value.access_kind == AccessKind::QuotaLimitedFreeTier)
+                        .then_some(candidate.expected_cost_microusd)
+                        .filter(|cost| *cost != u64::MAX)
+                })
         } else {
             None
+        },
+        "estimated_cost_microusd": candidate.value.estimated_cost_microusd,
+        "cost_source": if candidate.value.measured_cost_microusd.is_some() {
+            "artificial_analysis_task"
+        } else if candidate.value.estimated_cost_microusd.is_some() {
+            "token_price_scenario"
+        } else {
+            "unknown"
         },
         "latency_seconds": candidate.latency_seconds,
         "benchmark_cost_per_task_usd": candidate.value.benchmark_cost_per_task_usd,

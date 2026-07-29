@@ -135,11 +135,12 @@ Best bang-for-buck. Quality floor: **35**. Pipeline:
 strict Pareto filtering but applies the latency-aware selection policy described
 above.
 
-Expected cost uses Artificial Analysis' measured cost per Intelligence Index
-task when available, then falls back to the offering's input/output prices and
-estimated request tokens. Cost-based quota windows impose spend caps. Effective
-subscription price remains zero for billing, while the measured task cost is
-used for efficiency ranking.
+Artificial Analysis measured task cost is authoritative for efficiency ranking.
+When at least one candidate has measured task cost, candidates without it are
+ranked after measured candidates; their price-derived scenario is exposed only
+for diagnostics. If no measured costs exist, the route may use the scenario as
+a provisional fallback. Cost-based quota windows still use request-specific
+token estimates for admission, not as a claim about benchmark task cost.
 
 Models from profiles with known included-subscription semantics report effective cost zero with `source: "subscription"`, while reference prices remain available for Pareto efficiency ranking and diagnostics. They are eligible for efficient/balanced/frontier routes, never `auto-free`. A generic provider configured with `billing_mode = "subscription"` remains priced unless its profile explicitly supports included inference.
 
