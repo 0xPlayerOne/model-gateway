@@ -796,6 +796,67 @@ mod tests {
     }
 
     #[test]
+    fn pareto_rank_keeps_tradeoffs_and_removes_only_strictly_dominated_candidates() {
+        let ranked = pareto_rank(vec![
+            ScoredCandidate {
+                value: "equal",
+                quality: 70.0,
+                expected_cost_microusd: 10,
+                latency_seconds: 1.0,
+            },
+            ScoredCandidate {
+                value: "same-frontier-point",
+                quality: 70.0,
+                expected_cost_microusd: 10,
+                latency_seconds: 1.0,
+            },
+            ScoredCandidate {
+                value: "quality-tradeoff",
+                quality: 90.0,
+                expected_cost_microusd: 20,
+                latency_seconds: 2.0,
+            },
+            ScoredCandidate {
+                value: "speed-tradeoff",
+                quality: 60.0,
+                expected_cost_microusd: 5,
+                latency_seconds: 0.5,
+            },
+            ScoredCandidate {
+                value: "dominated",
+                quality: 65.0,
+                expected_cost_microusd: 15,
+                latency_seconds: 1.5,
+            },
+        ]);
+
+        assert_eq!(
+            ranked
+                .into_iter()
+                .map(|candidate| candidate.value)
+                .collect::<Vec<_>>(),
+            vec![
+                "speed-tradeoff",
+                "equal",
+                "same-frontier-point",
+                "quality-tradeoff"
+            ]
+        );
+    }
+
+    #[test]
+    fn benchmark_efficiency_metrics_convert_and_fallback_without_fuzzy_behavior() {
+        let mut benchmark = BenchmarkModel::fixture("measured", 80.0, 80.0, 80.0, 1.0, 2.0);
+        benchmark.cost_per_task_usd = Some(0.1234567);
+        benchmark.latency_seconds = Some(0.8);
+        assert_eq!(benchmark.cost_per_task_microusd(), Some(123_457));
+        assert_eq!(benchmark.frontier_latency_seconds(), Some(0.8));
+
+        benchmark.end_to_end_response_seconds = Some(12.5);
+        assert_eq!(benchmark.frontier_latency_seconds(), Some(12.5));
+    }
+
+    #[test]
     fn classifier_covers_coding_reasoning_and_followups() {
         assert_eq!(
             classify(&json!({"messages": [{"role": "user", "content": "debug this Rust test"}]}))
