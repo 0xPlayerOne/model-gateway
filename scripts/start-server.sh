@@ -6,6 +6,16 @@ PORT="${MODEL_GATEWAY_PORT:-8008}"
 LOG="$ROOT/server.log"
 PIDFILE="$ROOT/server.pid"
 
+is_gateway_process() {
+    local pid="$1"
+    local command
+    command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    case "$command" in
+        *model-gateway[[:space:]]serve*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Source .env.local if it exists
 ENV_LOCAL="$ROOT/.env.local"
 if [ -f "$ENV_LOCAL" ]; then
@@ -21,7 +31,7 @@ fi
 
 if [ -f "$PIDFILE" ]; then
     OLD_PID=$(cat "$PIDFILE")
-    if kill -0 "$OLD_PID" 2>/dev/null; then
+    if kill -0 "$OLD_PID" 2>/dev/null && is_gateway_process "$OLD_PID"; then
         echo "Server is already running (PID $OLD_PID). Use 'scripts/restart-server.sh' to restart."
         exit 1
     fi

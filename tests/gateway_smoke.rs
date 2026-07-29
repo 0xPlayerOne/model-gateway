@@ -1594,6 +1594,16 @@ async fn body_limits_and_stream_types_use_openai_errors() {
     assert_eq!(invalid_stream.status(), StatusCode::BAD_REQUEST);
     let body: Value = invalid_stream.json().await.expect("stream error");
     assert_eq!(body["error"]["code"], "stream");
+
+    let invalid_effort = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "smoke", "reasoning_effort": "extreme", "messages": []}))
+        .send()
+        .await
+        .expect("invalid reasoning effort response");
+    assert_eq!(invalid_effort.status(), StatusCode::BAD_REQUEST);
+    let body: Value = invalid_effort.json().await.expect("reasoning effort error");
+    assert_eq!(body["error"]["code"], "reasoning_effort");
 }
 
 #[tokio::test]
@@ -4186,20 +4196,11 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         collection_body["data"][0]
             .as_object()
             .map(|object| object.keys().map(String::as_str).collect::<Vec<_>>()),
-        Some(vec![
-            "benchmarks",
-            "id",
-            "links",
-            "quality",
-            "reasoning_effort"
-        ])
+        Some(vec!["id", "links", "quality", "reasoning_effort"])
     );
     assert!(collection_body["data"][0]["links"]["self"].is_string());
     assert!(collection_body["data"][0]["quality"].is_object());
-    assert_eq!(
-        collection_body["data"][0]["benchmarks"]["cost_per_task_usd"],
-        0.042
-    );
+    assert!(collection_body["data"][0].get("benchmarks").is_none());
     assert!(collection_body["links"]["next"].is_string());
     let next_link = collection_body["links"]["next"]
         .as_str()
