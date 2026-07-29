@@ -15,7 +15,7 @@ auto_efficient_enabled = true
 auto_balanced_enabled = true
 efficient_quality_floor = 35.0
 balanced_quality_floor = 42.0
-frontier_quality_floor_single = 50.0
+frontier_quality_floor_single = 52.0
 
 [server.free_models_quality]
 min_composite_quality = 30.0
