@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.12.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.11.0...v0.12.0) (2026-07-29)
+
+
+### Features
+
+* **api:** add compact linked model resources ([#56](https://github.com/0xPlayerOne/model-gateway/issues/56)) ([055b2b6](https://github.com/0xPlayerOne/model-gateway/commit/055b2b6957f21fc67a629c4f99e4dec68b7efb77))
+* **api:** add compact linked model resources ([#56](https://github.com/0xPlayerOne/model-gateway/issues/56)) ([1f6387a](https://github.com/0xPlayerOne/model-gateway/commit/1f6387a521a43193fb0196e2186ea01e5438ed9f))
+* **api:** expose benchmark metrics in model resources ([0a8beeb](https://github.com/0xPlayerOne/model-gateway/commit/0a8beebbb7aa0dbba3f5c851607456c5e9432393))
+* **api:** expose benchmark metrics in model resources ([b1291ca](https://github.com/0xPlayerOne/model-gateway/commit/b1291caaaf2440c79c8f92bea82748dfe42bfa31))
+* **api:** retire legacy catalog routes ([8073e3f](https://github.com/0xPlayerOne/model-gateway/commit/8073e3fba845e885f1c2e0604160b7e347f15ed1))
+* **api:** retire legacy catalog routes ([#61](https://github.com/0xPlayerOne/model-gateway/issues/61)) ([90142ca](https://github.com/0xPlayerOne/model-gateway/commit/90142ca6aa7894a9fa15985d0e479137231e75f0))
+* **api:** unify catalog discovery resources ([#58](https://github.com/0xPlayerOne/model-gateway/issues/58)) ([dce5f6e](https://github.com/0xPlayerOne/model-gateway/commit/dce5f6e3f1d195d2e13ac3060a4d213f059b338a))
+* **catalog:** expand reasoning effort variants ([cb1d99c](https://github.com/0xPlayerOne/model-gateway/commit/cb1d99cd3b0b5ccc41446abef789161c95ac230d))
+* **catalog:** expand reasoning effort variants ([1af8c6d](https://github.com/0xPlayerOne/model-gateway/commit/1af8c6d7032a256d84875d87cc8c4df295eea49c))
+* **cli:** manage CLIProxyAPI as a background service ([#75](https://github.com/0xPlayerOne/model-gateway/issues/75)) ([fab9ea0](https://github.com/0xPlayerOne/model-gateway/commit/fab9ea04d94807f59899011a48eb13e0ff10b065))
+* reduce code-foundry consumer footprint ([0b5b08b](https://github.com/0xPlayerOne/model-gateway/commit/0b5b08be48778462527ff1946a84370b22729b91))
+* reduce code-foundry consumer footprint ([b687df8](https://github.com/0xPlayerOne/model-gateway/commit/b687df82dff2c2c880ac5b4ad21fb7e4faf1049a))
+* **routing:** prioritize latency on frontier ([ad8e021](https://github.com/0xPlayerOne/model-gateway/commit/ad8e021bcf86e597a0db7a39c0772166a16145fc))
+* **routing:** prioritize latency on frontier ([f2f30f9](https://github.com/0xPlayerOne/model-gateway/commit/f2f30f9f5e6bce9773ae9171db36c120f077fb4e))
+* **routing:** raise frontier quality floor ([d54a473](https://github.com/0xPlayerOne/model-gateway/commit/d54a47315ffdf127ead02ce0effaabaa64b4def0))
+* **routing:** raise frontier quality floor ([9ad0938](https://github.com/0xPlayerOne/model-gateway/commit/9ad09380657df5b24ec4bc50b1483f526ac4b620))
+* **routing:** use measured task cost for frontiers ([e028aa0](https://github.com/0xPlayerOne/model-gateway/commit/e028aa020dbd915b50ed63526378ec282121479e))
+* **routing:** use measured task cost for frontiers ([85f35fd](https://github.com/0xPlayerOne/model-gateway/commit/85f35fdf8a37bb9c8ac08687a7dcb5d3301af6fb))
+
+
+### Bug Fixes
+
+* **api:** expose current models and contract routes ([#76](https://github.com/0xPlayerOne/model-gateway/issues/76)) ([f515fff](https://github.com/0xPlayerOne/model-gateway/commit/f515fff601c97692ba4ef88f03612dc3b537c69f))
+* **api:** harden release behavior and compact summaries ([4991136](https://github.com/0xPlayerOne/model-gateway/commit/49911363f9b2e2746f5de4b22df0321cf0a17812))
+* **ci:** remove unused Python validation profile ([38693c6](https://github.com/0xPlayerOne/model-gateway/commit/38693c6194fd22838854a8cecc30081f7496b74d))
+* remove obsolete consumer helper ([5293809](https://github.com/0xPlayerOne/model-gateway/commit/52938093c654d408fd6c9271abcfde57894592e1))
+* remove obsolete consumer helper ([4b0bd55](https://github.com/0xPlayerOne/model-gateway/commit/4b0bd55edf4a7beaa9251f3455244fb90502da49))
+* **routing:** separate measured and estimated task costs ([df2a276](https://github.com/0xPlayerOne/model-gateway/commit/df2a27680a33de5556fc91170f7fd9c91031071e))
+* **routing:** separate measured and estimated task costs ([4a143d3](https://github.com/0xPlayerOne/model-gateway/commit/4a143d35bfb5f5f81684a0ccb81373f37a4d8c73))
+
 ## [0.11.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.10.1...v0.11.0) (2026-07-28)
 
 
