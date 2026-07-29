@@ -38,17 +38,13 @@ Secrets live in a Docker named volume mounted read-only. Host port fixed to `127
 
 ## Claude and Codex OAuth
 
-CLIProxyAPI can run as an optional loopback sidecar for Claude Code and ChatGPT/Codex subscriptions with multi-account round-robin routing:
+CLIProxyAPI can run as an optional loopback sidecar for Claude Code and ChatGPT/Codex subscriptions with multi-account rotation:
 
 ```bash
 model-gateway cli-proxy setup
 model-gateway cli-proxy login claude
 model-gateway cli-proxy login codex --device
-./scripts/start-cli-proxy.sh
-
-# In another terminal, after at least one account is connected:
-model-gateway catalog refresh --provider cli-proxy
-model-gateway serve
+./scripts/start-server.sh
 ```
 
 Repeat either login command to add accounts to the pool. The setup command downloads checksum-pinned CLIProxyAPI `v7.2.103`, binds it to `127.0.0.1:8317`, disables remote management/plugins/control-panel updates, and creates a `subscription` provider. It does not replace direct APIs, Ollama, LM Studio, or the built-in local endpoint. See [docs/providers.md](docs/providers.md#cliproxyapi-oauth-sidecar) for security and provider-policy limitations.
@@ -65,17 +61,17 @@ curl http://127.0.0.1:8008/v1/providers
 
 ## Built-in Routes
 
-Each mode picks ONE model from the Pareto frontier. Session pinning keeps you on that model for the entire session — no cache misses from model switching. The Pareto frontier handles reasoning effort automatically (e.g., picks GPT 5.6 Sol over Sol Max for efficiency).
+Each automatic mode selects one primary model and up to two fallbacks. Session pinning keeps successful requests on the same provider/model for 30 minutes when a session identity is available. Reasoning-effort variants are ranked independently when benchmark data distinguishes them.
 
 | Route | Quality Floor | Description | Benchmarks |
 |---|---|---|---|
 | `local` | — | Relays the only model from an OpenAI-compatible endpoint (default `127.0.0.1:8000`). | No |
-| `auto-free` | Free quality bar | Best free model. Falls back to `local`. | Recommended |
-| `auto-efficient` | 35 | Best bang-for-buck. Pareto ranks by composite quality, cost, latency. Falls back to `auto-free`, then `local`. | **Yes** |
-| `auto-balanced` | 42 | Mid-range quality. Great models, affordable pricing. Falls back to `auto-free`, then `local`. | **Yes** |
-| `auto-frontier` | 50 | Top tier. Highest quality floor. Never falls back. | **Yes** |
+| `auto-free` | Free quality bar | Best eligible free model. Falls back to unbenchmarked free candidates, then `local`. | Optional |
+| `auto-efficient` | 35 | Cost-first selection among models that meet the quality floor, with latency as a tie-breaking axis. Falls back to `auto-free`, then `local`. | **Yes** |
+| `auto-balanced` | 42 | Higher-quality selection with the same measured-cost and latency safeguards. Falls back to `auto-free`, then `local`. | **Yes** |
+| `auto-frontier` | 52 | Highest quality floor; the frontier is ordered with 50% quality, 25% measured task-cost efficiency, and 25% latency efficiency. | **Yes** |
 
-Composite quality score: `0.80*intelligence + 0.10*coding + 0.10*agentic` — heavily weighted toward general intelligence.
+Composite quality score: `0.80*intelligence + 0.10*coding + 0.10*agentic`, with missing task scores redistributed to intelligence. The score is used by automatic routes; catalog task filters use the requested task score when available.
 
 See [docs/routing.md](docs/routing.md) for detailed routing logic and cache-aware design.
 
@@ -89,8 +85,8 @@ The gateway starts from safe defaults using only environment variables. For TOML
 MODEL_GATEWAY_BIND=127.0.0.1:8008
 MODEL_GATEWAY_LOCAL_BASE_URL=http://localhost:8000/v1
 MODEL_GATEWAY_LOCAL_MODEL=my-model
-MODEL_GATEWAY_EXPOSURE=loopback          # loopback|private|docker-local
-MODEL_GATEWAY_SECRET_STORE=environment   # environment|file|keychain
+MODEL_GATEWAY_EXPOSURE=loopback          # loopback|local_container
+MODEL_GATEWAY_SECRET_STORE=keychain      # keychain|file|environment
 MODEL_GATEWAY_LOG_FORMAT=json            # text|json
 MODEL_GATEWAY_STATE_PATH=~/.config/model-gateway/routing.sqlite3
 ```
@@ -99,7 +95,7 @@ Provider overrides use the normalized provider name (e.g., `MODEL_GATEWAY_OPENRO
 
 ## Benchmarks
 
-Quality benchmarks are sourced from [Artificial Analysis](https://artificialanalysis.ai/) and are **required** for `auto-efficient`, `auto-balanced`, and `auto-frontier` routing. Set up your API key:
+Quality benchmarks are sourced from [Artificial Analysis](https://artificialanalysis.ai/) and are required for `auto-efficient`, `auto-balanced`, and `auto-frontier`. `auto-free` can use benchmarked models and retains eligible unbenchmarked free models as lower-priority fallbacks. Set up the API key:
 
 ```bash
 export ARTIFICIAL_ANALYSIS_API_KEY="your-key"
