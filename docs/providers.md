@@ -7,7 +7,7 @@ Provider profiles are organized into three tiers matching `.env.example`:
 | Tier | Providers |
 |---|---|
 | **Core** (recommended) | Anthropic, Google Gemini, Kilo Code, Ollama Cloud, OpenCode Zen, OpenRouter |
-| **Secondary** (useful) | Groq, Mistral, Nous Portal, Novita, NVIDIA NIM, SiliconFlow |
+| **Secondary** (useful) | Groq, Mistral, Nous Portal, NVIDIA NIM, SiliconFlow |
 | **Optional Paid** (subscriptions/credits) | DeepSeek, Fireworks, OpenAI API, OpenCode Go, OrcaRouter, Z.AI |
 | **Local OAuth Sidecar** | CLIProxyAPI (Claude Code and ChatGPT/Codex subscriptions) |
 
@@ -60,7 +60,7 @@ Replacing all CLI/API endpoints with CLIProxyAPI is intentionally unsupported. D
 
 ## Provider Profiles
 
-All profiles use OpenAI Chat Completions with bearer secrets. They are contract-tested against deterministic local fixtures — no provider credential is required for CI.
+All implemented profiles use OpenAI Chat Completions. Credential-backed profiles send bearer authentication when configured; local and configuration-only profiles do not require a provider key. Gateway behavior is contract-tested against deterministic local fixtures, so CI does not require provider credentials.
 
 The setup wizard uses one declarative registry at `src/providers.rs` (`BuiltinProvider` enum). Adding a provider requires a new variant there plus an entry in the example configs.
 

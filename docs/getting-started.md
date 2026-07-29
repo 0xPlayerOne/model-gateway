@@ -21,17 +21,18 @@ cargo run -- serve
 ```
 
 `setup` writes non-secret configuration to `~/.config/model-gateway/config.toml`. Secrets are stored according to `MODEL_GATEWAY_SECRET_STORE`:
-- `environment` — read from env vars at runtime (default)
+- `keychain` — stored in the OS keychain (default)
 - `file` — written to protected `0700`/`0600` files
-- `keychain` — stored in the OS keychain
+- `environment` — read from environment variables at runtime; credentials cannot be persisted by the gateway
 
 Run with `--offline` to skip catalog checks during setup.
 
 ### Using the Start Scripts
 
 ```bash
-./scripts/start-server.sh     # builds + sources .env.local + runs
-./scripts/restart-server.sh   # stops old process + rebuilds + starts
+./scripts/start-server.sh       # builds, refreshes data, and starts
+./scripts/start-server.sh -f    # same, but keep the gateway in the foreground
+./scripts/restart-server.sh     # safely stops this gateway and restarts it
 ```
 
 The scripts use `set -a` so `.env.local` variables are exported to the child process.
@@ -68,7 +69,7 @@ model:
 
 ## Refreshing Catalogs
 
-Provider catalogs are not fetched at startup. Refresh explicitly:
+The start script attempts a refresh before serving. A failed refresh does not delete the last known good snapshots; the server still starts so cached data remains available. Refresh explicitly when adding a provider or forcing new data:
 
 ```bash
 model-gateway catalog refresh
@@ -79,11 +80,11 @@ This collects individual provider errors and reports all failures at the end. Em
 
 ## Benchmarks
 
-Benchmarks from [Artificial Analysis](https://artificialanalysis.ai/) are **required** for `auto-efficient` and `auto-frontier` routing. Set up:
+Benchmarks from [Artificial Analysis](https://artificialanalysis.ai/) are required for `auto-efficient`, `auto-balanced`, and `auto-frontier` routing. `auto-free` can operate with partial or missing benchmark coverage, but benchmarked candidates rank first. Set up:
 
 ```bash
 model-gateway credentials set ARTIFICIAL_ANALYSIS_API_KEY
 model-gateway benchmarks refresh
 ```
 
-The server auto-fetches on startup if the key is configured and no fresh data exists. See [docs/benchmarks.md](docs/benchmarks.md) for full details on ranking endpoint, configuration, and attribution.
+The server starts a background refresh when the key is configured and no fresh data exists. See [benchmarks.md](benchmarks.md) for the ranking endpoint, configuration, and attribution.

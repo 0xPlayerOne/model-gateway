@@ -1,6 +1,6 @@
 # Benchmarks
 
-Benchmarks provide quality, cost, and latency scores for 500+ models sourced from [Artificial Analysis](https://artificialanalysis.ai/). They are **required** for `auto-efficient` and `auto-frontier` routing, and used for quality-aware ranking in `auto-free`.
+Benchmarks provide quality, cost, and latency measurements sourced from [Artificial Analysis](https://artificialanalysis.ai/). Fresh benchmark data is required for `auto-efficient`, `auto-balanced`, and `auto-frontier`. `auto-free` can still expose eligible unbenchmarked models, but benchmarked candidates are ranked first.
 
 > **Attribution**: All benchmark data is sourced from Artificial Analysis (https://artificialanalysis.ai/). Redistribution must include this attribution. See `/v1/rankings` response `snapshots` for the exact attribution per snapshot.
 
@@ -24,11 +24,11 @@ export ARTIFICIAL_ANALYSIS_API_KEY="your-key-here"
 
 ### 3. Auto-Fetch (Recommended)
 
-The gateway auto-fetches benchmarks on startup when:
+The gateway starts a background benchmark refresh when:
 - The API key is configured, **and**
 - No fresh benchmark data exists
 
-It keeps data updated on a background refresh schedule (approximately every ~3.5 days).
+It retries on a background schedule derived from the configured freshness window. A failed refresh preserves the active snapshot.
 
 ### 4. Manual Refresh
 
@@ -126,7 +126,7 @@ Parameters:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `task` | `general` | `general`, `coding`, `agentic`, or `reasoning` |
+| `task` | `general` | `general`, `coding`, or `agentic` |
 | `limit` | `100` | Max models to return (1–1,000) |
 
 Response:
@@ -135,7 +135,7 @@ Response:
 {
   "object": "benchmark.rankings",
   "task": "coding",
-  "max_age_seconds": 86400,
+  "max_age_seconds": 604800,
   "snapshots": [{
     "source": "artificial-analysis",
     "fetched_at": 1745612345,
@@ -161,13 +161,13 @@ Response:
 }
 ```
 
-Rankings are sorted by quality score (descending), then by combined price (ascending), then model ID (alphabetically). The endpoint only uses **fresh persisted** data — never performs live benchmark requests.
+Rankings are sorted by the selected task score (descending), then by combined standard input/output price (ascending), then model ID alphabetically. The endpoint only uses fresh persisted data; it never performs a live benchmark request.
 
 ## Route Usage
 
 | Route | Benchmark Dependency | Quality Scoring |
 |---|---|---|
-| `auto-free` | Uses composite quality plus measured task cost for quota-limited models and end-to-end latency. Models without quality data are excluded. | Composite |
+| `auto-free` | Uses composite quality plus reference cost and latency when benchmark data exists. Eligible unbenchmarked models remain as lower-priority fallbacks. | Composite |
 | `auto-efficient` | **Requires** benchmarks. Models without matching benchmark entries are excluded. | Composite |
 | `auto-balanced` | **Requires** benchmarks. Same as auto-efficient with higher quality floor. | Composite |
 | `auto-frontier` | **Requires** benchmarks. Highest quality floor. | Composite |
@@ -181,7 +181,7 @@ All paid routes use composite quality (`0.80*intelligence + 0.10*coding + 0.10*a
 | `MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS` | `604800` (7d) | Maximum age before data is considered stale |
 | `MODEL_GATEWAY_EFFICIENT_QUALITY_FLOOR` | `35.0` | Composite quality floor for auto-efficient |
 | `MODEL_GATEWAY_BALANCED_QUALITY_FLOOR` | `42.0` | Composite quality floor for auto-balanced |
-| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR` | `50.0` | Composite quality floor for auto-frontier |
+| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR` | `52.0` | Composite quality floor for auto-frontier |
 
 See [configuration.md](configuration.md) for the full list of server settings.
 
@@ -251,7 +251,7 @@ output price pair. Models without a complete effective pair remain discoverable
 but are excluded from paid auto-route Pareto ranking rather than treated as
 free.
 
-Delete a snapshot:
+Delete a benchmark snapshot:
 
 ```bash
 model-gateway benchmarks delete my-source
@@ -289,10 +289,7 @@ provider-reported reasoning, cache, and agent-token usage.
 
 ## Quality Floor Validation
 
-Quality floors are validated on config load:
-
-- Each floor must be 0.0–100.0
-- Floors must be ordered: `simple ≤ medium ≤ complex`
-- Violations produce a clear config error at startup
-
-Setting a floor to 0.0 disables it (all models pass).
+Quality floors are validated on config load. Each floor must be finite and
+between 0.0 and 100.0; invalid values stop startup with a configuration error.
+Setting a route floor to 0.0 allows every benchmarked candidate through that
+floor.

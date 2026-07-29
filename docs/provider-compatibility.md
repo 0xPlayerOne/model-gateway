@@ -1,49 +1,49 @@
 # Provider Compatibility
 
-The compatibility target is Hermes Agent `v0.19.0` / release `v2026.7.20`,
-pinned in smoke tests to commit
-`3ef6bbd201263d354fd83ec55b3c306ded2eb72a`.
+This matrix describes the provider profiles implemented in this repository. It
+is an implementation and test-status reference, not a guarantee that a remote
+provider is available or that an account has quota.
 
-Compatibility labels in this document are evidence scopes, not availability or
-live-service guarantees. `Gateway contract` means deterministic local fixture
-coverage; `Hermes integration` means the pinned Hermes smoke reached the
-gateway; `Live-tested` is reserved for a credentialed provider run recorded
-without exposing its credential.
-This matrix covers inference/model providers only. Hermes tool services such as
-web search, browser automation, image generation, TTS, and transcription are
-not gateway providers.
+Every implemented profile uses the OpenAI Chat Completions wire format. The
+gateway does not currently implement native provider protocols. This matrix
+covers inference/model providers only; search, browser automation, image
+generation, TTS, and transcription are outside the gateway.
 
-| Provider group | Canonical Hermes IDs | Wire/auth family | Gateway status |
+| Provider | Config key | Authentication / endpoint | Status |
 | --- | --- | --- | --- |
-| Custom endpoint | `custom` | OpenAI Chat / configured secret | Gateway contract-tested; Hermes model discovery and tool-bearing non-streaming request integration-tested with deterministic local provider |
-| CLIProxyAPI OAuth sidecar | `cli-proxy` | OpenAI Chat / loopback bearer key; upstream Claude/Codex OAuth | Pinned local sidecar profile; installer/config/status contract-tested; live OAuth requires user-controlled subscription accounts |
-| OpenRouter | `openrouter` | OpenAI Chat / API key | Built-in profile; authenticated validation contract-tested |
-| Ollama | custom endpoint | OpenAI Chat / local | Built-in profile; profile and OpenAI wire contract-tested |
-| LM Studio | `lmstudio` | OpenAI Chat / optional local key | Built-in profile; profile and OpenAI wire contract-tested |
-| OpenAI API | `openai-api` | OpenAI Chat / API key | Built-in profile; OpenAI-wire bearer catalog contract-tested |
-| Fireworks, DeepSeek, OpenAI API, z.ai, OpenCode Go, OrcaRouter | `fireworks`, `deepseek`, `openai-api`, `zai`, `opencode-go`, `orcarouter` | OpenAI-compatible / API key | Optional paid profiles; OpenAI-wire bearer catalog checked on demand |
-| Gemini, OpenCode Zen, Mistral, NVIDIA NIM, Groq, Novita, SiliconFlow | `google-gemini`, `opencode-zen`, `mistral`, `nvidia-nim`, `groq`, `novita`, `silicon-flow` | OpenAI-compatible / API key | Built-in profiles; zero-credit model catalogs checked on demand |
-| Kilo Code, Nous Portal | `kilocode`, `nous-portal` | OpenAI-compatible / API key | Built-in profiles; Kilo model catalog checked on demand |
-| Ollama Cloud | `ollama-cloud` | OpenAI-compatible / API key | Core profile; documented model catalog checked on demand |
-| SiliconFlow | `silicon-flow` | OpenAI-compatible / API key | Optional profile; model catalog checked on demand, not recommended by default |
-| Kimi, MiniMax, Alibaba | `kimi-coding`, `minimax`, `alibaba` and regional variants | OpenAI-compatible or native variant / API key | Planned profiles/adapters |
-| Arcee, GMI, StepFun, Upstage | `arcee`, `gmi`, `stepfun`, `upstage` | OpenAI-compatible / API key | Planned profiles |
-| Hugging Face, Ollama Cloud | `huggingface`, `ollama-cloud` | OpenAI-compatible or native / API key | Planned profiles/adapters |
-| Anthropic | `anthropic` | OpenAI-compatible chat / ANTHROPIC_API_KEY | Built-in (OpenAI-compatible endpoint) |
-| Google Gemini native API | `gemini-native` | Gemini API / API key | Planned native adapter; the OpenAI compatibility endpoint is supported |
-| Vertex AI | `vertex` | Vertex OpenAI-compatible / OAuth | Planned credential adapter |
-| Azure Foundry | `azure-foundry` | OpenAI-compatible / API key or Entra | Planned credential adapter |
-| AWS Bedrock | `bedrock` | Bedrock Converse / AWS credentials | Planned native adapter |
-| xAI, Copilot, Codex | `xai`, `copilot`, `openai-codex` | Responses/Chat / API or OAuth | Codex OAuth available through CLIProxyAPI; native adapters remain planned |
-| Nous Portal, Qwen OAuth, MiniMax OAuth | `nous`, `qwen-oauth`, `minimax-oauth` | Provider-specific / OAuth | Planned OAuth flows |
-| GitHub Copilot ACP | `copilot-acp` | Local ACP subprocess | Planned isolated adapter |
+| Custom endpoint | `custom` | Local or HTTPS OpenAI-compatible endpoint; optional secret | Configurable and contract-tested with deterministic local fixtures |
+| CLIProxyAPI | `cli-proxy` | Loopback OpenAI-compatible endpoint with generated bearer key; upstream Claude/Codex OAuth | Optional pinned sidecar; setup, status, and configuration are contract-tested |
+| OpenRouter | `openrouter` | HTTPS OpenAI-compatible endpoint; API key | Built-in; catalog authentication is contract-tested |
+| Ollama | `ollama` | Local OpenAI-compatible endpoint; no key by default | Built-in |
+| LM Studio | `lmstudio` | Local OpenAI-compatible endpoint; optional key | Built-in |
+| OpenAI API | `openai-api` | HTTPS OpenAI-compatible endpoint; API key | Built-in; catalog authentication is contract-tested |
+| Anthropic | `anthropic` | HTTPS OpenAI-compatible endpoint; API key | Configuration-only profile; no catalog probe is attempted |
+| DeepSeek | `deepseek` | HTTPS OpenAI-compatible endpoint; API key | Built-in optional paid profile |
+| Fireworks AI | `fireworks` | HTTPS OpenAI-compatible endpoint; API key | Built-in optional paid profile |
+| Z.AI / GLM | `zai` | HTTPS OpenAI-compatible endpoint; API key | Built-in optional paid profile |
+| Google Gemini | `google-gemini` | Gemini OpenAI compatibility endpoint; API key | Built-in |
+| Kilo Code | `kilocode` | HTTPS OpenAI-compatible endpoint; API key | Built-in |
+| OpenCode Zen | `opencode-zen` | HTTPS OpenAI-compatible endpoint; API key | Built-in |
+| OpenCode Go | `opencode-go` | HTTPS OpenAI-compatible endpoint; API key | Built-in optional subscription profile |
+| Mistral AI | `mistral` | HTTPS OpenAI-compatible endpoint; API key | Built-in |
+| Nous Portal | `nous-portal` | HTTPS OpenAI-compatible endpoint; API key | Built-in |
+| NVIDIA NIM | `nvidia-nim` | HTTPS OpenAI-compatible endpoint; API key | Built-in |
+| Groq | `groq` | HTTPS OpenAI-compatible endpoint; API key | Built-in |
+| OrcaRouter | `orcarouter` | HTTPS OpenAI-compatible endpoint; API key | Built-in optional paid profile |
+| Ollama Cloud | `ollama-cloud` | HTTPS OpenAI-compatible endpoint; API key | Built-in |
+| SiliconFlow | `silicon-flow` | HTTPS OpenAI-compatible endpoint; API key | Built-in |
 
 Status meanings:
 
-- **Built-in profile**: setup can create the provider entry.
-- **Contract-tested**: deterministic local/in-process tests cover the wire contract.
-- **Live-tested**: a real credential and provider endpoint have been exercised.
-- **Planned**: intentionally not claimed yet.
+- **Built-in**: the setup wizard can create the provider entry.
+- **Contract-tested**: deterministic local/in-process tests cover the gateway
+  wire behavior.
+- **Configuration-only**: the profile can be configured, but the gateway does
+  not probe a provider catalog automatically.
+- **Live OAuth**: requires a user-controlled account and is intentionally not
+  exercised in CI.
 
-New Hermes releases require an explicit matrix review because the upstream
-plugin registry and provider documentation can diverge.
+Provider-specific model availability, pricing, quotas, and policy terms remain
+the responsibility of the provider. Refresh catalogs and inspect
+`/v1/providers` before routing traffic. See [providers.md](providers.md) for
+billing classification and CLIProxyAPI setup.

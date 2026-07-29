@@ -1,6 +1,6 @@
 # Configuration
 
-Config is loaded from `~/.config/model-gateway/config.toml` (override with `MODEL_GATEWAY_CONFIG`). If the file doesn't exist, the gateway starts from safe defaults using only environment variables.
+Config is loaded from `~/.config/model-gateway/config.toml` (override with `MODEL_GATEWAY_CONFIG`). `MODEL_GATEWAY_HOME` changes the configuration and state home. If the file does not exist, the gateway starts from safe defaults using environment variables.
 
 Environment overrides are applied on every load and take precedence over TOML.
 
@@ -9,7 +9,7 @@ Environment overrides are applied on every load and take precedence over TOML.
 | Env Variable | Default | Description |
 |---|---|---|
 | `MODEL_GATEWAY_BIND` | `127.0.0.1:8008` | Listen address |
-| `MODEL_GATEWAY_EXPOSURE` | `loopback` | `loopback`, `private`, or `local_container` |
+| `MODEL_GATEWAY_EXPOSURE` | `loopback` | `loopback` or `local_container`; non-loopback binds are accepted only in container mode |
 | `MODEL_GATEWAY_LOCAL_BASE_URL` | `http://localhost:8000/v1` | Local model endpoint |
 | `MODEL_GATEWAY_LOCAL_MODEL` | — | Explicit local model (required when endpoint reports multiple) |
 | `MODEL_GATEWAY_LOCAL_MODEL_CACHE_SECONDS` | `60` | Local model discovery cache TTL |
@@ -17,9 +17,10 @@ Environment overrides are applied on every load and take precedence over TOML.
 | `MODEL_GATEWAY_MAX_IN_FLIGHT` | `64` | Concurrent request limit |
 | `MODEL_GATEWAY_ADMISSION_TIMEOUT_MS` | `250` | Admission wait timeout |
 | `MODEL_GATEWAY_SHUTDOWN_GRACE_SECONDS` | `30` | Graceful shutdown timeout |
-| `MODEL_GATEWAY_SECRET_STORE` | `environment` | `environment`, `file`, or `keychain` |
+| `MODEL_GATEWAY_SECRET_STORE` | `keychain` | `keychain`, `file`, or `environment` |
 | `MODEL_GATEWAY_STATE_PATH` | `~/.config/model-gateway/routing.sqlite3` | SQLite database path |
 | `MODEL_GATEWAY_LOG_FORMAT` | `text` | `text` or `json` |
+| `MODEL_GATEWAY_CONFIG` | `~/.config/model-gateway/config.toml` | Configuration file path |
 | `MODEL_GATEWAY_CATALOG_MAX_AGE_SECONDS` | `86400` | Catalog freshness window |
 | `MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS` | `604800` | Benchmark freshness window (7 days) |
 | `MODEL_GATEWAY_PRICING_MAX_AGE_SECONDS` | `604800` | Pricing freshness window (7 days) |
@@ -61,7 +62,7 @@ Each floor must be 0–100. Higher floors select higher-quality models. The Pare
 
 ## Free Models Quality Bar
 
-Filters low-quality, stale, or expensive models from the free view of `/v1/catalog/models` and auto-free routing. Uses composite quality (not per-task).
+Filters low-quality, stale, or expensive models from the `access=free` view of `/v1/catalog/models` and from the ranked portion of auto-free routing. Uses composite quality (not per-task). Models without benchmark data are not rejected solely for being unbenchmarked.
 
 | Env Variable | Default | Description |
 |---|---|---|
@@ -117,7 +118,7 @@ Use the normalized provider name as prefix, e.g., `MODEL_GATEWAY_OPENROUTER_BILL
 | `pricing_profile` (TOML) | `models.dev provider key` | Provider-scoped public pricing namespace |
 | `QUOTAS` | `cost_microusd:1000000:86400` | Quota windows (semicolon-separated) |
 
-Provider names used in overrides: `cli-proxy`, `openrouter`, `google-gemini`, `groq`, `mistral`, `kilocode`, `opencode-zen`, `opencode-go`, `nous-portal`, `novita`, `nvidia-nim`, `ollama-cloud`, `orca-router`, `siliconflow`, `deepseek`, `fireworks`, `openai-api`, `z-ai`.
+Provider names used in overrides: `cli-proxy`, `openrouter`, `google-gemini`, `groq`, `mistral`, `kilocode`, `opencode-zen`, `opencode-go`, `nous-portal`, `nvidia-nim`, `ollama-cloud`, `orcarouter`, `silicon-flow`, `deepseek`, `fireworks`, `openai-api`, `zai`.
 
 ## Quota Format
 

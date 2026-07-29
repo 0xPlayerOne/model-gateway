@@ -4,14 +4,14 @@
 
 **Prompt caching is provider-scoped.** Each provider (OpenAI, Anthropic, etc.) caches prompt prefixes per-model on their servers. Switching providers or models mid-session breaks the cache — the new provider has never seen your prompt prefix before.
 
-This gateway is designed to **eliminate cache misses**:
+The gateway minimizes avoidable provider/model changes:
 
-1. **One primary model per mode** — each mode (auto-free, auto-efficient, auto-balanced, auto-frontier) picks one primary from the Pareto frontier. Eligible dominated candidates remain available only as failure fallbacks. No task-specific routing or complexity tiers.
+1. **One primary model per mode** — each mode returns one primary and up to two failure fallbacks. Benchmark-backed paid routes use the Pareto frontier; auto-free can use eligible unbenchmarked candidates after its benchmarked candidates.
 2. **Session pinning** — the first successful request pins the session to `(provider, model)`. All subsequent requests use the same model. Pin survives transient rate limits (429). Only permanent auth failures (401/403) destroy the pin.
 3. **Composite quality score** — `0.8*intelligence + 0.1*coding + 0.1*agentic` gives a well-rounded model for any task. No re-routing based on task type.
-4. **Pareto frontier handles reasoning effort** — for models with multiple variants (e.g., GPT 5.6 Luna/Sol/Sol Max), the Pareto frontier picks the most efficient one. Sol Max is dominated by Sol (higher cost, marginal quality gain).
+4. **Pareto frontier handles reasoning effort** — benchmark entries for different reasoning efforts are evaluated as separate candidates. The selected effort is included in the model ID metadata and applied to the upstream request.
 
-**The result**: pick a mode, stay on the same model for the entire session. Cache is entirely in your hands — as long as you don't switch modes mid-session, you won't miss.
+**The result**: pick a mode and the gateway keeps a successful session on the same provider/model for 30 minutes when it can derive a session identity. The gateway cannot guarantee a provider's cache behavior, but avoiding unnecessary model switches preserves the best chance of a cache hit.
 
 ## Route Resolution Order
 
@@ -116,7 +116,7 @@ prices never classify a free offering as paid.
 
 ## `auto-efficient`
 
-Best bang-for-buck. Quality floor: **35**. Pipeline:
+Cost-first automatic selection. Quality floor: **35**. Pipeline:
 
 1. **`all_candidates`** — all models from `catalog_models`
 2. **Availability filter** — remove unavailable providers and free-only providers when billing requires paid
@@ -168,7 +168,7 @@ Mid-range quality. Quality floor: **42**. Same pipeline as auto-efficient with a
 
 ## `auto-frontier`
 
-Top tier. Quality floor: **52**. Same pipeline as auto-efficient/balanced — all paid models, differentiated by quality floor.
+Highest quality-floor automatic selection. Quality floor: **52**. It uses the same candidate filters as the other paid routes, then applies the latency-aware frontier ordering described above.
 
 - Quality floor: `frontier_quality_floor_single` (default 52.0)
 - **Never falls back** — returns a generic error when no candidate is available
@@ -197,7 +197,7 @@ The canonical model discovery collection. Use `?access=free|paid|all`, `?task=`,
 
 Returns one complete model resource, including benchmark metrics, benchmark matching, cache pricing, reference pricing, access limits, freshness, and provenance. The model portion may contain additional path segments; use the exact encoded resource link returned by the collection.
 
-The catalog collection is the only model-discovery listing surface. The old `/v1/free-models`, `/v1/paid-models`, and `/v1/models/{provider}/{model}` routes return `404`; new integrations should use the canonical catalog paths and `/openapi.json`.
+The catalog collection is the model-discovery listing surface. New integrations should use the canonical catalog paths and `/openapi.json`.
 
 ### `/v1/auto-models`
 
