@@ -281,6 +281,12 @@ This prevents subscription models that consume substantially more reasoning
 tokens from appearing artificially free in frontier calculations. A zero-price
 model with no measured task cost still falls back to zero.
 
+Price-derived task-cost scenarios are not treated as measured costs. When a
+route has at least one measured task cost, models without one are ranked after
+measured candidates and expose their price scenario separately. The scenario
+is intentionally diagnostic only because token pricing cannot reproduce
+provider-reported reasoning, cache, and agent-token usage.
+
 ## Quality Floor Validation
 
 Quality floors are validated on config load:

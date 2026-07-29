@@ -1256,12 +1256,12 @@ async fn auto_models_keep_base_and_pro_variants_in_separate_modes() {
 }
 
 #[tokio::test]
-async fn auto_models_fill_fallback_slots_beyond_pareto_frontier() {
+async fn auto_models_prefer_measured_costs_over_price_estimates() {
     let directory = tempfile::tempdir().expect("state directory");
     let state_path = directory.path().join("routing.sqlite3");
     let store = RoutingStore::open(Some(&state_path)).expect("routing store");
     let models = [
-        ("efficient-a", 41.0, 0.10, 1.0),
+        ("efficient-a", 41.0, 5.0, 1.0),
         ("efficient-b", 40.0, 0.20, 2.0),
         ("efficient-c", 39.0, 0.30, 3.0),
         ("efficient-d", 38.0, 0.40, 4.0),
@@ -1290,6 +1290,9 @@ async fn auto_models_fill_fallback_slots_beyond_pareto_frontier() {
             let mut benchmark =
                 BenchmarkModel::fixture(model, *quality, *quality, *quality, *price, *price);
             benchmark.latency_seconds = Some(*latency);
+            if *model == "efficient-a" {
+                benchmark.cost_per_task_usd = Some(0.50);
+            }
             benchmark
         })
         .collect::<Vec<_>>();
@@ -4338,7 +4341,9 @@ async fn subscription_models_report_zero_effective_and_reference_prices() {
     let primary = &body["routes"]["frontier"]["primary"];
     assert_eq!(primary["access"]["kind"], "subscription_included");
     assert_eq!(primary["expected_cost_microusd"], 0);
-    assert!(primary["reference_cost_microusd"].as_u64().is_some());
+    assert!(primary["reference_cost_microusd"].is_null());
+    assert!(primary["estimated_cost_microusd"].as_u64().is_some());
+    assert_eq!(primary["cost_source"], "token_price_scenario");
 
     let response = reqwest::Client::new()
         .post(format!("{gateway}/v1/chat/completions"))
