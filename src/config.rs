@@ -1396,7 +1396,7 @@ const fn default_balanced_quality_floor() -> f64 {
 }
 
 const fn default_frontier_quality_floor() -> f64 {
-    50.0
+    52.0
 }
 
 const fn default_connect_timeout_seconds() -> u64 {
@@ -1481,6 +1481,7 @@ mod tests {
         assert!(server.auto_frontier_enabled);
         assert!(server.auto_free_enabled);
         assert!(server.auto_efficient_enabled);
+        assert_eq!(server.frontier_quality_floor_single, 52.0);
     }
 
     #[test]

@@ -55,7 +55,7 @@ composite_quality = 0.80 * intelligence + 0.10 * coding_quality + 0.10 * agentic
 |---|---|---|
 | `MODEL_GATEWAY_EFFICIENT_QUALITY_FLOOR` | `35.0` | auto-efficient |
 | `MODEL_GATEWAY_BALANCED_QUALITY_FLOOR` | `42.0` | auto-balanced |
-| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR` | `50.0` | auto-frontier |
+| `MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR` | `52.0` | auto-frontier |
 
 Each floor must be 0–100. Higher floors select higher-quality models. The Pareto frontier picks the most efficient model above the floor (best quality/cost/latency tradeoff).
 
