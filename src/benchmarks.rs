@@ -30,7 +30,19 @@ pub struct BenchmarkModel {
     #[serde(default)]
     pub output_price_per_million: Option<f64>,
     #[serde(default)]
+    pub cache_read_price_per_million: Option<f64>,
+    #[serde(default)]
+    pub cache_write_price_per_million: Option<f64>,
+    #[serde(default)]
+    pub cost_per_task_usd: Option<f64>,
+    #[serde(default)]
     pub latency_seconds: Option<f64>,
+    #[serde(default)]
+    pub time_to_first_answer_seconds: Option<f64>,
+    #[serde(default)]
+    pub end_to_end_response_seconds: Option<f64>,
+    #[serde(default)]
+    pub output_tokens_per_second: Option<f64>,
     #[serde(default)]
     pub output_tokens_per_task: Option<u64>,
     #[serde(default)]
@@ -60,7 +72,13 @@ impl BenchmarkModel {
             agentic_quality: Some(agentic),
             input_price_per_million: Some(input_price),
             output_price_per_million: Some(output_price),
+            cache_read_price_per_million: None,
+            cache_write_price_per_million: None,
+            cost_per_task_usd: None,
             latency_seconds: Some(1.0),
+            time_to_first_answer_seconds: None,
+            end_to_end_response_seconds: None,
+            output_tokens_per_second: None,
             output_tokens_per_task: Some(1_024),
             reasoning_effort: None,
             as_of: None,
@@ -87,7 +105,13 @@ impl BenchmarkModel {
         for value in [
             self.input_price_per_million,
             self.output_price_per_million,
+            self.cache_read_price_per_million,
+            self.cache_write_price_per_million,
+            self.cost_per_task_usd,
             self.latency_seconds,
+            self.time_to_first_answer_seconds,
+            self.end_to_end_response_seconds,
+            self.output_tokens_per_second,
         ]
         .into_iter()
         .flatten()
@@ -120,6 +144,22 @@ impl BenchmarkModel {
             }
         }
         Ok(())
+    }
+
+    pub fn cost_per_task_microusd(&self) -> Option<u64> {
+        self.cost_per_task_usd.map(|cost| {
+            if !cost.is_finite() || cost <= 0.0 {
+                0
+            } else if cost >= u64::MAX as f64 / 1_000_000.0 {
+                u64::MAX
+            } else {
+                (cost * 1_000_000.0).ceil() as u64
+            }
+        })
+    }
+
+    pub fn frontier_latency_seconds(&self) -> Option<f64> {
+        self.end_to_end_response_seconds.or(self.latency_seconds)
     }
 }
 
@@ -444,8 +484,23 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                 ),
                 input_price_per_million: number(pricing, "price_1m_input_tokens"),
                 output_price_per_million: number(pricing, "price_1m_output_tokens"),
+                cache_read_price_per_million: number(pricing, "price_1m_cache_hit_tokens"),
+                cache_write_price_per_million: number(pricing, "price_1m_cache_write_tokens"),
+                cost_per_task_usd: item
+                    .get("artificial_analysis_intelligence_index_cost")
+                    .and_then(|cost| cost.get("cost_per_task"))
+                    .and_then(|cost| number(cost, "total_cost")),
                 latency_seconds: number(performance, "median_time_to_first_token_seconds")
                     .or_else(|| number(item, "median_time_to_first_token_seconds")),
+                time_to_first_answer_seconds: number(
+                    performance,
+                    "median_time_to_first_answer_token_seconds",
+                ),
+                end_to_end_response_seconds: number(
+                    performance,
+                    "median_end_to_end_response_time_seconds",
+                ),
+                output_tokens_per_second: number(performance, "median_output_tokens_per_second"),
                 output_tokens_per_task: None,
                 reasoning_effort: aa_reasoning_effort(item),
                 as_of: Some(epoch_date_string()),
@@ -556,12 +611,23 @@ mod tests {
                 "tau2": 0.55
             },
             "pricing": {"price_1m_input_tokens": 1.0, "price_1m_output_tokens": 2.0},
-            "median_time_to_first_token_seconds": 0.5
+            "median_time_to_first_token_seconds": 0.5,
+            "artificial_analysis_intelligence_index_cost": {
+                "cost_per_task": {"total_cost": 0.1678}
+            },
+            "performance": {
+                "median_output_tokens_per_second": 296.47,
+                "median_time_to_first_answer_token_seconds": 7.4,
+                "median_end_to_end_response_time_seconds": 9.09
+            }
         }]}))
         .expect("Artificial Analysis fixture");
         assert_eq!(models[0].id, "fixture");
         assert_eq!(models[0].coding_quality, Some(80.0));
         assert_eq!(models[0].agentic_quality, Some(55.0));
+        assert_eq!(models[0].cost_per_task_microusd(), Some(167_800));
+        assert_eq!(models[0].frontier_latency_seconds(), Some(9.09));
+        assert_eq!(models[0].output_tokens_per_second, Some(296.47));
     }
 
     #[test]
@@ -595,7 +661,9 @@ mod tests {
             },
             "pricing": {
                 "price_1m_input_tokens": "1.25",
-                "price_1m_output_tokens": "4.5"
+                "price_1m_output_tokens": "4.5",
+                "price_1m_cache_hit_tokens": "0.12",
+                "price_1m_cache_write_tokens": "0.6"
             },
             "performance": {"median_time_to_first_token_seconds": "0.4"}
         }]}))
@@ -605,6 +673,8 @@ mod tests {
         assert_eq!(models[0].agentic_quality, Some(64.0));
         assert_eq!(models[0].input_price_per_million, Some(1.25));
         assert_eq!(models[0].latency_seconds, Some(0.4));
+        assert_eq!(models[0].cache_read_price_per_million, Some(0.12));
+        assert_eq!(models[0].cache_write_price_per_million, Some(0.6));
     }
 
     #[test]

@@ -78,7 +78,10 @@ composite_quality = 0.8 * intelligence + 0.1 * coding_quality + 0.1 * agentic_qu
 
 Fallbacks: if `coding_quality` or `agentic_quality` is None, the weight redistributes to `intelligence`. This naturally filters out models with super low coding or agentic scores.
 
-The Pareto frontier operates on ALL benchmark entries (including different reasoning_effort levels). It naturally picks the most efficient variant — e.g., GPT 5.6 Sol (medium effort) over Sol Max (high effort) because Sol has better quality/cost ratio.
+The Pareto frontier operates on ALL benchmark entries (including different
+`reasoning_effort` levels). It uses measured task cost and end-to-end latency
+when available, so the selected effort reflects actual reasoning consumption
+instead of treating every subscription request as equally free.
 
 ## `local`
 
@@ -119,7 +122,7 @@ Best bang-for-buck. Quality floor: **35**. Pipeline:
 2. **Availability filter** — remove unavailable providers and free-only providers when billing requires paid
 3. **Capability filter** — context length, tools, vision, structured output
 4. **Composite quality floor** — `efficient_quality_floor` (default 35.0)
-5. **Pareto ranking** — `pareto_rank(composite_quality, cost_microusd, latency)`
+5. **Pareto ranking** — `pareto_rank(composite_quality, measured_task_cost, end_to_end_latency)`
    - Removes dominated candidates (worse on all three axes)
    - Sorts non-dominated by cost → latency → quality
 6. **Eligible fallback fill** — after the Pareto candidates, retain dominated
@@ -128,7 +131,11 @@ Best bang-for-buck. Quality floor: **35**. Pipeline:
 7. **Session pin** — pinned models sort first within their rank group
 8. **Fallback** — `auto-free` → `local`
 
-Expected cost is computed from the offering's input/output prices and estimated request tokens. Cost-based quota windows impose spend caps.
+Expected cost uses Artificial Analysis' measured cost per Intelligence Index
+task when available, then falls back to the offering's input/output prices and
+estimated request tokens. Cost-based quota windows impose spend caps. Effective
+subscription price remains zero for billing, while the measured task cost is
+used for efficiency ranking.
 
 Models from profiles with known included-subscription semantics report effective cost zero with `source: "subscription"`, while reference prices remain available for Pareto efficiency ranking and diagnostics. They are eligible for efficient/balanced/frontier routes, never `auto-free`. A generic provider configured with `billing_mode = "subscription"` remains priced unless its profile explicitly supports included inference.
 

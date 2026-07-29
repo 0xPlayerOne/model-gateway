@@ -3068,9 +3068,13 @@ async fn auto_frontier_keeps_effort_variants_as_distinct_candidates() {
     let mut max = BenchmarkModel::fixture("gpt-5-6-sol", 90.0, 90.0, 90.0, 5.0, 30.0);
     max.reasoning_effort = Some("max".to_owned());
     max.latency_seconds = Some(100.0);
+    max.end_to_end_response_seconds = Some(40.0);
+    max.cost_per_task_usd = Some(0.50);
     let mut medium = BenchmarkModel::fixture("gpt-5-6-sol-medium", 80.0, 80.0, 80.0, 5.0, 30.0);
     medium.reasoning_effort = Some("medium".to_owned());
     medium.latency_seconds = Some(1.0);
+    medium.end_to_end_response_seconds = Some(10.0);
+    medium.cost_per_task_usd = Some(0.01);
     store
         .replace_benchmarks("fixture", "Fixture", &[max, medium])
         .expect("benchmarks");

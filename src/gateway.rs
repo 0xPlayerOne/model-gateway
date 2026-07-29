@@ -1456,7 +1456,13 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
                 },
                 "input_price_per_million": model.input_price_per_million,
                 "output_price_per_million": model.output_price_per_million,
+                "cache_read_price_per_million": model.cache_read_price_per_million,
+                "cache_write_price_per_million": model.cache_write_price_per_million,
+                "cost_per_task_usd": model.cost_per_task_usd,
                 "latency_seconds": model.latency_seconds,
+                "time_to_first_answer_seconds": model.time_to_first_answer_seconds,
+                "end_to_end_response_seconds": model.end_to_end_response_seconds,
+                "output_tokens_per_second": model.output_tokens_per_second,
                 "reasoning_effort": model.reasoning_effort,
                 "as_of": model.as_of,
                 "release_date": model.release_date
@@ -2175,6 +2181,10 @@ struct ModeModelValue<'a> {
     access_kind: AccessKind,
     reference_input_price: Option<f64>,
     reference_output_price: Option<f64>,
+    benchmark_cost_per_task_usd: Option<f64>,
+    time_to_first_answer_seconds: Option<f64>,
+    end_to_end_response_seconds: Option<f64>,
+    output_tokens_per_second: Option<f64>,
     reasoning_effort: Option<&'a str>,
 }
 
@@ -2568,7 +2578,7 @@ fn select_mode_models(
         }
         let benchmark = candidate.benchmark.as_ref();
         let latency = benchmark
-            .and_then(|b| b.latency_seconds)
+            .and_then(BenchmarkModel::frontier_latency_seconds)
             .unwrap_or(f64::MAX);
         let reference_input_price = candidate
             .offering
@@ -2578,11 +2588,11 @@ fn select_mode_models(
             .offering
             .output_price_per_million
             .or_else(|| benchmark.and_then(|b| b.output_price_per_million));
-        let expected_cost_microusd = match candidate.offering.access_kind {
-            AccessKind::ZeroPrice => 0,
+        let token_cost = || match candidate.offering.access_kind {
+            AccessKind::ZeroPrice => Some(0),
             AccessKind::QuotaLimitedFreeTier | AccessKind::SubscriptionIncluded => {
                 match (reference_input_price, reference_output_price) {
-                    (Some(input), Some(output)) => expected_cost_microusd(
+                    (Some(input), Some(output)) => Some(expected_cost_microusd(
                         256,
                         benchmark
                             .and_then(|b| b.output_tokens_per_task)
@@ -2590,12 +2600,12 @@ fn select_mode_models(
                             .min(256),
                         input,
                         output,
-                    ),
-                    _ => u64::MAX,
+                    )),
+                    _ => None,
                 }
             }
-            AccessKind::Paid | AccessKind::Unknown => match candidate.price.as_ref() {
-                Some(price) => expected_cost_microusd(
+            AccessKind::Paid | AccessKind::Unknown => candidate.price.as_ref().map(|price| {
+                expected_cost_microusd(
                     256,
                     benchmark
                         .and_then(|b| b.output_tokens_per_task)
@@ -2603,10 +2613,13 @@ fn select_mode_models(
                         .min(256),
                     price.input_price_per_million,
                     price.output_price_per_million,
-                ),
-                _ => continue,
-            },
+                )
+            }),
         };
+        let expected_cost_microusd = benchmark
+            .and_then(BenchmarkModel::cost_per_task_microusd)
+            .or_else(token_cost)
+            .unwrap_or(u64::MAX);
         scored.push(ScoredCandidate {
             quality,
             expected_cost_microusd,
@@ -2621,6 +2634,11 @@ fn select_mode_models(
                 access_kind: candidate.offering.access_kind,
                 reference_input_price,
                 reference_output_price,
+                benchmark_cost_per_task_usd: benchmark.and_then(|b| b.cost_per_task_usd),
+                time_to_first_answer_seconds: benchmark
+                    .and_then(|b| b.time_to_first_answer_seconds),
+                end_to_end_response_seconds: benchmark.and_then(|b| b.end_to_end_response_seconds),
+                output_tokens_per_second: benchmark.and_then(|b| b.output_tokens_per_second),
                 reasoning_effort: benchmark.and_then(|b| b.reasoning_effort.as_deref()),
             },
         });
@@ -2716,6 +2734,10 @@ fn mode_model_entry(
             None
         },
         "latency_seconds": candidate.latency_seconds,
+        "benchmark_cost_per_task_usd": candidate.value.benchmark_cost_per_task_usd,
+        "time_to_first_answer_seconds": candidate.value.time_to_first_answer_seconds,
+        "end_to_end_response_seconds": candidate.value.end_to_end_response_seconds,
+        "output_tokens_per_second": candidate.value.output_tokens_per_second,
         "pricing_eligible": candidate.value.pricing_eligible,
         "benchmark_match": candidate.value.match_kind.map(ModelMatchKind::as_str),
         "access": {
@@ -3824,21 +3846,24 @@ async fn resolve_auto_free_targets(
                 return None;
             }
             let latency = benchmark
-                .and_then(|b| b.latency_seconds)
+                .and_then(BenchmarkModel::frontier_latency_seconds)
                 .unwrap_or(f64::MAX);
             let reference_cost_microusd = if access_kind == AccessKind::QuotaLimitedFreeTier {
-                match (effective_input, effective_output) {
-                    (Some(input), Some(output)) => expected_cost_microusd(
-                        requirements.estimated_input_tokens,
-                        benchmark
-                            .and_then(|b| b.output_tokens_per_task)
-                            .unwrap_or(requirements.estimated_output_tokens)
-                            .min(requirements.estimated_output_tokens),
-                        input,
-                        output,
-                    ),
-                    _ => u64::MAX,
-                }
+                benchmark
+                    .and_then(BenchmarkModel::cost_per_task_microusd)
+                    .or_else(|| match (effective_input, effective_output) {
+                        (Some(input), Some(output)) => Some(expected_cost_microusd(
+                            requirements.estimated_input_tokens,
+                            benchmark
+                                .and_then(|b| b.output_tokens_per_task)
+                                .unwrap_or(requirements.estimated_output_tokens)
+                                .min(requirements.estimated_output_tokens),
+                            input,
+                            output,
+                        )),
+                        _ => None,
+                    })
+                    .unwrap_or(u64::MAX)
             } else {
                 0
             };
@@ -4151,7 +4176,7 @@ async fn resolve_benchmark_targets(
             else {
                 continue;
             };
-            let reference_cost_microusd = expected_cost_microusd(
+            let token_cost_microusd = expected_cost_microusd(
                 requirements.estimated_input_tokens,
                 benchmark
                     .output_tokens_per_task
@@ -4160,6 +4185,9 @@ async fn resolve_benchmark_targets(
                 effective_price.input_price_per_million,
                 effective_price.output_price_per_million,
             );
+            let reference_cost_microusd = benchmark
+                .cost_per_task_microusd()
+                .unwrap_or(token_cost_microusd);
             let expected_cost_microusd = if access_kind == AccessKind::SubscriptionIncluded {
                 0
             } else {
@@ -4214,7 +4242,7 @@ async fn resolve_benchmark_targets(
                 },
                 quality,
                 expected_cost_microusd: reference_cost_microusd,
-                latency_seconds: benchmark.latency_seconds.unwrap_or(f64::MAX),
+                latency_seconds: benchmark.frontier_latency_seconds().unwrap_or(f64::MAX),
             });
         }
     }
@@ -4292,8 +4320,8 @@ fn benchmark_price(benchmark: &BenchmarkModel) -> Option<EffectivePrice> {
     Some(EffectivePrice {
         input_price_per_million: benchmark.input_price_per_million?,
         output_price_per_million: benchmark.output_price_per_million?,
-        cache_read_price_per_million: None,
-        cache_write_price_per_million: None,
+        cache_read_price_per_million: benchmark.cache_read_price_per_million,
+        cache_write_price_per_million: benchmark.cache_write_price_per_million,
         source: "benchmark".to_owned(),
         source_kind: PriceSourceKind::Benchmark,
         scope: PriceScope::Canonical,
