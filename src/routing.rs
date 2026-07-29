@@ -408,7 +408,13 @@ impl RoutingStore {
                  reasoning_quality REAL,
                  input_price REAL,
                  output_price REAL,
-                  latency_seconds REAL,
+                 cache_read_price REAL,
+                 cache_write_price REAL,
+                 cost_per_task_usd REAL,
+                 latency_seconds REAL,
+                 time_to_first_answer_seconds REAL,
+                 end_to_end_response_seconds REAL,
+                 output_tokens_per_second REAL,
                   output_tokens_per_task INTEGER,
                   reasoning_effort TEXT,
                   as_of TEXT,
@@ -1319,10 +1325,12 @@ impl RoutingStore {
             transaction.execute(
                 "INSERT INTO benchmark_models(
                     snapshot_id, model_id, creator, general_quality, coding_quality,
-                    agentic_quality, input_price, output_price,
-                    latency_seconds, output_tokens_per_task, reasoning_effort,
-                    as_of, release_date
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    agentic_quality, input_price, output_price, cache_read_price,
+                    cache_write_price, cost_per_task_usd, latency_seconds,
+                    time_to_first_answer_seconds, end_to_end_response_seconds,
+                    output_tokens_per_second, output_tokens_per_task,
+                    reasoning_effort, as_of, release_date
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![
                     snapshot_id,
                     model.id,
@@ -1332,7 +1340,13 @@ impl RoutingStore {
                     model.agentic_quality,
                     model.input_price_per_million,
                     model.output_price_per_million,
+                    model.cache_read_price_per_million,
+                    model.cache_write_price_per_million,
+                    model.cost_per_task_usd,
                     model.latency_seconds,
+                    model.time_to_first_answer_seconds,
+                    model.end_to_end_response_seconds,
+                    model.output_tokens_per_second,
                     model.output_tokens_per_task.map(|v| v as i64),
                     model.reasoning_effort.as_deref().unwrap_or(""),
                     model.as_of,
@@ -1383,7 +1397,10 @@ impl RoutingStore {
         let mut statement = connection.prepare(
             "SELECT m.model_id, m.creator, m.general_quality, m.coding_quality,
                      m.agentic_quality, m.input_price,
-                     m.output_price, m.latency_seconds, m.output_tokens_per_task,
+                     m.output_price, m.cache_read_price, m.cache_write_price,
+                     m.cost_per_task_usd, m.latency_seconds,
+                     m.time_to_first_answer_seconds, m.end_to_end_response_seconds,
+                     m.output_tokens_per_second, m.output_tokens_per_task,
                      NULLIF(m.reasoning_effort, ''), m.as_of,
                      m.release_date
              FROM benchmark_models m
@@ -1404,11 +1421,17 @@ impl RoutingStore {
                         agentic_quality: row.get(4)?,
                         input_price_per_million: row.get(5)?,
                         output_price_per_million: row.get(6)?,
-                        latency_seconds: row.get(7)?,
-                        output_tokens_per_task: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
-                        reasoning_effort: row.get(9)?,
-                        as_of: row.get(10)?,
-                        release_date: row.get(11)?,
+                        cache_read_price_per_million: row.get(7)?,
+                        cache_write_price_per_million: row.get(8)?,
+                        cost_per_task_usd: row.get(9)?,
+                        latency_seconds: row.get(10)?,
+                        time_to_first_answer_seconds: row.get(11)?,
+                        end_to_end_response_seconds: row.get(12)?,
+                        output_tokens_per_second: row.get(13)?,
+                        output_tokens_per_task: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
+                        reasoning_effort: row.get(15)?,
+                        as_of: row.get(16)?,
+                        release_date: row.get(17)?,
                         raw_metrics: BTreeMap::new(),
                     })
                 },
@@ -2397,7 +2420,16 @@ fn ensure_benchmark_columns(connection: &Connection) -> Result<(), rusqlite::Err
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    for (name, sql_type) in [("as_of", "TEXT"), ("release_date", "TEXT")] {
+    for (name, sql_type) in [
+        ("as_of", "TEXT"),
+        ("release_date", "TEXT"),
+        ("cache_read_price", "REAL"),
+        ("cache_write_price", "REAL"),
+        ("cost_per_task_usd", "REAL"),
+        ("time_to_first_answer_seconds", "REAL"),
+        ("end_to_end_response_seconds", "REAL"),
+        ("output_tokens_per_second", "REAL"),
+    ] {
         if !columns.iter().any(|column| column == name) {
             connection.execute(
                 &format!("ALTER TABLE benchmark_models ADD COLUMN {name} {sql_type}"),

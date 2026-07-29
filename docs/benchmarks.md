@@ -61,7 +61,13 @@ Each model may include quality scores plus pricing, latency, output-size, proven
 | `agentic_quality` | 0–100 | Agentic/tool-use quality score |
 | `input_price_per_million` | $ | Price per million input tokens |
 | `output_price_per_million` | $ | Price per million output tokens |
-| `latency_seconds` | Seconds | Time to first token |
+| `cache_read_price_per_million` | $ | Cache-hit price per million tokens |
+| `cache_write_price_per_million` | $ | Cache-write price per million tokens |
+| `cost_per_task_usd` | $ | Artificial Analysis measured cost per Intelligence Index task |
+| `latency_seconds` | Seconds | Median time to first token |
+| `time_to_first_answer_seconds` | Seconds | Median time to first answer token |
+| `end_to_end_response_seconds` | Seconds | Median end-to-end response time |
+| `output_tokens_per_second` | Tokens/s | Median output throughput |
 | `output_tokens_per_task` | Tokens | Average output length |
 | `reasoning_effort` | String | Reasoning variant (e.g., `low`, `high`) |
 | `as_of` | Date | Benchmark measurement date |
@@ -90,7 +96,10 @@ composite_quality = 0.80 * intelligence + 0.10 * coding_quality + 0.10 * agentic
 
 If `coding_quality` or `agentic_quality` is None, the weight redistributes to `intelligence`. This gives a well-rounded score that doesn't favor any single task type — important since each mode recommends a single model that should handle all tasks well.
 
-The Pareto frontier operates on ALL benchmark entries (including different reasoning_effort levels). It naturally picks the most efficient variant — e.g., GPT 5.6 Sol (medium effort) over Sol Max (high effort) because Sol has better quality/cost ratio.
+The Pareto frontier operates on ALL benchmark entries (including different
+`reasoning_effort` levels). It uses measured task cost and end-to-end latency
+when available, so high-effort variants are not treated as free merely because
+their provider subscription has no per-request charge.
 
 ### Complexity Classification
 
@@ -158,12 +167,12 @@ Rankings are sorted by quality score (descending), then by combined price (ascen
 
 | Route | Benchmark Dependency | Quality Scoring |
 |---|---|---|
-| `auto-free` | Uses composite quality for Pareto ranking (quality × latency). Models without quality data are excluded. | Composite |
+| `auto-free` | Uses composite quality plus measured task cost for quota-limited models and end-to-end latency. Models without quality data are excluded. | Composite |
 | `auto-efficient` | **Requires** benchmarks. Models without matching benchmark entries are excluded. | Composite |
 | `auto-balanced` | **Requires** benchmarks. Same as auto-efficient with higher quality floor. | Composite |
 | `auto-frontier` | **Requires** benchmarks. Highest quality floor. | Composite |
 
-All paid routes use composite quality (`0.80*intelligence + 0.10*coding + 0.10*agentic`). The Pareto frontier operates on ALL benchmark entries including different reasoning_effort levels, naturally picking the most efficient variant.
+All paid routes use composite quality (`0.80*intelligence + 0.10*coding + 0.10*agentic`). The Pareto frontier operates on all benchmark entries including different `reasoning_effort` levels, using measured task cost and end-to-end latency when available.
 
 ## Configuration
 
@@ -253,12 +262,19 @@ model-gateway benchmarks delete my-source
 The Pareto ranking algorithm (`pareto_rank` in `src/benchmarks.rs`) uses three axes:
 
 1. **Quality** — composite quality for auto routes (higher is better)
-2. **Expected cost** — estimated USD per request from model pricing (lower is better, always 0 for free models)
-3. **Latency** — seconds to first token (lower is better)
+2. **Expected cost** — Artificial Analysis cost per Intelligence Index task when
+   available, otherwise an estimate from model pricing and request tokens
+   (lower is better)
+3. **Latency** — end-to-end response seconds when available, otherwise time to
+   first token (lower is better)
 
 A candidate is **dominated** if another model is at least as good on all axes and strictly better on at least one. Dominated candidates are removed. The surviving frontier is sorted by cost → latency → quality.
 
-For free models, cost is always 0, so the comparison degenerates to quality vs latency — a fast model with sufficient quality beats a slow overqualified one.
+Effective provider price remains zero for free and included-subscription
+routes, but measured task cost is retained as the reference efficiency cost.
+This prevents subscription models that consume substantially more reasoning
+tokens from appearing artificially free in frontier calculations. A zero-price
+model with no measured task cost still falls back to zero.
 
 ## Quality Floor Validation
 
