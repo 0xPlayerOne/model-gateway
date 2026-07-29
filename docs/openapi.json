@@ -235,6 +235,7 @@
           "object": { "const": "model" },
           "links": { "$ref": "#/components/schemas/Links" },
           "model": { "type": "object" },
+          "benchmarks": { "$ref": "#/components/schemas/BenchmarkMetrics" },
           "capabilities": { "type": ["object", "null"] },
           "price_per_million": { "type": "object" },
           "access": { "type": "object" }
@@ -314,7 +315,18 @@
               "rank": { "type": "integer" }
             }
           },
+          "benchmarks": { "$ref": "#/components/schemas/BenchmarkMetrics" },
           "reasoning_effort": { "type": ["string", "null"] }
+        }
+      },
+      "BenchmarkMetrics": {
+        "type": "object",
+        "properties": {
+          "cost_per_task_usd": { "type": ["number", "null"] },
+          "latency_seconds": { "type": ["number", "null"] },
+          "time_to_first_answer_seconds": { "type": ["number", "null"] },
+          "end_to_end_response_seconds": { "type": ["number", "null"] },
+          "output_tokens_per_second": { "type": ["number", "null"] }
         }
       },
       "Error": {

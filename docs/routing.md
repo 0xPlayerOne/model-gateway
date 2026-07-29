@@ -172,11 +172,11 @@ When a request succeeds, the session is pinned to `(provider, model)` for 30 min
 
 ### `/v1/catalog/models`
 
-The canonical model discovery collection. Use `?access=free|paid|all`, `?task=`, `?provider=`, `?limit=`, `?cursor=`, and `?view=summary|full`. The default is a compact summary of at most 25 models; each item contains only `id`, `quality`, separate `reasoning_effort`, and an absolute clickable `links.self` URL. Use `?view=full` for complete model metadata. Cursors are bound to the catalog snapshot; a refresh invalidates an old cursor with `409 stale_cursor`. Responses include `meta.snapshot`, `meta.total`, navigable links, `ETag`, `Last-Modified`, and conditional `304 Not Modified` support.
+The canonical model discovery collection. Use `?access=free|paid|all`, `?task=`, `?provider=`, `?limit=`, `?cursor=`, and `?view=summary|full`. The default is a compact summary of at most 25 models; each item contains `id`, `quality`, separate `reasoning_effort`, compact benchmark metrics, and an absolute clickable `links.self` URL. Use `?view=full` for complete model metadata. Cursors are bound to the catalog snapshot; a refresh invalidates an old cursor with `409 stale_cursor`. Responses include `meta.snapshot`, `meta.total`, navigable links, `ETag`, `Last-Modified`, and conditional `304 Not Modified` support.
 
 ### `/v1/catalog/models/{provider}/{model}`
 
-Returns one complete model resource, including benchmark matching, cache pricing, reference pricing, access limits, freshness, and provenance. The model portion may contain additional path segments; use the exact encoded resource link returned by the collection.
+Returns one complete model resource, including benchmark metrics, benchmark matching, cache pricing, reference pricing, access limits, freshness, and provenance. The model portion may contain additional path segments; use the exact encoded resource link returned by the collection.
 
 The catalog collection is the only model-discovery listing surface. The old `/v1/free-models`, `/v1/paid-models`, and `/v1/models/{provider}/{model}` routes return `404`; new integrations should use the canonical catalog paths and `/openapi.json`.
 
