@@ -4,7 +4,7 @@ languages: rust
 features: all
 package_manager: none
 runtime_repository: 0xPlayerOne/code-foundry
-runtime_ref: v0.31.12
+runtime_ref: v0.31.13
 runner: ubuntu-latest
 unit_runner: ubuntu-slim
 ci_runner: ubuntu-latest
