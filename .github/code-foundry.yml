@@ -4,7 +4,7 @@ languages: rust
 features: all
 package_manager: none
 runtime_repository: 0xPlayerOne/code-foundry
-runtime_ref: v0.27.15
+runtime_ref: v0.31.13
 runner: ubuntu-latest
 unit_runner: ubuntu-slim
 ci_runner: ubuntu-latest
@@ -26,3 +26,9 @@ merge_strategy: rebase
 codeql: auto
 dependency_review: auto
 toolchain: auto
+post_release: false
+post_release_workflow:
+post_release_mode: auto
+opencode_security: true
+sync_mode: overlay
+custom_workflows: preserve
