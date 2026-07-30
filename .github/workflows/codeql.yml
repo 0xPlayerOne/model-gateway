@@ -18,9 +18,9 @@ permissions:
 jobs:
   codeql:
     name: CodeQL
-    uses: 0xPlayerOne/code-foundry/.github/workflows/codeql.yml@v0.31.3
+    uses: 0xPlayerOne/code-foundry/.github/workflows/codeql.yml@v0.31.12
     with:
       runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: v0.31.3
+      runtime-ref: v0.31.12
       runner: ubuntu-latest
     secrets: inherit
