@@ -14,15 +14,14 @@ fi
 CLI_PROXY_HOME="${MODEL_GATEWAY_CLI_PROXY_HOME:-$HOME/.config/model-gateway/cli-proxy}"
 LOG="${MODEL_GATEWAY_CLI_PROXY_LOG:-$CLI_PROXY_HOME/server.log}"
 PIDFILE="${MODEL_GATEWAY_CLI_PROXY_PIDFILE:-$CLI_PROXY_HOME/server.pid}"
+CONFIG="${MODEL_GATEWAY_CLI_PROXY_CONFIG:-$CLI_PROXY_HOME/config.yaml}"
 
 is_cli_proxy_process() {
     local pid="$1"
     local command
     command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-    case "$command" in
-        *model-gateway[[:space:]]cli-proxy[[:space:]]serve*) return 0 ;;
-        *) return 1 ;;
-    esac
+    [[ "$command" == *"model-gateway cli-proxy serve"* ||
+        "$command" == "$CLI_PROXY_HOME"/bin/*/cli-proxy-api\ -config\ "$CONFIG"* ]]
 }
 
 FOLLOW=false
@@ -38,7 +37,6 @@ fi
 
 mkdir -p "$CLI_PROXY_HOME"
 
-CONFIG="${MODEL_GATEWAY_CLI_PROXY_CONFIG:-$CLI_PROXY_HOME/config.yaml}"
 PORT="${MODEL_GATEWAY_CLI_PROXY_PORT:-8317}"
 if [ "$OPTIONAL" = true ] && [ ! -f "$CONFIG" ]; then
     echo "CLIProxyAPI is not configured; skipping sidecar startup."
