@@ -4,15 +4,14 @@ set -euo pipefail
 CLI_PROXY_HOME="${MODEL_GATEWAY_CLI_PROXY_HOME:-$HOME/.config/model-gateway/cli-proxy}"
 PIDFILE="${MODEL_GATEWAY_CLI_PROXY_PIDFILE:-$CLI_PROXY_HOME/server.pid}"
 PORT="${MODEL_GATEWAY_CLI_PROXY_PORT:-8317}"
+CONFIG="${MODEL_GATEWAY_CLI_PROXY_CONFIG:-$CLI_PROXY_HOME/config.yaml}"
 
 is_cli_proxy_process() {
     local pid="$1"
     local command
     command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-    case "$command" in
-        *model-gateway[[:space:]]cli-proxy[[:space:]]serve*) return 0 ;;
-        *) return 1 ;;
-    esac
+    [[ "$command" == *"model-gateway cli-proxy serve"* ||
+        "$command" == "$CLI_PROXY_HOME"/bin/*/cli-proxy-api\ -config\ "$CONFIG"* ]]
 }
 
 if [ -f "$PIDFILE" ]; then
