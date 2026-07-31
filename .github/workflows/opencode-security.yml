@@ -2,7 +2,7 @@ name: Code Foundry
 
 on:
   pull_request:
-    branches: [staging]
+    branches: [main, staging]
   workflow_dispatch:
 
 permissions:

@@ -8,11 +8,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: read
   contents: read
   pull-requests: write
-  packages: read
-  security-events: write
 
 jobs:
   release-pr:
@@ -21,48 +18,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       startsWith(github.head_ref, 'release-please--branches--main')
     name: Release PR
-    uses: 0xPlayerOne/code-foundry/.github/workflows/release-pr.yml@v0.31.13
+    uses: 0xPlayerOne/code-foundry/.github/workflows/release-pr.yml@v0.32.3
     with:
       runner: ubuntu-slim
-    secrets: inherit
-
-  ci:
-    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-please--branches--main')
-    name: CI
-    uses: 0xPlayerOne/code-foundry/.github/workflows/ci.yml@v0.31.13
-    with:
-      runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: v0.31.13
-      runner: ubuntu-latest
-    secrets: inherit
-
-  test:
-    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-please--branches--main')
-    name: Test
-    uses: 0xPlayerOne/code-foundry/.github/workflows/test.yml@v0.31.13
-    with:
-      runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: ${{ github.sha }}
-      runner: ubuntu-latest
-      unit-runner: ubuntu-slim
-    secrets: inherit
-
-  security:
-    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-please--branches--main')
-    name: Security
-    uses: 0xPlayerOne/code-foundry/.github/workflows/security.yml@v0.31.13
-    with:
-      runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: ${{ github.sha }}
-      runner: ubuntu-slim
-    secrets: inherit
-
-  codeql:
-    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-please--branches--main')
-    name: CodeQL
-    uses: 0xPlayerOne/code-foundry/.github/workflows/codeql.yml@v0.31.13
-    with:
-      runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: ${{ github.sha }}
-      runner: ubuntu-latest
     secrets: inherit
