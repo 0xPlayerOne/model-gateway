@@ -1139,10 +1139,10 @@ impl RoutingStore {
         if has_incomplete(&normalize_price_id(model))? {
             return Ok(true);
         }
-        if let Some((_, canonical_id)) = canonical_model.and_then(|value| value.split_once('/')) {
-            if has_incomplete(&normalize_price_id(canonical_id))? {
-                return Ok(true);
-            }
+        if let Some((_, canonical_id)) = canonical_model.and_then(|value| value.split_once('/'))
+            && has_incomplete(&normalize_price_id(canonical_id))?
+        {
+            return Ok(true);
         }
         Ok(false)
     }
@@ -2510,8 +2510,7 @@ fn build_version_map(connection: &Connection) -> BTreeMap<String, u64> {
     let mut map = BTreeMap::new();
     if let Ok(mut statement) =
         connection.prepare("SELECT model_id FROM benchmark_models WHERE snapshot_id IN (SELECT id FROM benchmark_snapshots WHERE active = 1)")
-    {
-        if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
+        && let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
             for row in rows.flatten() {
                 if let Some((family, version)) = extract_model_family_version(&row) {
                     let entry = map.entry(family).or_insert(0);
@@ -2521,7 +2520,6 @@ fn build_version_map(connection: &Connection) -> BTreeMap<String, u64> {
                 }
             }
         }
-    }
     map
 }
 
@@ -2534,10 +2532,10 @@ fn is_stale_generation(model: &str, version_map: &BTreeMap<String, u64>) -> bool
         .collect::<Vec<_>>()
         .join("-");
 
-    if let Some((family, cat_version)) = extract_model_family_version(&normalized) {
-        if let Some(&aa_max_version) = version_map.get(&family) {
-            return cat_version < aa_max_version;
-        }
+    if let Some((family, cat_version)) = extract_model_family_version(&normalized)
+        && let Some(&aa_max_version) = version_map.get(&family)
+    {
+        return cat_version < aa_max_version;
     }
     false
 }
