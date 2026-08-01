@@ -531,12 +531,21 @@ pub fn fetch_catalog(
         .collect())
 }
 
-pub fn is_embedding_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    let tokens: Vec<&str> = normalized
+/// Splits a lowercased model id into its alphanumeric token parts.
+fn split_tokens(normalized: &str) -> Vec<&str> {
+    normalized
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
-        .collect();
+        .collect()
+}
+
+pub fn is_embedding_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    let tokens = split_tokens(&normalized);
+    is_embedding(&normalized, &tokens)
+}
+
+fn is_embedding(normalized: &str, tokens: &[&str]) -> bool {
     tokens
         .iter()
         .any(|token| matches!(*token, "embed" | "embeddings" | "embedding" | "clip"))
@@ -551,12 +560,14 @@ pub fn is_embedding_model(model: &str) -> bool {
         || normalized.contains("e5-")
 }
 
+#[cfg(test)]
 fn is_audio_model(model: &str) -> bool {
     let normalized = model.to_ascii_lowercase();
-    let tokens: Vec<&str> = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+    let tokens = split_tokens(&normalized);
+    is_audio(&normalized, &tokens)
+}
+
+fn is_audio(normalized: &str, tokens: &[&str]) -> bool {
     tokens.iter().any(|token| {
         matches!(
             *token,
@@ -568,12 +579,14 @@ fn is_audio_model(model: &str) -> bool {
         || normalized.contains("orpheus")
 }
 
+#[cfg(test)]
 fn is_image_gen_model(model: &str) -> bool {
     let normalized = model.to_ascii_lowercase();
-    let tokens: Vec<&str> = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+    let tokens = split_tokens(&normalized);
+    is_image_gen(&normalized, &tokens)
+}
+
+fn is_image_gen(normalized: &str, tokens: &[&str]) -> bool {
     tokens.iter().any(|token| {
         matches!(
             *token,
@@ -589,44 +602,31 @@ fn is_image_gen_model(model: &str) -> bool {
             && !normalized.contains("-vision"))
 }
 
+#[cfg(test)]
 fn is_video_gen_model(model: &str) -> bool {
     let normalized = model.to_ascii_lowercase();
-    let tokens: Vec<&str> = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+    let tokens = split_tokens(&normalized);
+    is_video_gen(&normalized, &tokens)
+}
+
+fn is_video_gen(normalized: &str, tokens: &[&str]) -> bool {
     tokens.iter().any(|token| {
         matches!(*token, "veo" | "cosmos" | "kling")
             || (normalized.contains("wan") && (*token == "v" || token.ends_with('v')))
     })
 }
 
-fn is_reranker_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    let tokens: Vec<&str> = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+fn is_reranker(tokens: &[&str]) -> bool {
     tokens
         .iter()
         .any(|token| matches!(*token, "rerank" | "reranker"))
 }
 
-fn is_moderation_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    let tokens: Vec<&str> = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+fn is_moderation(tokens: &[&str]) -> bool {
     tokens.iter().any(|token| token.starts_with("moderat"))
 }
 
-fn is_ocr_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    let tokens: Vec<&str> = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+fn is_ocr(tokens: &[&str]) -> bool {
     tokens
         .iter()
         .any(|token| *token == "ocr" || token.ends_with("ocr"))
@@ -635,16 +635,18 @@ fn is_ocr_model(model: &str) -> bool {
 /// Detects old-generation models that AA no longer benchmarks.
 /// These are from discontinued model families or versions that AA has
 /// moved past (e.g. llama2 → llama-3, gemma-2 → gemma-4, phi-3 → phi-4).
+#[cfg(test)]
 fn is_old_generation_model(model: &str) -> bool {
     let normalized = model.to_ascii_lowercase();
+    let tokens = split_tokens(&normalized);
+    is_old_generation(&normalized, &tokens)
+}
+
+fn is_old_generation(normalized: &str, tokens: &[&str]) -> bool {
     // Normalize non-alphanumeric characters to hyphens for pattern matching
-    let hypen_normalized: String = normalized
+    let hyphen_normalized: String = normalized
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let tokens: Vec<&str> = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
         .collect();
 
     // Token-level markers for clearly discontinued/old model families
@@ -684,62 +686,75 @@ fn is_old_generation_model(model: &str) -> bool {
         return true;
     }
 
-    // Multi-token patterns (use hypen-normalized form for consistency)
+    // Multi-token patterns (use hyphen-normalized form for consistency)
     let old_patterns = ["sea-lion", "granite-3-0-", "granite-34b-", "phi-3-"];
-    old_patterns.iter().any(|p| hypen_normalized.contains(p))
+    old_patterns.iter().any(|p| hyphen_normalized.contains(p))
 }
 
+#[cfg(test)]
 fn is_robotics_model(model: &str) -> bool {
     let normalized = model.to_ascii_lowercase();
+    is_robotics(&normalized)
+}
+
+fn is_robotics(normalized: &str) -> bool {
     normalized.contains("robotics")
 }
 
+#[cfg(test)]
 fn is_safety_model(model: &str) -> bool {
     let normalized = model.to_ascii_lowercase();
-    let tokens: Vec<&str> = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+    let tokens = split_tokens(&normalized);
+    is_safety(&tokens)
+}
+
+fn is_safety(tokens: &[&str]) -> bool {
     tokens
         .iter()
         .any(|token| token.ends_with("guard") || matches!(*token, "safety" | "safeguard"))
 }
 
+#[cfg(test)]
 fn is_classifier_model(model: &str) -> bool {
     let normalized = model.to_ascii_lowercase();
-    let tokens: Vec<&str> = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+    let tokens = split_tokens(&normalized);
+    is_classifier(&tokens)
+}
+
+fn is_classifier(tokens: &[&str]) -> bool {
     tokens.iter().any(|token| {
         *token == "reward" || *token == "pii" || *token == "detect" || *token == "detector"
     })
 }
 
+#[cfg(test)]
 fn is_retrieval_model(model: &str) -> bool {
     let normalized = model.to_ascii_lowercase();
-    let tokens: Vec<&str> = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+    let tokens = split_tokens(&normalized);
+    is_retrieval(&tokens)
+}
+
+fn is_retrieval(tokens: &[&str]) -> bool {
     tokens
         .iter()
         .any(|token| *token == "parse" || token.starts_with("retriev"))
 }
 
 pub fn is_specialty_model(model: &str) -> bool {
-    is_embedding_model(model)
-        || is_audio_model(model)
-        || is_image_gen_model(model)
-        || is_video_gen_model(model)
-        || is_reranker_model(model)
-        || is_moderation_model(model)
-        || is_ocr_model(model)
-        || is_safety_model(model)
-        || is_classifier_model(model)
-        || is_retrieval_model(model)
-        || is_robotics_model(model)
-        || is_old_generation_model(model)
+    let normalized = model.to_ascii_lowercase();
+    let tokens = split_tokens(&normalized);
+    is_embedding(&normalized, &tokens)
+        || is_audio(&normalized, &tokens)
+        || is_image_gen(&normalized, &tokens)
+        || is_video_gen(&normalized, &tokens)
+        || is_reranker(&tokens)
+        || is_moderation(&tokens)
+        || is_ocr(&tokens)
+        || is_safety(&tokens)
+        || is_classifier(&tokens)
+        || is_retrieval(&tokens)
+        || is_robotics(&normalized)
+        || is_old_generation(&normalized, &tokens)
 }
 
 fn number_at(value: &serde_json::Value, key: &str) -> Option<f64> {
