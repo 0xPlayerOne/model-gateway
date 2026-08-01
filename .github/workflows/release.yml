@@ -19,5 +19,5 @@ jobs:
     with:
       runner: ubuntu-slim
       runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: v0.32.3
+      runtime-ref: v0.34.0
     secrets: inherit
