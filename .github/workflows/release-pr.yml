@@ -18,7 +18,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       startsWith(github.head_ref, 'release-please--branches--main')
     name: Release PR
-    uses: 0xPlayerOne/code-foundry/.github/workflows/release-pr.yml@v0.32.3
+    uses: 0xPlayerOne/code-foundry/.github/workflows/release-pr.yml@v0.34.0
     with:
       runner: ubuntu-slim
     secrets: inherit

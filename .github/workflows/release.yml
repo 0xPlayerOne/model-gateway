@@ -15,7 +15,7 @@ permissions:
 jobs:
   release:
     name: Release
-    uses: 0xPlayerOne/code-foundry/.github/workflows/release.yml@v0.32.3
+    uses: 0xPlayerOne/code-foundry/.github/workflows/release.yml@v0.34.0
     with:
       runner: ubuntu-slim
       runtime-repository: 0xPlayerOne/code-foundry
