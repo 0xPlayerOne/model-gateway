@@ -275,12 +275,16 @@ pub fn parse_models_dev_canonical_identities(
     })
 }
 
-fn fetch_json(url: &str) -> Result<Value, String> {
+fn http_client() -> Result<Client, String> {
     Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent(concat!("model-gateway/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_json(client: &Client, url: &str) -> Result<Value, String> {
+    client
         .get(url)
         .header("Accept", "application/json")
         .send()
@@ -292,10 +296,24 @@ fn fetch_json(url: &str) -> Result<Value, String> {
 }
 
 pub fn fetch_identity_sources() -> Result<Vec<IdentityImport>, String> {
+    const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+    const CANONICAL_URL: &str = "https://models.dev/models.json";
+    const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/models";
+
     let observed_at = now_seconds()?;
-    let models_dev = fetch_json("https://models.dev/api.json")?;
-    let canonical = fetch_json("https://models.dev/models.json")?;
-    let openrouter = fetch_json("https://openrouter.ai/api/v1/models")?;
+    let client = http_client()?;
+    let (models_dev, canonical, openrouter) = std::thread::scope(|scope| {
+        let models_dev = scope.spawn(|| fetch_json(&client, MODELS_DEV_URL));
+        let canonical = scope.spawn(|| fetch_json(&client, CANONICAL_URL));
+        let openrouter = scope.spawn(|| fetch_json(&client, OPENROUTER_URL));
+        (models_dev.join(), canonical.join(), openrouter.join())
+    });
+    let models_dev =
+        models_dev.map_err(|_| "models.dev identity fetch thread panicked".to_owned())??;
+    let canonical =
+        canonical.map_err(|_| "models.dev canonical fetch thread panicked".to_owned())??;
+    let openrouter =
+        openrouter.map_err(|_| "OpenRouter identity fetch thread panicked".to_owned())??;
     let mut models_dev = parse_models_dev_identities(&models_dev, observed_at)?;
     let openrouter = parse_openrouter_identities(&openrouter, observed_at)?;
     let canonical = parse_models_dev_canonical_identities(&canonical, observed_at)?;
