@@ -2,7 +2,7 @@
 name = "model-gateway"
 version = "0.12.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.88"
 license = "AGPL-3.0-or-later"
 description = "A local OpenAI-compatible model gateway"
 readme = "README.md"
@@ -25,8 +25,8 @@ dialoguer = "0.12"
 futures-util = "0.3"
 getrandom = "0.4"
 httpdate = "1"
-keyring = { version = "3.6", features = ["apple-native", "linux-native"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
+keyring = "4"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "stream"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }

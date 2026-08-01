@@ -125,6 +125,7 @@ fn is_missing_keychain_error(error: &keyring::Error) -> bool {
     let message = error.to_string().to_lowercase();
     message.contains("no entry")
         || message.contains("no matching entry")
+        || message.contains("no matching credential")
         || message.contains("not found")
         || message.contains("could not be found")
         || message.contains("no such")
