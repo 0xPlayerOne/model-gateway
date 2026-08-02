@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.14.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.13.0...v0.14.0) (2026-08-02)
+
+### Features
+
+* **api:** add deterministic field projection, cursor pagination, model links, and conditional catalog retrieval ([6f99e02](https://github.com/0xPlayerOne/model-gateway/commit/6f99e0277e75e45957ad9ae26ad2a0175cde1a23))
+* **runtime:** add explicit CLIProxy port configuration, OAuth readiness diagnostics, and supervised launchers ([6f99e02](https://github.com/0xPlayerOne/model-gateway/commit/6f99e0277e75e45957ad9ae26ad2a0175cde1a23))
+
+### Performance Improvements
+
+* **catalog:** derive list validators from request dimensions and return conditional responses before materializing catalog data ([6f99e02](https://github.com/0xPlayerOne/model-gateway/commit/6f99e0277e75e45957ad9ae26ad2a0175cde1a23))
+
+### Bug Fixes
+
+* **api:** preserve stable `Last-Modified` values when benchmark timestamps are unavailable ([6f99e02](https://github.com/0xPlayerOne/model-gateway/commit/6f99e0277e75e45957ad9ae26ad2a0175cde1a23))
+* **build:** align the container builder with the repository Rust toolchain and include the OpenAPI contract in the image ([6f99e02](https://github.com/0xPlayerOne/model-gateway/commit/6f99e0277e75e45957ad9ae26ad2a0175cde1a23))
+
+### Documentation
+
+* **docs:** clarify catalog response shapes, benchmark provenance, provider readiness, and startup behavior ([6f99e02](https://github.com/0xPlayerOne/model-gateway/commit/6f99e0277e75e45957ad9ae26ad2a0175cde1a23))
+
 ## [0.13.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.12.0...v0.13.0) (2026-08-02)
 
 
