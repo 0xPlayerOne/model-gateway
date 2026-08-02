@@ -1782,6 +1782,7 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
                 "time_to_first_answer_seconds": model.time_to_first_answer_seconds,
                 "end_to_end_response_seconds": model.end_to_end_response_seconds,
                 "output_tokens_per_second": model.output_tokens_per_second,
+                "output_tokens_per_task": model.output_tokens_per_task,
                 "reasoning_effort": model.reasoning_effort,
                 "as_of": model.as_of,
                 "release_date": model.release_date
@@ -2967,6 +2968,7 @@ struct ModeModelValue<'a> {
     time_to_first_answer_seconds: Option<f64>,
     end_to_end_response_seconds: Option<f64>,
     output_tokens_per_second: Option<f64>,
+    output_tokens_per_task: Option<u64>,
     reasoning_effort: Option<&'a str>,
     as_of: Option<&'a str>,
 }
@@ -3418,6 +3420,7 @@ fn select_mode_models(
                     .and_then(|b| b.time_to_first_answer_seconds),
                 end_to_end_response_seconds: benchmark.and_then(|b| b.end_to_end_response_seconds),
                 output_tokens_per_second: benchmark.and_then(|b| b.output_tokens_per_second),
+                output_tokens_per_task: benchmark.and_then(|b| b.output_tokens_per_task),
                 reasoning_effort: benchmark.and_then(|b| b.reasoning_effort.as_deref()),
                 as_of: benchmark.and_then(|b| b.as_of.as_deref()),
             },
@@ -3637,6 +3640,7 @@ fn mode_model_entry(
         "time_to_first_answer_seconds": candidate.value.time_to_first_answer_seconds,
         "end_to_end_response_seconds": candidate.value.end_to_end_response_seconds,
         "output_tokens_per_second": candidate.value.output_tokens_per_second,
+        "output_tokens_per_task": candidate.value.output_tokens_per_task,
         "pricing_eligible": candidate.value.pricing_eligible,
         "benchmark_match": candidate.value.match_kind.map(ModelMatchKind::as_str),
         "access": {
@@ -6852,6 +6856,7 @@ mod tests {
                 time_to_first_answer_seconds: benchmark.time_to_first_answer_seconds,
                 end_to_end_response_seconds: benchmark.end_to_end_response_seconds,
                 output_tokens_per_second: benchmark.output_tokens_per_second,
+                output_tokens_per_task: benchmark.output_tokens_per_task,
                 reasoning_effort: benchmark.reasoning_effort.as_deref(),
                 as_of: benchmark.as_of.as_deref(),
             },
@@ -6878,6 +6883,7 @@ mod tests {
         assert_eq!(entry["cost_source"], "artificial_analysis_task");
         assert_eq!(entry["latency_available"], true);
         assert_eq!(entry["latency_seconds"], 0.7);
+        assert_eq!(entry["output_tokens_per_task"], 1024);
 
         // Estimated: no measured task cost, price-derived estimate; missing
         // latency and revision metadata stay explicit nulls.
@@ -6970,12 +6976,14 @@ mod tests {
         assert_eq!(luna["cost_source"], "measured");
         assert_eq!(luna["latency_available"], true);
         assert_eq!(luna["latency_seconds"], 0.7);
+        assert_eq!(luna["output_tokens_per_task"], 1024);
         assert_eq!(luna["rank"], 1);
         let sol = by_id("gpt-5-6-sol");
         assert_eq!(sol["as_of"], Value::Null);
         assert_eq!(sol["cost_source"], "unavailable");
         assert_eq!(sol["latency_available"], false);
         assert_eq!(sol["latency_seconds"], Value::Null);
+        assert_eq!(sol["output_tokens_per_task"], 1024);
         assert_eq!(sol["rank"], 2);
     }
 
