@@ -125,14 +125,37 @@ fn is_missing_keychain_error(error: &keyring::Error) -> bool {
     let message = error.to_string().to_lowercase();
     message.contains("no entry")
         || message.contains("no matching entry")
+        || message.contains("no matching credential")
         || message.contains("not found")
         || message.contains("could not be found")
         || message.contains("no such")
 }
 
+/// Returns true when the error means the platform keychain store itself is
+/// unavailable (for example, no Secret Service daemon on headless Linux), as
+/// opposed to a missing credential or a real keychain I/O failure. Reads treat
+/// an unavailable store as "no credential" so the gateway can start without a
+/// desktop keychain; writes must still surface the error instead of silently
+/// falling back to an insecure store.
+fn is_unavailable_keychain_error(error: &SecretError) -> bool {
+    match error {
+        SecretError::Keychain(message) => {
+            let message = message.to_lowercase();
+            message.contains("no default store")
+                || message.contains("cannot search or create entries")
+        }
+        _ => false,
+    }
+}
+
 impl SecretStore for KeychainSecretStore {
     fn get(&self, name: &str) -> Result<Option<String>, SecretError> {
-        match Self::entry(name)?.get_password() {
+        let entry = match Self::entry(name) {
+            Ok(entry) => entry,
+            Err(error) if is_unavailable_keychain_error(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        match entry.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(error) if is_missing_keychain_error(&error) => Ok(None),
             Err(error) => Err(SecretError::Keychain(error.to_string())),
@@ -327,7 +350,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
-    use super::{FileSecretStore, SecretError, SecretResolver, SecretStore, validate_secret_name};
+    use super::{
+        FileSecretStore, KeychainSecretStore, SecretError, SecretResolver, SecretStore,
+        is_unavailable_keychain_error, validate_secret_name,
+    };
 
     #[derive(Default)]
     struct FakeSecretStore {
@@ -542,5 +568,57 @@ mod tests {
         assert!(matches!(err, SecretError::Keychain(_)));
         let err = store.remove("MG_TEST_ENV_REMOVE").expect_err("should fail");
         assert!(matches!(err, SecretError::Keychain(_)));
+    }
+
+    #[test]
+    fn unavailable_keychain_error_is_classified_for_reads() {
+        // Headless Linux: keyring Entry::new fails with this exact message when
+        // no Secret Service daemon is available.
+        let error = SecretError::Keychain(
+            "No default store has been set, so cannot search or create entries".to_owned(),
+        );
+        assert!(is_unavailable_keychain_error(&error));
+        let error = SecretError::Keychain(
+            "Cannot search or create entries: platform store unavailable".to_owned(),
+        );
+        assert!(is_unavailable_keychain_error(&error));
+    }
+
+    #[test]
+    fn missing_entry_and_unrelated_errors_are_not_unavailable_store_errors() {
+        for message in [
+            "no entry found",
+            "no matching entry",
+            "No matching credential found",
+            "not found",
+            "could not be found",
+            "no such file or directory",
+            "Couldn't access platform storage: keychain locked",
+        ] {
+            let error = SecretError::Keychain(message.to_owned());
+            assert!(
+                !is_unavailable_keychain_error(&error),
+                "{message:?} must not be classified as an unavailable store"
+            );
+        }
+        assert!(!is_unavailable_keychain_error(&SecretError::InvalidName(
+            "x".to_owned()
+        )));
+        assert!(!is_unavailable_keychain_error(&SecretError::InvalidStore(
+            "x".to_owned()
+        )));
+    }
+
+    #[test]
+    fn keychain_get_returns_none_when_store_unavailable_or_entry_absent() {
+        // Passes on headless Linux (Entry::new fails with NoDefaultStore, treated
+        // as no credential) and on keychain-backed platforms (missing entry).
+        let store = KeychainSecretStore;
+        assert_eq!(
+            store
+                .get("MG_TEST_ABSENT_KEYCHAIN_KEY")
+                .expect("read must not fail"),
+            None
+        );
     }
 }
