@@ -68,6 +68,9 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
+      - name: Install repository Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
+
       - name: Build release binary
         run: cargo build --release --locked
 
