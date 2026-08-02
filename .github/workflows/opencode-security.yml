@@ -41,7 +41,8 @@ jobs:
     if: needs.detect.outputs.enabled == 'true' && needs.detect.outputs.token == 'true'
     uses: 0xPlayerOne/opencode-security/.github/workflows/opencode-security.yml@b3dce823322672b285fbe99b870ea984c01826cb # main
     with:
-      source_ref: ${{ github.event.pull_request.head.ref || 'main' }}
+      # source_ref selects the scanner revision; the scan target stays the model-gateway PR head checkout.
+      source_ref: b3dce823322672b285fbe99b870ea984c01826cb
       runner: ubuntu-latest
       mode: standard
       fail_on_severity: high
