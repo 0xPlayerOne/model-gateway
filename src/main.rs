@@ -273,7 +273,7 @@ fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
                 )
                 .into());
             }
-            let (api_key, api_key_store) = match std::env::var(CLI_PROXY_API_KEY_SECRET) {
+            let (api_key, _) = match std::env::var(CLI_PROXY_API_KEY_SECRET) {
                 Ok(value) if !value.trim().is_empty() => (value, "environment"),
                 Ok(_) => {
                     return Err(format!(
@@ -324,7 +324,7 @@ fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
             println!("Installed binary: {}", paths.binary.display());
             println!("Generated config: {}", paths.config.display());
             println!("OAuth directory: {}", paths.auth_dir.display());
-            println!("Stored the CLIProxyAPI frontend key in the {api_key_store} secret store");
+            println!("Stored the CLIProxyAPI frontend key in a secret store");
             println!("Added provider '{CLI_PROXY_PROVIDER_KEY}' with subscription billing");
             println!("Next: model-gateway cli-proxy login claude");
             println!("      model-gateway cli-proxy login codex --device");
