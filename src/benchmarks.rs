@@ -125,6 +125,15 @@ impl BenchmarkModel {
             }
         }
         if self
+            .output_tokens_per_task
+            .is_some_and(|value| value > i64::MAX as u64)
+        {
+            return Err(format!(
+                "benchmark output size for '{}' exceeds the storage limit",
+                self.id
+            ));
+        }
+        if self
             .as_of
             .as_ref()
             .is_some_and(|value| value.trim().is_empty() || value.len() > 64)
@@ -435,13 +444,15 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
             let evaluations = item.get("evaluations").unwrap_or(&Value::Null);
             let pricing = item.get("pricing").unwrap_or(&Value::Null);
             let performance = item.get("performance").unwrap_or(&Value::Null);
+            let id = item
+                .get("slug")
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| "Artificial Analysis model lacked an ID".to_owned())?
+                .to_owned();
+            let output_tokens_per_task = aa_output_tokens_per_task(performance, &id)?;
             let model = BenchmarkModel {
-                id: item
-                    .get("slug")
-                    .or_else(|| item.get("name"))
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "Artificial Analysis model lacked an ID".to_owned())?
-                    .to_owned(),
+                id,
                 creator: item
                     .get("model_creator")
                     .and_then(|creator| creator.get("name"))
@@ -502,7 +513,7 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                     "median_end_to_end_response_time_seconds",
                 ),
                 output_tokens_per_second: number(performance, "median_output_tokens_per_second"),
-                output_tokens_per_task: None,
+                output_tokens_per_task,
                 reasoning_effort: aa_reasoning_effort(item),
                 // Provenance comes only from the source payload. Never invent a
                 // per-model revision date from the local fetch time: an invented
@@ -541,6 +552,41 @@ fn parse_number(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
+}
+
+/// Reads an explicitly published output-size measurement. Do not infer this
+/// from latency and throughput: Artificial Analysis documents its end-to-end
+/// latency convention separately, and that inference would turn a source
+/// convention into a model-specific measurement.
+fn aa_output_tokens_per_task(value: &Value, model_id: &str) -> Result<Option<u64>, String> {
+    let Some(raw) = value.get("output_tokens_per_task") else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let parsed = raw
+        .as_u64()
+        .or_else(|| {
+            let number = raw.as_f64()?;
+            (number.is_finite()
+                && number >= 0.0
+                && number <= i64::MAX as f64
+                && number.fract() == 0.0)
+                .then_some(number as u64)
+        })
+        .or_else(|| raw.as_str()?.trim().parse::<u64>().ok())
+        .ok_or_else(|| {
+            format!(
+                "Artificial Analysis output_tokens_per_task for '{model_id}' must be a non-negative integer"
+            )
+        })?;
+    if parsed > i64::MAX as u64 {
+        return Err(format!(
+            "Artificial Analysis output_tokens_per_task for '{model_id}' exceeds the storage limit"
+        ));
+    }
+    Ok(Some(parsed))
 }
 
 /// Reads the source-published revision marker for a benchmark row.
@@ -680,7 +726,8 @@ mod tests {
             "performance": {
                 "median_output_tokens_per_second": 296.47,
                 "median_time_to_first_answer_token_seconds": 7.4,
-                "median_end_to_end_response_time_seconds": 9.09
+                "median_end_to_end_response_time_seconds": 9.09,
+                "output_tokens_per_task": 1024
             }
         }]}))
         .expect("Artificial Analysis fixture");
@@ -690,6 +737,41 @@ mod tests {
         assert_eq!(models[0].cost_per_task_microusd(), Some(167_800));
         assert_eq!(models[0].frontier_latency_seconds(), Some(9.09));
         assert_eq!(models[0].output_tokens_per_second, Some(296.47));
+        assert_eq!(models[0].output_tokens_per_task, Some(1024));
+    }
+
+    #[test]
+    fn aa_parser_keeps_missing_response_size_unobserved() {
+        let models = parse_artificial_analysis(&json!({"data": [{
+            "slug": "without-response-size",
+            "performance": {
+                "median_output_tokens_per_second": 296.47,
+                "median_end_to_end_response_time_seconds": 9.09
+            }
+        }]}))
+        .expect("Artificial Analysis fixture");
+        assert_eq!(models[0].output_tokens_per_task, None);
+    }
+
+    #[test]
+    fn aa_parser_rejects_invalid_response_size_measurements() {
+        for value in [json!(-1), json!(1.5), json!("not-a-count")] {
+            assert!(
+                parse_artificial_analysis(&json!({"data": [{
+                    "slug": "invalid-response-size",
+                    "performance": {"output_tokens_per_task": value}
+                }]}))
+                .is_err(),
+                "invalid output size should fail closed: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_response_sizes_that_cannot_fit_storage() {
+        let mut model = BenchmarkModel::fixture("oversized-response", 50.0, 50.0, 50.0, 1.0, 1.0);
+        model.output_tokens_per_task = Some(i64::MAX as u64 + 1);
+        assert!(model.validate().is_err());
     }
 
     #[test]
