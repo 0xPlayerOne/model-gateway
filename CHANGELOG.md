@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.2](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.1...v0.14.2) (2026-08-02)
+
+
+### Bug Fixes
+
+* **ci:** align release toolchain with sqlite dependencies ([a5a6c3e](https://github.com/0xPlayerOne/model-gateway/commit/a5a6c3efeb7d6ad920dd0bb1e147feb3181de751))
+* **release:** version the OpenAPI contract ([ebed12c](https://github.com/0xPlayerOne/model-gateway/commit/ebed12cdcecab8b9682561acd6542dd806f92429))
+
 ## [0.14.1](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.0...v0.14.1) (2026-08-02)
 
 
