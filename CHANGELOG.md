@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.12.0...v0.13.0) (2026-08-02)
+
+
+### Performance Improvements
+
+* **identity:** fetch identity sources concurrently ([#97](https://github.com/0xPlayerOne/model-gateway/issues/97)) ([5839314](https://github.com/0xPlayerOne/model-gateway/commit/583931457fe62176c038e9650824d326b59adf65))
+
 ## [0.12.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.11.0...v0.12.0) (2026-07-29)
 
 
