@@ -336,7 +336,7 @@ impl RoutingStore {
         };
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 10 {
+        if version > 11 {
             return Err(RoutingError::UnsupportedSchema(version));
         }
         connection.execute_batch(
@@ -384,6 +384,11 @@ impl RoutingStore {
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS catalog_revisions (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 revision INTEGER NOT NULL
+             );
+             INSERT OR IGNORE INTO catalog_revisions(id, revision) VALUES (1, 0);
              CREATE TABLE IF NOT EXISTS benchmark_snapshots (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  source TEXT NOT NULL,
@@ -554,11 +559,12 @@ impl RoutingStore {
         ensure_benchmark_columns(&connection)?;
         ensure_benchmark_snapshot_columns(&connection)?;
         ensure_pricing_snapshot_columns(&connection)?;
+        ensure_catalog_revision_triggers(&connection)?;
         connection.execute(
             "DELETE FROM benchmark_snapshots WHERE source = 'pricing-overrides'",
             [],
         )?;
-        connection.pragma_update(None, "user_version", 10)?;
+        connection.pragma_update(None, "user_version", 11)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -659,6 +665,18 @@ impl RoutingStore {
             |row| row.get(0),
         )?;
         Ok(modified.unwrap_or_default())
+    }
+
+    /// Returns the persisted revision for all data that can change a catalog
+    /// response. SQLite triggers maintain this value for writes from this
+    /// process and other processes using the same database file.
+    pub fn catalog_revision(&self) -> Result<i64, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        Ok(connection.query_row(
+            "SELECT revision FROM catalog_revisions WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn replace_identity_source(&self, import: &IdentityImport) -> Result<i64, RoutingError> {
@@ -2645,6 +2663,47 @@ fn ensure_pricing_snapshot_columns(connection: &Connection) -> Result<(), rusqli
     Ok(())
 }
 
+/// Schema v11: maintain a durable catalog revision for cache invalidation.
+/// Triggers cover every persisted input that can affect catalog responses so
+/// updates made by a refresh task or another process are observed equally.
+fn ensure_catalog_revision_triggers(connection: &Connection) -> Result<(), rusqlite::Error> {
+    const TABLES: &[&str] = &[
+        "catalog_models",
+        "provider_account_limits",
+        "benchmark_snapshots",
+        "benchmark_models",
+        "pricing_snapshots",
+        "price_observations",
+        "identity_snapshots",
+        "model_entities",
+        "model_identity_aliases",
+        "benchmark_identity_links",
+        "approved_model_mappings",
+        "approved_entity_aliases",
+    ];
+
+    for table in TABLES {
+        connection.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS catalog_revision_{table}_insert
+             AFTER INSERT ON {table}
+             BEGIN
+                 UPDATE catalog_revisions SET revision = revision + 1 WHERE id = 1;
+             END;
+             CREATE TRIGGER IF NOT EXISTS catalog_revision_{table}_update
+             AFTER UPDATE ON {table}
+             BEGIN
+                 UPDATE catalog_revisions SET revision = revision + 1 WHERE id = 1;
+             END;
+             CREATE TRIGGER IF NOT EXISTS catalog_revision_{table}_delete
+             AFTER DELETE ON {table}
+             BEGIN
+                 UPDATE catalog_revisions SET revision = revision + 1 WHERE id = 1;
+             END;"
+        ))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn epoch_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2898,7 +2957,7 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     #[test]
@@ -2937,7 +2996,7 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     #[test]
@@ -2966,7 +3025,7 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         let columns = connection
             .prepare("PRAGMA table_info(benchmark_snapshots)")
             .expect("columns")
@@ -3334,6 +3393,39 @@ mod tests {
             .approve_model_mapping("provider-a", "catalog-model", "benchmark-v1")
             .expect("approve mapping");
         assert!(store.identity_last_modified().expect("updated timestamp") > 0);
+    }
+
+    #[test]
+    fn catalog_revision_tracks_persistent_catalog_inputs() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("routing.sqlite3");
+        let store = RoutingStore::open(Some(&path)).expect("store");
+        let initial = store.catalog_revision().expect("initial revision");
+
+        store
+            .replace_catalog("provider-a", &[catalog("model-a", false)])
+            .expect("catalog");
+        let after_catalog = store.catalog_revision().expect("catalog revision");
+        assert!(after_catalog > initial);
+
+        store
+            .approve_model_mapping("provider-a", "model-a", "benchmark-a")
+            .expect("mapping");
+        let after_mapping = store.catalog_revision().expect("mapping revision");
+        assert!(after_mapping > after_catalog);
+
+        // A write through a second connection is covered by the same
+        // persistent trigger set, which is the cross-process cache guarantee.
+        rusqlite::Connection::open(&path)
+            .expect("second connection")
+            .execute(
+                "INSERT INTO provider_account_limits(
+                    provider, fetched_at, limit_value, usage, remaining, is_free_tier
+                 ) VALUES (?1, ?2, NULL, NULL, NULL, NULL)",
+                rusqlite::params!["provider-a", super::epoch_seconds()],
+            )
+            .expect("account limit");
+        assert!(store.catalog_revision().expect("external revision") > after_mapping);
     }
 
     #[test]
