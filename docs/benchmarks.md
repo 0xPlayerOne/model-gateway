@@ -102,6 +102,15 @@ when every candidate is missing latency, the latency axis is diagnostic only
 and cannot affect the result. `/v1/auto-models` reports the same state through
 `latency_observed` and each full candidate's `latency_available` field.
 
+`output_tokens_per_task` is also fail-closed. The gateway accepts it only when
+the source publishes an explicit integer measurement at that field; it never
+derives a model-specific output size from throughput and latency. Artificial
+Analysis documents its end-to-end latency as assuming 500 answer tokens, so
+using that convention as an inferred per-model measurement would make the
+diagnostic look more precise than the source data supports. The current free
+Artificial Analysis feed does not publish this field, so `null` is expected
+until a source or custom benchmark import provides it.
+
 ### Task-Specific Quality
 
 The `classify()` function maps each request to one of three task types, and `quality_for()` selects the corresponding score:
