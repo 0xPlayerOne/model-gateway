@@ -5147,6 +5147,83 @@ async fn reserved_alias_auto_balanced_is_rejected() {
 }
 
 #[tokio::test]
+async fn catalog_cache_invalidates_immediately_after_persistent_revision() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let mut config = config_for(
+        BTreeMap::from([(
+            "fixture".to_owned(),
+            provider("https://fixture.example/v1".to_owned()),
+        )]),
+        vec![TargetConfig {
+            provider: "fixture".to_owned(),
+            model: "old-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path.clone());
+
+    RoutingStore::open(Some(&state_path))
+        .expect("routing store")
+        .replace_catalog(
+            "fixture",
+            &[CatalogRecord {
+                model: "old-model".to_owned(),
+                access_kind: AccessKind::ZeroPrice,
+                context_length: None,
+                supports_tools: None,
+                supports_vision: None,
+                supports_structured_output: None,
+                input_price_per_million: Some(0.0),
+                output_price_per_million: Some(0.0),
+            }],
+        )
+        .expect("initial catalog");
+
+    let gateway = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+    let initial: Value = client
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&provider=fixture&limit=10"
+        ))
+        .send()
+        .await
+        .expect("initial catalog response")
+        .json()
+        .await
+        .expect("initial catalog body");
+    assert_eq!(initial["data"][0]["id"], "fixture/old-model");
+
+    RoutingStore::open(Some(&state_path))
+        .expect("reopened routing store")
+        .replace_catalog(
+            "fixture",
+            &[CatalogRecord {
+                model: "new-model".to_owned(),
+                access_kind: AccessKind::ZeroPrice,
+                context_length: None,
+                supports_tools: None,
+                supports_vision: None,
+                supports_structured_output: None,
+                input_price_per_million: Some(0.0),
+                output_price_per_million: Some(0.0),
+            }],
+        )
+        .expect("revised catalog");
+
+    let revised: Value = client
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=free&provider=fixture&limit=10"
+        ))
+        .send()
+        .await
+        .expect("revised catalog response")
+        .json()
+        .await
+        .expect("revised catalog body");
+    assert_eq!(revised["data"][0]["id"], "fixture/new-model");
+}
+
+#[tokio::test]
 async fn health_diagnostics_reports_credentials_and_catalog_separately() {
     let upstream = spawn_provider(ProviderResponse::Success).await;
     let directory = tempfile::tempdir().expect("state directory");
