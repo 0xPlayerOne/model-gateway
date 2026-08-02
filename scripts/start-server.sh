@@ -24,6 +24,17 @@ if [ -f "$ENV_LOCAL" ]; then
     set +a
 fi
 
+# Unattended startup must be deterministic and non-interactive: default to the
+# protected-file secret store unless the operator explicitly chose another
+# store (e.g. MODEL_GATEWAY_SECRET_STORE=keychain in .env.local for
+# intentional interactive/keychain use).
+if [ -z "${MODEL_GATEWAY_SECRET_STORE:-}" ]; then
+    export MODEL_GATEWAY_SECRET_STORE=file
+    echo "Secret store: protected-file (non-interactive default; set MODEL_GATEWAY_SECRET_STORE=keychain to use the OS keychain)" >&2
+else
+    echo "Secret store: $MODEL_GATEWAY_SECRET_STORE (MODEL_GATEWAY_SECRET_STORE is set explicitly)" >&2
+fi
+
 FOLLOW=false
 if [ "${1:-}" = "--follow" ] || [ "${1:-}" = "-f" ]; then
     FOLLOW=true

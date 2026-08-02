@@ -59,7 +59,7 @@ api_key_secret = "ZAI_API_KEY"
 billing_mode = "paid"
 
 [models.deepseek]
-targets = [{ provider = "deepseek", model = "deepseek-chat" }]
+targets = [{ provider = "deepseek", model = "deepseek-v4-flash" }]
 
 [models.fireworks]
 targets = [{ provider = "fireworks", model = "accounts/fireworks/models/llama-v3p1-8b-instruct" }]

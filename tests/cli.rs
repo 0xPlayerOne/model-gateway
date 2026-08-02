@@ -779,3 +779,331 @@ pricing_profile = "fixture"
     environment(&mut invalid);
     assert!(!invalid.status().expect("invalid approval").success());
 }
+
+/// Minimal canned HTTP server for CLI commands that need a reachable endpoint.
+/// Accepts any request on the listener thread and replies with `response`.
+fn spawn_stub_server(response: &'static str) -> std::net::SocketAddr {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub bind");
+    let address = listener.local_addr().expect("stub address");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            std::thread::spawn(move || {
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer);
+                let _ = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+    address
+}
+
+fn http_ok(body: &'static str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+#[test]
+fn healthcheck_passes_against_a_ready_gateway_stub() {
+    let address = spawn_stub_server(Box::leak(http_ok(r#"{"status":"ready"}"#).into_boxed_str()));
+    let output = Command::new(env!("CARGO_BIN_EXE_model-gateway"))
+        .args(["healthcheck", "--endpoint", &format!("http://{address}")])
+        .output()
+        .expect("run healthcheck");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn healthcheck_fails_when_the_gateway_is_unreachable() {
+    // Reserve a port and drop the listener so nothing answers.
+    let address = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.local_addr().expect("address")
+    };
+    let output = Command::new(env!("CARGO_BIN_EXE_model-gateway"))
+        .args(["healthcheck", "--endpoint", &format!("http://{address}")])
+        .output()
+        .expect("run healthcheck");
+    assert!(!output.status.success());
+}
+
+#[test]
+fn benchmark_status_reports_no_active_snapshots() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
+        .args(["benchmarks", "status"])
+        .env(
+            "MODEL_GATEWAY_CONFIG",
+            directory.path().join("missing.toml"),
+        )
+        .env(
+            "MODEL_GATEWAY_STATE_PATH",
+            directory.path().join("routing.sqlite3"),
+        )
+        .env("MODEL_GATEWAY_SECRET_STORE", "environment")
+        .output()
+        .expect("run benchmark status");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout"),
+        "No active benchmark snapshots\n"
+    );
+}
+
+#[test]
+fn pricing_status_reports_snapshot_kind_and_count() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let config_path = directory.path().join("config.toml");
+    let state_path = directory.path().join("routing.sqlite3");
+    std::fs::write(
+        &config_path,
+        r#"
+[providers.fixture]
+adapter = "openai_chat"
+base_url = "http://localhost:8000/v1"
+"#,
+    )
+    .expect("write config");
+    let store = RoutingStore::open(Some(&state_path)).expect("store");
+    store
+        .replace_pricing(
+            "models.dev",
+            PriceSourceKind::ModelsDev,
+            "Fixture attribution",
+            &[PriceObservation {
+                source: "models.dev".to_owned(),
+                source_kind: PriceSourceKind::ModelsDev,
+                scope: PriceScope::ProviderProfile,
+                provider_key: Some("fixture".to_owned()),
+                model_id: "mimo-v2-pro".to_owned(),
+                rates: PriceRates {
+                    input_price_per_million: Some(1.0),
+                    output_price_per_million: Some(2.0),
+                    ..PriceRates::default()
+                },
+                fetched_at: Some(7),
+                as_of: None,
+                valid_from: None,
+                valid_until: None,
+                attribution: None,
+            }],
+        )
+        .expect("pricing snapshot");
+    drop(store);
+    let output = Command::new(env!("CARGO_BIN_EXE_model-gateway"))
+        .args(["pricing", "status"])
+        .env("MODEL_GATEWAY_CONFIG", &config_path)
+        .env("MODEL_GATEWAY_STATE_PATH", &state_path)
+        .env("MODEL_GATEWAY_SECRET_STORE", "environment")
+        .output()
+        .expect("run pricing status");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains("models.dev: kind=models_dev, 1 observations"));
+    assert!(stdout.contains("fetched_at="));
+    assert!(stdout.contains("attribution=Fixture attribution"));
+}
+
+#[test]
+fn catalog_status_reports_seeded_provider_models() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let config_path = directory.path().join("config.toml");
+    let state_path = directory.path().join("routing.sqlite3");
+    std::fs::write(
+        &config_path,
+        r#"
+[providers.fixture]
+adapter = "openai_chat"
+base_url = "http://localhost:8000/v1"
+"#,
+    )
+    .expect("write config");
+    let store = RoutingStore::open(Some(&state_path)).expect("store");
+    store
+        .replace_catalog(
+            "fixture",
+            &[
+                CatalogRecord {
+                    model: "model-a".to_owned(),
+                    access_kind: AccessKind::Paid,
+                    context_length: None,
+                    supports_tools: None,
+                    supports_vision: None,
+                    supports_structured_output: None,
+                    input_price_per_million: None,
+                    output_price_per_million: None,
+                },
+                CatalogRecord {
+                    model: "model-b".to_owned(),
+                    access_kind: AccessKind::Paid,
+                    context_length: None,
+                    supports_tools: None,
+                    supports_vision: None,
+                    supports_structured_output: None,
+                    input_price_per_million: None,
+                    output_price_per_million: None,
+                },
+            ],
+        )
+        .expect("catalog");
+    drop(store);
+    let output = Command::new(env!("CARGO_BIN_EXE_model-gateway"))
+        .args(["catalog", "status"])
+        .env("MODEL_GATEWAY_CONFIG", &config_path)
+        .env("MODEL_GATEWAY_STATE_PATH", &state_path)
+        .env("MODEL_GATEWAY_SECRET_STORE", "environment")
+        .output()
+        .expect("run catalog status");
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .expect("stdout")
+            .contains("fixture: 2 models, refreshed_at=")
+    );
+}
+
+#[test]
+fn credentials_list_reports_file_store_sources_without_values() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let config_path = directory.path().join("config.toml");
+    let secret_dir = directory.path().join("secrets");
+    std::fs::create_dir(&secret_dir).expect("secret dir");
+    std::fs::write(secret_dir.join("FIXTURE_API_KEY"), "fixture-secret").expect("secret file");
+    std::fs::write(
+        &config_path,
+        r#"
+[providers.fixture]
+adapter = "openai_chat"
+base_url = "http://localhost:8000/v1"
+api_key_secret = "FIXTURE_API_KEY"
+
+[providers.locked]
+adapter = "openai_chat"
+base_url = "http://localhost:8001/v1"
+api_key_secret = "MISSING_API_KEY"
+"#,
+    )
+    .expect("write config");
+    let output = Command::new(env!("CARGO_BIN_EXE_model-gateway"))
+        .args(["credentials", "list"])
+        .env("MODEL_GATEWAY_CONFIG", &config_path)
+        .env("MODEL_GATEWAY_SECRET_STORE", "file")
+        .env("MODEL_GATEWAY_SECRET_DIR", &secret_dir)
+        .output()
+        .expect("run credentials list");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains("FIXTURE_API_KEY: protected-file"));
+    assert!(stdout.contains("MISSING_API_KEY: unavailable"));
+    assert!(!stdout.contains("fixture-secret"));
+}
+
+#[test]
+fn environment_secret_store_does_not_fall_back_to_secret_files() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let config_path = directory.path().join("config.toml");
+    let secret_dir = directory.path().join("secrets");
+    std::fs::create_dir(&secret_dir).expect("secret dir");
+    std::fs::write(secret_dir.join("FIXTURE_API_KEY"), "fixture-secret").expect("secret file");
+    std::fs::write(
+        &config_path,
+        r#"
+[providers.fixture]
+adapter = "openai_chat"
+base_url = "http://localhost:8000/v1"
+api_key_secret = "FIXTURE_API_KEY"
+"#,
+    )
+    .expect("write config");
+    let output = Command::new(env!("CARGO_BIN_EXE_model-gateway"))
+        .args(["credentials", "list"])
+        .env("MODEL_GATEWAY_CONFIG", &config_path)
+        .env("MODEL_GATEWAY_SECRET_STORE", "environment")
+        .env("MODEL_GATEWAY_SECRET_DIR", &secret_dir)
+        .env_remove("FIXTURE_API_KEY")
+        .output()
+        .expect("run credentials list");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains("FIXTURE_API_KEY: unavailable"));
+    assert!(!stdout.contains("protected-file"));
+    assert!(!stdout.contains("fixture-secret"));
+}
+
+#[test]
+fn cli_proxy_status_reports_ready_against_a_live_sidecar() {
+    let address = spawn_stub_server(Box::leak(
+        http_ok(r#"{"data":[{"id":"model-a"},{"id":"model-b"}]}"#).into_boxed_str(),
+    ));
+    let directory = tempfile::tempdir().expect("tempdir");
+    let config_path = directory.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[providers.cli-proxy]
+profile = "cli_proxy_api"
+adapter = "openai_chat"
+base_url = "http://{address}/v1"
+api_key_secret = "CLI_PROXY_API_KEY"
+"#
+        ),
+    )
+    .expect("write config");
+    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
+        .args(["cli-proxy", "status"])
+        .env("MODEL_GATEWAY_CONFIG", &config_path)
+        .env("MODEL_GATEWAY_SECRET_STORE", "environment")
+        .env("CLI_PROXY_API_KEY", "fixture-sidecar-key")
+        .output()
+        .expect("run cli-proxy status");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .expect("stdout")
+            .contains("ready, 2 models")
+    );
+}
+
+#[test]
+fn cli_proxy_status_rejects_malformed_model_lists() {
+    let address = spawn_stub_server(Box::leak(
+        http_ok(r#"{"data":{"id":"not-an-array"}}"#).into_boxed_str(),
+    ));
+    let directory = tempfile::tempdir().expect("config directory");
+    let config_path = directory.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[providers.cli-proxy]
+profile = "cli_proxy_api"
+adapter = "openai_chat"
+base_url = "http://{address}/v1"
+api_key_secret = "CLI_PROXY_API_KEY"
+"#
+        ),
+    )
+    .expect("write config");
+    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
+        .args(["cli-proxy", "status"])
+        .env("MODEL_GATEWAY_CONFIG", &config_path)
+        .env("MODEL_GATEWAY_SECRET_STORE", "environment")
+        .env("CLI_PROXY_API_KEY", "fixture-sidecar-key")
+        .output()
+        .expect("run cli-proxy status");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("expected a data array"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("ready"));
+}

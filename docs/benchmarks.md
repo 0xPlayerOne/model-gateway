@@ -24,11 +24,16 @@ export ARTIFICIAL_ANALYSIS_API_KEY="your-key-here"
 
 ### 3. Auto-Fetch (Recommended)
 
-The gateway starts a background benchmark refresh when:
-- The API key is configured, **and**
-- No fresh benchmark data exists
+The gateway starts a background benchmark refresh when the API key is configured.
+It polls on `server.data_refresh_interval_seconds` (one hour by default), even
+when the current snapshot is still fresh. Content fingerprints prevent an
+unchanged source response from creating a new snapshot. A failed refresh
+preserves the last-known-good snapshot.
 
-It retries on a background schedule derived from the configured freshness window. A failed refresh preserves the active snapshot.
+Set `data_refresh_interval_seconds` between 60 and 86400 seconds when a source
+needs faster or less frequent polling. This polling interval is independent of
+`benchmark_max_age_seconds`, which controls whether benchmark data is eligible
+for routing.
 
 ### 4. Manual Refresh
 
@@ -47,8 +52,24 @@ model-gateway benchmarks status
 Example output:
 ```
 active snapshots:
-  artificial-analysis: 512 models, fetched_at=1745612345, attribution=Artificial Analysis (https://artificialanalysis.ai/)
+  artificial-analysis: 512 models, fetched_at=1745612345, revision=2026-07-09, attribution=Artificial Analysis (https://artificialanalysis.ai/)
 ```
+
+## Revision Awareness
+
+Benchmark ingestion is source-driven and revision-aware. A snapshot stores the
+newest source-published revision among its rows (`revision=`); rows without a
+source revision marker keep `as_of` unset instead of inventing a date from the
+local fetch time. `revision=observed` (no date) means the source exposed no
+revision and freshness is judged by the observation time alone.
+
+A snapshot is fresh while its fetch time is within `benchmark_max_age_seconds`.
+The source revision is provenance and change-detection metadata; it is not
+compared to the local clock because a model's publication date is not a data
+freshness timestamp. Expired snapshots fail closed: their rows stop being
+served until a successful refresh replaces them. Each changed refresh
+supersedes the previous snapshot for the same source; unchanged refreshes only
+advance the observation time.
 
 ## What Benchmarks Provide
 
@@ -64,7 +85,8 @@ Each model may include quality scores plus pricing, latency, output-size, proven
 | `cache_read_price_per_million` | $ | Cache-hit price per million tokens |
 | `cache_write_price_per_million` | $ | Cache-write price per million tokens |
 | `cost_per_task_usd` | $ | Artificial Analysis measured cost per Intelligence Index task |
-| `latency_seconds` | Seconds | Median time to first token |
+| `latency_seconds` | Seconds | Median time to first token; end-to-end latency is preferred for frontier selection |
+| `latency_available` | Boolean | Whether end-to-end or time-to-first-token latency is available for ranking |
 | `time_to_first_answer_seconds` | Seconds | Median time to first answer token |
 | `end_to_end_response_seconds` | Seconds | Median end-to-end response time |
 | `output_tokens_per_second` | Tokens/s | Median output throughput |
@@ -73,6 +95,12 @@ Each model may include quality scores plus pricing, latency, output-size, proven
 | `as_of` | Date | Benchmark measurement date |
 | `release_date` | Date | Model release date |
 | `raw_metrics` | Map | Raw unscaled metric values |
+
+Missing latency is represented as `latency_seconds: null` with
+`latency_available: false`. Ranking treats it as unobserved and never as zero;
+when every candidate is missing latency, the latency axis is diagnostic only
+and cannot affect the result. `/v1/auto-models` reports the same state through
+`latency_observed` and each full candidate's `latency_available` field.
 
 ### Task-Specific Quality
 
@@ -274,6 +302,21 @@ For `auto-frontier`, the non-dominated candidates are then ordered with a
 latency-aware utility: 50% quality, 25% measured task-cost efficiency, and 25%
 latency efficiency. Other auto modes retain their documented mode-specific
 cost/latency/quality ordering.
+
+### Missing Latency
+
+Missing benchmark latency is an explicit diagnostic condition, never a
+fabricated value:
+
+- The API reports `"latency_seconds": null` with `"latency_available": false`
+  on a model entry when no latency measurement exists, and each route reports
+  `"latency_observed": false` when no candidate had a measurement.
+- A missing latency earns **zero** latency efficiency in the frontier utility;
+  it cannot improve a model's latency-aware ranking, and it is never treated
+  as the observed minimum when every candidate lacks a measurement (the 25%
+  weight is inert rather than awarded).
+- No fuzzy model matching is used to borrow latency from a differently named
+  model. Only exact, identity-resolved benchmark matches contribute latency.
 
 Effective provider price remains zero for free and included-subscription
 routes, but measured task cost is retained as the reference efficiency cost.

@@ -273,8 +273,8 @@ fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
                 )
                 .into());
             }
-            let api_key = match std::env::var(CLI_PROXY_API_KEY_SECRET) {
-                Ok(value) if !value.trim().is_empty() => value,
+            let (api_key, _) = match std::env::var(CLI_PROXY_API_KEY_SECRET) {
+                Ok(value) if !value.trim().is_empty() => (value, "environment"),
                 Ok(_) => {
                     return Err(format!(
                         "{CLI_PROXY_API_KEY_SECRET} is set but empty; remove it or provide the frontend key"
@@ -286,11 +286,11 @@ fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
                         .get(CLI_PROXY_API_KEY_SECRET)?
                         .filter(|value| !value.trim().is_empty())
                     {
-                        value
+                        (value, "configured secret store")
                     } else {
                         let value = generate_api_key()?;
-                        resolver.set_preferred(CLI_PROXY_API_KEY_SECRET, &value)?;
-                        value
+                        let source = resolver.set_preferred(CLI_PROXY_API_KEY_SECRET, &value)?;
+                        (value, source)
                     }
                 }
                 Err(std::env::VarError::NotUnicode(_)) => {
@@ -324,7 +324,7 @@ fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
             println!("Installed binary: {}", paths.binary.display());
             println!("Generated config: {}", paths.config.display());
             println!("OAuth directory: {}", paths.auth_dir.display());
-            println!("Stored the CLIProxyAPI frontend key in the configured secret source");
+            println!("Stored the CLIProxyAPI frontend key in a secret store");
             println!("Added provider '{CLI_PROXY_PROVIDER_KEY}' with subscription billing");
             println!("Next: model-gateway cli-proxy login claude");
             println!("      model-gateway cli-proxy login codex --device");
@@ -382,8 +382,11 @@ fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
             let models = body
                 .get("data")
                 .and_then(Value::as_array)
-                .map_or(0, Vec::len);
-            println!("CLIProxyAPI v{CLI_PROXY_VERSION}: ready, {models} models");
+                .ok_or("CLIProxyAPI returned an invalid /models response: expected a data array")?;
+            println!(
+                "CLIProxyAPI v{CLI_PROXY_VERSION}: ready, {} models",
+                models.len()
+            );
         }
     }
     Ok(())
@@ -459,9 +462,10 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
             if status.is_empty() {
                 println!("No active benchmark snapshots");
             }
-            for (source, fetched_at, models, attribution) in status {
+            for (source, fetched_at, models, attribution, revision) in status {
                 println!(
-                    "{source}: {models} models, fetched_at={fetched_at}, attribution={attribution}"
+                    "{source}: {models} models, fetched_at={fetched_at}, revision={}, attribution={attribution}",
+                    revision.as_deref().unwrap_or("observed")
                 );
             }
         }
@@ -1015,6 +1019,10 @@ async fn serve() -> Result<(), Box<dyn Error>> {
     let resolver = SecretResolver::default();
     let config = Config::load(&path, &resolver)?;
     println!("Serving model gateway on {}", config.server.bind);
+    println!(
+        "Secret store: {} (set MODEL_GATEWAY_SECRET_STORE=keychain|file|environment to change)",
+        resolver.mode()
+    );
     run_server(config, &resolver).await?;
     Ok(())
 }

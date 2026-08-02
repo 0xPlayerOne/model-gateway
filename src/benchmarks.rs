@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Digest;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -239,7 +240,7 @@ impl BenchmarkImport {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TaskKind {
     General,
     Coding,
@@ -503,7 +504,10 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                 output_tokens_per_second: number(performance, "median_output_tokens_per_second"),
                 output_tokens_per_task: None,
                 reasoning_effort: aa_reasoning_effort(item),
-                as_of: Some(epoch_date_string()),
+                // Provenance comes only from the source payload. Never invent a
+                // per-model revision date from the local fetch time: an invented
+                // as_of makes unchanged rows look freshly published forever.
+                as_of: aa_source_revision(item),
                 release_date: item
                     .get("release_date")
                     .and_then(Value::as_str)
@@ -539,18 +543,18 @@ fn parse_number(value: &Value) -> Option<f64> {
         .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
 }
 
-// Howard Hinnant / public-domain civil calendar helper
-// Shared via routing module
-use crate::routing::civil_from_days;
-
-fn epoch_date_string() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = secs.div_euclid(86_400) as i64;
-    let (year, month, day) = civil_from_days(days);
-    format!("{year:04}-{month:02}-{day:02}")
+/// Reads the source-published revision marker for a benchmark row.
+/// Artificial Analysis items may expose `last_updated`, `updated_at`, or an
+/// `as_of` date; the first present value is preserved verbatim. Rows without
+/// any source revision are left with `as_of: None` (observed-only) so callers
+/// can distinguish source-verified revisions from mere fetch observations.
+fn aa_source_revision(item: &Value) -> Option<String> {
+    ["last_updated", "updated_at", "as_of"]
+        .iter()
+        .find_map(|key| item.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn aa_reasoning_effort(item: &Value) -> Option<String> {
@@ -575,6 +579,64 @@ fn aa_reasoning_effort(item: &Value) -> Option<String> {
         return Some("low".to_owned());
     }
     None
+}
+
+/// Deterministic content fingerprint for a benchmark import. Order-insensitive
+/// and stable across refreshes so ingestion can skip re-storing a snapshot
+/// when the source published no new revision, while any score, price, effort,
+/// or provenance change alters the fingerprint.
+pub fn fingerprint_benchmark_models(models: &[BenchmarkModel]) -> String {
+    let mut lines = models
+        .iter()
+        .map(|model| {
+            format!(
+                "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}",
+                model.id,
+                model.reasoning_effort.as_deref().unwrap_or(""),
+                fmt_score(model.intelligence),
+                fmt_score(model.coding_quality),
+                fmt_score(model.agentic_quality),
+                fmt_number(model.input_price_per_million),
+                fmt_number(model.output_price_per_million),
+                fmt_number(model.cache_read_price_per_million),
+                fmt_number(model.cache_write_price_per_million),
+                fmt_number(model.cost_per_task_usd),
+                fmt_number(model.latency_seconds),
+                fmt_number(model.time_to_first_answer_seconds),
+                fmt_number(model.end_to_end_response_seconds),
+                fmt_number(model.output_tokens_per_second),
+                model
+                    .output_tokens_per_task
+                    .map_or_else(String::new, |value| value.to_string()),
+                model.as_of.as_deref().unwrap_or(""),
+                model.release_date.as_deref().unwrap_or(""),
+                model.creator.as_deref().unwrap_or(""),
+                model.raw_metrics,
+            )
+        })
+        .collect::<Vec<_>>();
+    lines.sort();
+    let mut digest = sha2::Sha256::new();
+    for line in lines {
+        digest.update(line.as_bytes());
+        digest.update(b"\n");
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn fmt_score(value: Option<f64>) -> String {
+    fmt_number(value)
+}
+
+fn fmt_number(value: Option<f64>) -> String {
+    match value {
+        Some(value) => format!("{value}"),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -742,6 +804,69 @@ mod tests {
             models: vec![incomparable],
         };
         assert!(import.normalize().is_err());
+    }
+
+    #[test]
+    fn aa_parser_preserves_source_revision_or_none() {
+        let models = parse_artificial_analysis(&json!({"data": [
+            {
+                "slug": "with-last-updated",
+                "evaluations": {"gpqa": 0.8},
+                "last_updated": "2026-07-09"
+            },
+            {
+                "slug": "with-updated-at",
+                "evaluations": {"gpqa": 0.8},
+                "updated_at": "2026-07-15"
+            },
+            {
+                "slug": "observed-only",
+                "evaluations": {"gpqa": 0.8}
+            }
+        ]}))
+        .expect("Artificial Analysis fixture");
+        assert_eq!(models[0].as_of.as_deref(), Some("2026-07-09"));
+        assert_eq!(models[1].as_of.as_deref(), Some("2026-07-15"));
+        // Never invent a per-model revision from the fetch date.
+        assert_eq!(models[2].as_of, None);
+        assert!(models[0].validate().is_ok());
+        assert!(models[2].validate().is_ok());
+    }
+
+    #[test]
+    fn benchmark_fingerprint_is_stable_and_revision_sensitive() {
+        use super::fingerprint_benchmark_models;
+        let mut model = BenchmarkModel::fixture("gpt-5-6-luna", 40.0, 50.0, 45.0, 0.2, 1.2);
+        model.reasoning_effort = Some("high".to_owned());
+        model.as_of = Some("2026-07-09".to_owned());
+        let original = fingerprint_benchmark_models(&[model.clone()]);
+        assert_eq!(
+            original,
+            fingerprint_benchmark_models(&[model.clone()]),
+            "unchanged rows must keep the fingerprint"
+        );
+        let mut reordered = vec![model.clone()];
+        reordered.push(BenchmarkModel::fixture(
+            "gpt-5-6-sol",
+            90.0,
+            90.0,
+            90.0,
+            5.0,
+            30.0,
+        ));
+        let forward = fingerprint_benchmark_models(&reordered);
+        reordered.reverse();
+        assert_eq!(forward, fingerprint_benchmark_models(&reordered));
+        let mut revised = model.clone();
+        revised.intelligence = Some(51.2);
+        assert_ne!(original, fingerprint_benchmark_models(&[revised]));
+        let mut cache_revised = model;
+        cache_revised.cache_read_price_per_million = Some(0.1);
+        assert_ne!(
+            original,
+            fingerprint_benchmark_models(&[cache_revised]),
+            "cache pricing revisions must change the fingerprint"
+        );
     }
 
     #[test]

@@ -186,40 +186,78 @@ pub struct SecretResolver {
     files: Option<Box<dyn SecretStore>>,
     keychain: Option<Box<dyn SecretStore>>,
     initialization_error: Option<String>,
+    mode: SecretStoreMode,
+}
+
+/// Human-readable description of the effective secret store, used for
+/// startup diagnostics. Never contains secret values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretStoreMode {
+    /// Explicit OS keychain mode. The keychain is never silently combined
+    /// with another store.
+    Keychain,
+    /// Deterministic non-interactive store: protected files under
+    /// `MODEL_GATEWAY_SECRET_DIR` or the default secret root.
+    File(PathBuf),
+    /// Environment variables only; nothing is persisted.
+    Environment,
+    /// An invalid explicit mode. Operations fail with the original value.
+    Invalid,
+}
+
+impl std::fmt::Display for SecretStoreMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keychain => write!(formatter, "os-keychain"),
+            Self::File(root) => write!(formatter, "protected-file({})", root.display()),
+            Self::Environment => write!(formatter, "environment"),
+            Self::Invalid => write!(formatter, "invalid"),
+        }
+    }
 }
 
 impl Default for SecretResolver {
     fn default() -> Self {
         let mode = env::var("MODEL_GATEWAY_SECRET_STORE").ok();
-        let configured_files = env::var_os("MODEL_GATEWAY_SECRET_DIR")
-            .map(|path| Box::new(FileSecretStore::new(path)) as Box<dyn SecretStore>);
-        let (files, keychain, initialization_error) =
-            match mode.as_deref() {
-                None | Some("keychain") => (
-                    configured_files,
-                    Some(Box::new(KeychainSecretStore) as Box<dyn SecretStore>),
-                    None,
-                ),
-                Some("file") => (
-                    Some(configured_files.unwrap_or_else(|| {
-                        Box::new(FileSecretStore::new(default_file_store_root()))
-                    })),
-                    None,
-                    None,
-                ),
-                Some("environment") => (configured_files, None, None),
-                Some(value) => (None, None, Some(value.to_owned())),
-            };
+        let secret_dir = env::var_os("MODEL_GATEWAY_SECRET_DIR").map(PathBuf::from);
+        Self::from_mode(mode.as_deref(), secret_dir)
+    }
+}
+
+impl SecretResolver {
+    /// Resolves the effective stores from an explicit mode and optional file
+    /// root. `mode = None` (unset) selects the deterministic non-interactive
+    /// protected-file store so unattended startup (`serve`, launcher scripts,
+    /// launchd, cron, containers) never prompts or blocks on the OS keychain;
+    /// `keychain` remains an explicit opt-in for intentional interactive use.
+    /// Modes are exclusive: `environment` never mounts `MODEL_GATEWAY_SECRET_DIR`.
+    fn from_mode(mode: Option<&str>, secret_dir: Option<PathBuf>) -> Self {
+        let configured_file_root = secret_dir.unwrap_or_else(default_file_store_root);
+        let (files, keychain, initialization_error, mode) = match mode {
+            None | Some("file") => (
+                Some(Box::new(FileSecretStore::new(&configured_file_root)) as Box<dyn SecretStore>),
+                None,
+                None,
+                SecretStoreMode::File(configured_file_root),
+            ),
+            Some("keychain") => (
+                None,
+                Some(Box::new(KeychainSecretStore) as Box<dyn SecretStore>),
+                None,
+                SecretStoreMode::Keychain,
+            ),
+            Some("environment") => (None, None, None, SecretStoreMode::Environment),
+            Some(value) => (None, None, Some(value.to_owned()), SecretStoreMode::Invalid),
+        };
         Self {
             environment: EnvironmentSecretStore,
             files,
             keychain,
             initialization_error,
+            mode,
         }
     }
-}
 
-impl SecretResolver {
     #[cfg(test)]
     fn with_stores(
         files: Option<Box<dyn SecretStore>>,
@@ -230,7 +268,14 @@ impl SecretResolver {
             files,
             keychain,
             initialization_error: None,
+            mode: SecretStoreMode::Keychain,
         }
+    }
+
+    /// Describes the effective secret store for diagnostics. The description
+    /// names the store and its location but never contains secret values.
+    pub fn mode(&self) -> &SecretStoreMode {
+        &self.mode
     }
 
     fn check_initialized(&self) -> Result<(), SecretError> {
@@ -352,7 +397,8 @@ mod tests {
 
     use super::{
         FileSecretStore, KeychainSecretStore, SecretError, SecretResolver, SecretStore,
-        is_unavailable_keychain_error, validate_secret_name,
+        SecretStoreMode, default_file_store_root, is_unavailable_keychain_error,
+        validate_secret_name,
     };
 
     #[derive(Default)]
@@ -516,6 +562,7 @@ mod tests {
             files: None,
             keychain: None,
             initialization_error: Some("unknown-mode".to_owned()),
+            mode: super::SecretStoreMode::Invalid,
         };
         let err = resolver.get("MG_TEST_FAIL").expect_err("should fail");
         assert!(matches!(err, SecretError::InvalidStore(_)));
@@ -557,6 +604,99 @@ mod tests {
         let store = FileSecretStore::new(tempfile::tempdir().expect("tempdir").path());
         store.remove("MG_TEST_IDEMPOTENT").expect("first remove");
         store.remove("MG_TEST_IDEMPOTENT").expect("second remove");
+    }
+
+    #[test]
+    fn resolver_mode_names_the_store_without_values() {
+        use super::SecretStoreMode;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let resolver = SecretResolver::with_stores(
+            Some(Box::new(FileSecretStore::new(directory.path()))),
+            Some(Box::new(FakeSecretStore::default())),
+        );
+        let description = resolver.mode().to_string();
+        assert!(
+            description.starts_with("os-keychain"),
+            "mode must describe the effective store, got {description}"
+        );
+        assert_eq!(SecretStoreMode::Environment.to_string(), "environment");
+        assert_eq!(
+            SecretStoreMode::File(directory.path().to_path_buf()).to_string(),
+            format!("protected-file({})", directory.path().display())
+        );
+    }
+
+    #[test]
+    fn unset_mode_resolves_to_file_store_with_reported_default_root() {
+        // Unattended startup (unset MODEL_GATEWAY_SECRET_STORE) must be
+        // deterministic and non-interactive: the protected-file store, with
+        // the mode diagnostics reporting the actual default root.
+        let resolver = SecretResolver::from_mode(None, None);
+        assert!(
+            resolver.files.is_some(),
+            "unset mode must mount the file store"
+        );
+        assert!(resolver.keychain.is_none());
+        assert_eq!(resolver.initialization_error, None);
+        assert_eq!(
+            resolver.mode(),
+            &SecretStoreMode::File(default_file_store_root()),
+            "mode must report the actual default root"
+        );
+    }
+
+    #[test]
+    fn file_mode_reports_configured_root_and_mounts_it() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().join("configured-secrets");
+        let resolver = SecretResolver::from_mode(Some("file"), Some(root.clone()));
+        assert!(resolver.files.is_some());
+        assert_eq!(resolver.mode(), &SecretStoreMode::File(root));
+    }
+
+    #[test]
+    fn environment_mode_is_exclusively_environment() {
+        // environment must never mount MODEL_GATEWAY_SECRET_DIR: a file
+        // present in the configured directory must stay invisible and
+        // nothing may be persisted.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let resolver =
+            SecretResolver::from_mode(Some("environment"), Some(directory.path().to_path_buf()));
+        assert!(
+            resolver.files.is_none(),
+            "environment mode must not mount the file store"
+        );
+        assert!(resolver.keychain.is_none());
+        assert_eq!(resolver.mode(), &SecretStoreMode::Environment);
+        let err = resolver
+            .set_preferred("MG_ENV_ONLY_TEST", "value")
+            .expect_err("environment mode cannot persist");
+        assert!(matches!(err, SecretError::Keychain(_)));
+    }
+
+    #[test]
+    fn keychain_mode_is_explicit_and_exclusive() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let resolver =
+            SecretResolver::from_mode(Some("keychain"), Some(directory.path().to_path_buf()));
+        assert!(
+            resolver.files.is_none(),
+            "keychain mode must not mount the file store"
+        );
+        assert!(resolver.keychain.is_some());
+        assert_eq!(resolver.mode(), &SecretStoreMode::Keychain);
+    }
+
+    #[test]
+    fn invalid_mode_fails_closed_without_touching_a_store() {
+        let resolver = SecretResolver::from_mode(Some("bogus"), None);
+        assert!(resolver.files.is_none());
+        assert!(resolver.keychain.is_none());
+        assert_eq!(resolver.initialization_error.as_deref(), Some("bogus"));
+        let err = resolver
+            .get("MG_INVALID_MODE")
+            .expect_err("must fail closed");
+        assert!(matches!(err, SecretError::InvalidStore(_)));
     }
 
     #[test]

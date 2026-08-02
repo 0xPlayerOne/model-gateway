@@ -191,7 +191,13 @@ When a request succeeds, the session is pinned to `(provider, model)` for 30 min
 
 ### `/v1/catalog/models`
 
-The canonical model discovery collection. Use `?access=free|paid|all`, `?task=`, `?provider=`, `?limit=`, `?cursor=`, `?view=summary|full`, and `?variants=collapsed|all`. The default is a compact summary of at most 25 models; each item contains only `id`, separate `reasoning_effort`, `quality`, and an absolute clickable `links.self` URL. Use the linked model resource or `?view=full&variants=all` to inspect benchmark metrics and every reasoning-effort variant. Cursors are bound to the catalog snapshot; a refresh invalidates an old cursor with `409 stale_cursor`. Responses include `meta.snapshot`, `meta.total`, navigable links, `ETag`, `Last-Modified`, and conditional `304 Not Modified` support.
+The canonical model discovery collection. Use `?access=free|paid|all`, `?task=`, `?provider=`, `?limit=`, `?cursor=`, `?view=summary|full`, `?variants=collapsed|all`, and optional `?fields=`. The default is a compact summary of at most 25 models; each item contains only `id`, separate `reasoning_effort`, `quality`, and an absolute clickable `links.self` URL. Use the linked model resource or `?view=full&variants=all` to inspect benchmark metrics and every reasoning-effort variant.
+
+`fields` is a strict, comma-separated allowlist of exact top-level item fields: `id`, `object`, `links`, `model`, `composite`, `scores`, `capabilities`, `price_per_million`, `reference_price_per_million`, `access`, `benchmark_match`, `benchmark_id`, `benchmarks`, `quality`, and `reasoning_effort`. It is projection-only: it never changes filtering, ranking, total counts, or snapshot-bound cursors. Duplicate names are removed and equivalent orderings are canonicalized for stable links and ETags. Without `fields`, `view` chooses the default summary or full representation. With `fields`, the requested allowlisted fields are returned exactly, so `view=full&fields=id,links,benchmarks` is a smaller diagnostic projection; unknown names return `400 invalid_fields`. The response records an explicit projection in `meta.fields`.
+
+Cursors are bound to the catalog snapshot; a refresh invalidates an old cursor with `409 stale_cursor`. Keep `limit` small for interactive clients and follow the returned `links.next` URL for large catalogs. Responses include `meta.snapshot`, `meta.total`, navigable links, `ETag`, `Last-Modified`, and conditional `304 Not Modified` support. `If-None-Match` takes precedence over `If-Modified-Since`; a matching validator returns `304` with no response body.
+
+The gateway briefly reuses assembled catalog snapshots for repeated requests, while source timestamps and snapshot fingerprints keep validators tied to changed data. ETags reduce transfer and JSON parsing when a client revalidates an unchanged representation.
 
 ### `/v1/catalog/models/{provider}/{model}`
 
@@ -208,3 +214,21 @@ Capability fields are included only when the provider reports authoritative valu
 ### `/v1/rankings`
 
 Read-only view of fresh benchmark data. Sorted by quality score (descending). Supports `?task=` and `?limit=` query parameters. Never performs live benchmark requests. See [benchmarks.md](benchmarks.md) for the full response format, setup, and attribution.
+
+### Health endpoints
+
+`/health/live` only confirms that the process is responding. `/health/ready`
+confirms that the routing database is readable; it intentionally remains green
+when an individual provider credential or catalog is unavailable so local-only
+and partially configured gateways can still start. Use `/health/diagnostics`
+for startup and deployment checks. It reports each configured provider's
+credential state (`present`, `missing`, or `not_required`), credential source,
+catalog freshness, benchmark status, and whether the provider is dispatchable.
+It never returns credential values and excludes the internal local runtime
+provider.
+
+Automatic routes also expose `latency_observed` in `/v1/auto-models`. A model
+with missing benchmark latency has `latency_available: false` and
+`latency_seconds: null`; it is never treated as a zero-latency model. Routed
+chat responses expose the same condition through the
+`x-model-gateway-benchmark-latency-observed` header.

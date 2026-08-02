@@ -9,6 +9,9 @@ shutdown_grace_seconds = 30
 catalog_max_age_seconds = 86400
 benchmark_max_age_seconds = 604800
 pricing_max_age_seconds = 604800
+# Source polling cadence for catalog, pricing, and benchmark refreshes
+# (60-86400 seconds). Independent of the freshness windows above.
+data_refresh_interval_seconds = 3600
 auto_frontier_enabled = true
 auto_free_enabled = true
 auto_efficient_enabled = true

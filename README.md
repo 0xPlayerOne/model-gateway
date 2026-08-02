@@ -51,6 +51,8 @@ Repeat either login command to add accounts to the pool. The setup command downl
 
 The launcher backgrounds CLIProxyAPI and writes logs to its sidecar directory. Once CLIProxyAPI is configured, `./scripts/start-server.sh` and `./scripts/restart-server.sh` start and restart both services automatically. Use `./scripts/start-server.sh --follow` (or `-f`) to keep the gateway in the foreground; the sidecar remains managed in the background. Use `./scripts/start-cli-proxy.sh --follow` when you specifically want to follow only sidecar logs.
 
+For unattended startup the launchers default `MODEL_GATEWAY_SECRET_STORE` to `file` (non-interactive protected-file store) when it is unset and print the effective store; set it explicitly (e.g. `keychain` in `.env.local`) to opt into the OS keychain.
+
 ## Verification
 
 ```bash
@@ -86,7 +88,7 @@ MODEL_GATEWAY_BIND=127.0.0.1:8008
 MODEL_GATEWAY_LOCAL_BASE_URL=http://localhost:8000/v1
 MODEL_GATEWAY_LOCAL_MODEL=my-model
 MODEL_GATEWAY_EXPOSURE=loopback          # loopback|local_container
-MODEL_GATEWAY_SECRET_STORE=keychain      # keychain|file|environment
+MODEL_GATEWAY_SECRET_STORE=file         # file|keychain|environment; keychain is explicit opt-in
 MODEL_GATEWAY_LOG_FORMAT=json            # text|json
 MODEL_GATEWAY_STATE_PATH=~/.config/model-gateway/routing.sqlite3
 ```

@@ -43,6 +43,17 @@ if [ "$OPTIONAL" = true ] && [ ! -f "$CONFIG" ]; then
     exit 0
 fi
 
+# The sidecar launcher is unattended by design: default to the deterministic
+# protected-file secret store unless the operator chose another store
+# explicitly. The sidecar reads its frontend key from config.yaml, but the
+# gateway process it serves inherits this environment.
+if [ -z "${MODEL_GATEWAY_SECRET_STORE:-}" ]; then
+    export MODEL_GATEWAY_SECRET_STORE=file
+    echo "Secret store: protected-file (non-interactive default; set MODEL_GATEWAY_SECRET_STORE=keychain to use the OS keychain)" >&2
+else
+    echo "Secret store: $MODEL_GATEWAY_SECRET_STORE (MODEL_GATEWAY_SECRET_STORE is set explicitly)" >&2
+fi
+
 LISTENER_PIDS=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
 if [ -n "$LISTENER_PIDS" ]; then
     LISTENER_PID="$(printf '%s\n' "$LISTENER_PIDS" | head -n 1)"
