@@ -2255,6 +2255,14 @@ async fn auto_free_emits_selection_headers() {
     assert_eq!(response.headers()["x-model-gateway-quality"], "83.5");
     assert_eq!(response.headers()["x-model-gateway-complexity"], "simple");
     assert_eq!(response.headers()["x-model-gateway-classifier"], "rules-v1");
+    assert_eq!(
+        response.headers()["x-model-gateway-benchmark-latency-observed"],
+        "true"
+    );
+    assert_eq!(
+        response.headers()["x-model-gateway-benchmark-latency-seconds"],
+        "1"
+    );
 }
 
 #[tokio::test]
@@ -3144,6 +3152,131 @@ async fn auto_frontier_keeps_effort_variants_as_distinct_candidates() {
     assert_eq!(catalog["data"][0]["benchmarks"]["cost_per_task_usd"], 0.50);
     assert_eq!(catalog["data"][1]["model"]["effort_level"], "medium");
     assert_eq!(catalog["data"][1]["benchmarks"]["cost_per_task_usd"], 0.01);
+}
+
+#[tokio::test]
+async fn pricing_refresh_flips_auto_efficient_selection() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for provider_name in ["provider-a", "provider-b"] {
+        store
+            .replace_catalog(
+                provider_name,
+                &[CatalogRecord {
+                    model: "gpt-5.6-luna".to_owned(),
+                    access_kind: AccessKind::Paid,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    supports_structured_output: Some(true),
+                    input_price_per_million: None,
+                    output_price_per_million: None,
+                }],
+            )
+            .expect("catalog");
+    }
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "gpt-5-6-luna",
+                40.0,
+                40.0,
+                40.0,
+                0.0,
+                0.0,
+            )],
+        )
+        .expect("benchmarks");
+    let observation = |provider: &str, input: f64, output: f64| PriceObservation {
+        source: "models.dev".to_owned(),
+        source_kind: PriceSourceKind::ModelsDev,
+        scope: PriceScope::RuntimeProvider,
+        provider_key: Some(provider.to_owned()),
+        model_id: "gpt-5.6-luna".to_owned(),
+        rates: PriceRates {
+            input_price_per_million: Some(input),
+            output_price_per_million: Some(output),
+            ..PriceRates::default()
+        },
+        fetched_at: Some(100),
+        as_of: None,
+        valid_from: None,
+        valid_until: None,
+        attribution: None,
+    };
+    store
+        .replace_pricing(
+            "models.dev",
+            PriceSourceKind::ModelsDev,
+            "Models.dev (https://models.dev/)",
+            &[
+                observation("provider-a", 0.2, 1.2),
+                observation("provider-b", 5.0, 30.0),
+            ],
+        )
+        .expect("pricing v1");
+    drop(store);
+
+    let paid = |base: &str| {
+        let mut config = provider(format!("http://{base}/v1"));
+        config.billing_mode = BillingMode::Paid;
+        config
+    };
+    let mut config = config_for(
+        BTreeMap::from([
+            ("provider-a".to_owned(), paid(&upstream.to_string())),
+            ("provider-b".to_owned(), paid(&upstream.to_string())),
+        ]),
+        vec![TargetConfig {
+            provider: "provider-a".to_owned(),
+            model: "gpt-5.6-luna".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path.clone());
+    let gateway = spawn_gateway(config).await;
+
+    let primary = |gateway: &str| {
+        let gateway = gateway.to_owned();
+        async move {
+            let body: Value = reqwest::Client::new()
+                .get(format!("{gateway}/v1/auto-models?route=efficient"))
+                .send()
+                .await
+                .expect("auto models response")
+                .json()
+                .await
+                .expect("auto models body");
+            body["routes"]["efficient"]["primary"]["id"]
+                .as_str()
+                .expect("primary id")
+                .to_owned()
+        }
+    };
+
+    // Phase 1: models.dev reports provider-a as cheaper; the route picks it.
+    assert_eq!(primary(&gateway).await, "provider-a/gpt-5.6-luna");
+
+    // Phase 2: models.dev revises Luna pricing (provider-b now cheaper). A
+    // refresh of the active pricing snapshot must change the selection with
+    // no hard-coded favorites or special cases.
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store reopen");
+    store
+        .replace_pricing(
+            "models.dev",
+            PriceSourceKind::ModelsDev,
+            "Models.dev (https://models.dev/)",
+            &[
+                observation("provider-a", 10.0, 60.0),
+                observation("provider-b", 0.2, 1.2),
+            ],
+        )
+        .expect("pricing v2");
+    drop(store);
+    assert_eq!(primary(&gateway).await, "provider-b/gpt-5.6-luna");
 }
 
 #[tokio::test]
@@ -4145,6 +4278,10 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         body["data"][0]["benchmarks"]["output_tokens_per_second"],
         125.0
     );
+    assert_eq!(
+        body["data"][0]["benchmarks"]["output_tokens_per_task"],
+        1024
+    );
 
     let detail: Value = client
         .get(format!("{gateway}/v1/catalog/models/paid/gpt-4o"))
@@ -4202,6 +4339,107 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     assert!(collection_body["data"][0]["quality"].is_object());
     assert!(collection_body["data"][0].get("benchmarks").is_none());
     assert!(collection_body["links"]["next"].is_string());
+
+    let full_bytes = client
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=paid&limit=1&view=full"
+        ))
+        .send()
+        .await
+        .expect("full catalog response")
+        .bytes()
+        .await
+        .expect("full catalog bytes");
+    let selected_response = client
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=paid&limit=1&view=full&fields=id,links,benchmarks"
+        ))
+        .send()
+        .await
+        .expect("selected catalog response");
+    let selected_etag = selected_response
+        .headers()
+        .get("etag")
+        .expect("selected etag")
+        .to_str()
+        .expect("selected etag value")
+        .to_owned();
+    let selected_content_length = selected_response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .expect("selected content length")
+        .to_str()
+        .expect("selected content length value")
+        .parse::<usize>()
+        .expect("numeric selected content length");
+    let selected_bytes = selected_response
+        .bytes()
+        .await
+        .expect("selected catalog bytes");
+    assert_eq!(selected_content_length, selected_bytes.len());
+    assert!(
+        full_bytes.len() > selected_bytes.len(),
+        "full catalog response ({}) must exceed the selected projection ({})",
+        full_bytes.len(),
+        selected_bytes.len()
+    );
+    assert_ne!(etag, selected_etag, "ETag must identify the representation");
+    let selected_body: Value = serde_json::from_slice(&selected_bytes).expect("selected JSON");
+    assert_eq!(
+        selected_body["meta"]["fields"],
+        json!(["id", "links", "benchmarks"])
+    );
+    assert_eq!(
+        selected_body["data"][0]
+            .as_object()
+            .map(|object| object.keys().map(String::as_str).collect::<Vec<_>>()),
+        Some(vec!["benchmarks", "id", "links"])
+    );
+
+    let reordered_response = client
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=paid&limit=1&view=full&fields=benchmarks,id,links"
+        ))
+        .send()
+        .await
+        .expect("reordered selected catalog response");
+    assert_eq!(
+        reordered_response
+            .headers()
+            .get("etag")
+            .expect("reordered etag")
+            .to_str()
+            .expect("reordered etag value"),
+        selected_etag
+    );
+    let reordered_fields: Value = reordered_response
+        .json()
+        .await
+        .expect("reordered selected catalog JSON");
+    assert_eq!(
+        reordered_fields["meta"]["fields"],
+        selected_body["meta"]["fields"]
+    );
+    assert_eq!(reordered_fields["data"], selected_body["data"]);
+    assert!(
+        reordered_fields["links"]["self"]
+            .as_str()
+            .is_some_and(|link| link.contains("fields=id%2Clinks%2Cbenchmarks")),
+        "pagination links must use canonical field ordering"
+    );
+
+    let invalid_fields: Value = client
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=paid&fields=id,not_a_field"
+        ))
+        .send()
+        .await
+        .expect("invalid fields response")
+        .json()
+        .await
+        .expect("invalid fields JSON");
+    assert_eq!(invalid_fields["error"]["code"], "invalid_fields");
+
     let next_link = collection_body["links"]["next"]
         .as_str()
         .expect("next link");
@@ -4215,13 +4453,45 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         .expect("stale cursor response");
     assert_eq!(stale_cursor.status(), StatusCode::CONFLICT);
 
+    let snapshot = collection_body["meta"]["snapshot"]
+        .as_str()
+        .expect("snapshot token");
+    let past_end: Value = client
+        .get(format!(
+            "{gateway}/v1/catalog/models?access=all&limit=1&cursor={snapshot}:999"
+        ))
+        .send()
+        .await
+        .expect("past-end cursor response")
+        .json()
+        .await
+        .expect("past-end cursor JSON");
+    assert_eq!(past_end["error"]["code"], "invalid_cursor");
+
     let not_modified = client
         .get(format!("{gateway}/v1/catalog/models?access=all&limit=1"))
-        .header("if-none-match", etag)
+        .header("if-none-match", etag.clone())
         .send()
         .await
         .expect("conditional catalog response");
     assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert!(not_modified.bytes().await.expect("304 body").is_empty());
+
+    let weak_not_modified = client
+        .get(format!("{gateway}/v1/catalog/models?access=all&limit=1"))
+        .header("if-none-match", format!("W/{etag}"))
+        .send()
+        .await
+        .expect("weak conditional catalog response");
+    assert_eq!(weak_not_modified.status(), StatusCode::NOT_MODIFIED);
+
+    let wildcard_not_modified = client
+        .get(format!("{gateway}/v1/catalog/models?access=all&limit=1"))
+        .header("if-none-match", "*")
+        .send()
+        .await
+        .expect("wildcard conditional catalog response");
+    assert_eq!(wildcard_not_modified.status(), StatusCode::NOT_MODIFIED);
 
     let not_modified_since = client
         .get(format!("{gateway}/v1/catalog/models?access=all&limit=1"))
@@ -4264,6 +4534,18 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     assert_eq!(invalid_query.status(), StatusCode::BAD_REQUEST);
     let invalid_query_body: Value = invalid_query.json().await.expect("invalid query JSON");
     assert_eq!(invalid_query_body["error"]["code"], "invalid_query");
+
+    for limit in ["0", "101"] {
+        let invalid_limit: Value = client
+            .get(format!("{gateway}/v1/catalog/models?limit={limit}"))
+            .send()
+            .await
+            .expect("invalid limit response")
+            .json()
+            .await
+            .expect("invalid limit JSON");
+        assert_eq!(invalid_limit["error"]["code"], "invalid_limit");
+    }
 }
 
 #[tokio::test]
@@ -4839,4 +5121,316 @@ async fn reserved_alias_auto_balanced_is_rejected() {
         err.contains("reserved"),
         "expected reserved error, got: {err}"
     );
+}
+
+#[tokio::test]
+async fn health_diagnostics_reports_credentials_and_catalog_separately() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "keyless",
+            &[CatalogRecord {
+                model: "model-a".to_owned(),
+                access_kind: AccessKind::Paid,
+                context_length: None,
+                supports_tools: None,
+                supports_vision: None,
+                supports_structured_output: None,
+                input_price_per_million: None,
+                output_price_per_million: None,
+            }],
+        )
+        .expect("catalog");
+    drop(store);
+    let mut locked = provider(format!("http://{upstream}/v1"));
+    locked.api_key_secret = Some("MISSING_GATEWAY_KEY".to_owned());
+    let mut config = config_for(
+        BTreeMap::from([
+            (
+                "keyless".to_owned(),
+                provider(format!("http://{upstream}/v1")),
+            ),
+            ("locked".to_owned(), locked),
+        ]),
+        vec![TargetConfig {
+            provider: "keyless".to_owned(),
+            model: "model-a".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let body: Value = reqwest::Client::new()
+        .get(format!("{gateway}/health/diagnostics"))
+        .send()
+        .await
+        .expect("diagnostics response")
+        .json()
+        .await
+        .expect("diagnostics body");
+    // The gateway itself is healthy even though one provider has no credential
+    // and the other has no catalog: readiness and provider data are separate.
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["gateway"]["providers_configured"], 2);
+    assert_eq!(body["gateway"]["providers_with_credentials"], 0);
+    assert_eq!(body["provider_catalogs"]["status"], "partial");
+    let providers = body["providers"].as_array().expect("providers array");
+    assert!(
+        providers
+            .iter()
+            .all(|provider| provider["id"] != "\u{0}local")
+    );
+    let locked = providers
+        .iter()
+        .find(|provider| provider["id"] == "locked")
+        .expect("locked provider");
+    assert_eq!(locked["credential"], "missing");
+    assert_eq!(locked["credential_source"], Value::Null);
+    assert_eq!(locked["catalog"], "missing");
+    assert_eq!(locked["available"], false);
+    let keyless = providers
+        .iter()
+        .find(|provider| provider["id"] == "keyless")
+        .expect("keyless provider");
+    assert_eq!(keyless["credential"], "not_required");
+    assert_eq!(keyless["catalog"], "fresh");
+    assert_eq!(keyless["available"], true);
+    let raw = body.to_string();
+    assert!(!raw.contains("MISSING_GATEWAY_KEY"));
+    assert!(!raw.contains("sk-"));
+}
+
+#[tokio::test]
+async fn health_diagnostics_distinguishes_healthy_gateway_from_stale_catalogs() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "fixture",
+            &[CatalogRecord {
+                model: "model-a".to_owned(),
+                access_kind: AccessKind::Paid,
+                context_length: None,
+                supports_tools: None,
+                supports_vision: None,
+                supports_structured_output: None,
+                input_price_per_million: None,
+                output_price_per_million: None,
+            }],
+        )
+        .expect("catalog");
+    store
+        .replace_benchmarks(
+            "fixture",
+            "Fixture",
+            &[BenchmarkModel::fixture(
+                "model-a", 50.0, 50.0, 50.0, 1.0, 2.0,
+            )],
+        )
+        .expect("benchmarks");
+    drop(store);
+    // Age the snapshots past their freshness window deterministically:
+    // `refreshed_at` is stored with whole-second precision, so a 2s wait with
+    // a 1s window guarantees staleness.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut config = config_for(
+        BTreeMap::from([(
+            "fixture".to_owned(),
+            provider(format!("http://{upstream}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "fixture".to_owned(),
+            model: "model-a".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.catalog_max_age_seconds = 1;
+    config.server.benchmark_max_age_seconds = 1;
+    config.server.pricing_max_age_seconds = 1;
+    let gateway = spawn_gateway(config).await;
+    let body: Value = reqwest::Client::new()
+        .get(format!("{gateway}/health/diagnostics"))
+        .send()
+        .await
+        .expect("diagnostics response")
+        .json()
+        .await
+        .expect("diagnostics body");
+    // A healthy gateway with stale provider data: readiness stays green while
+    // the provider catalog and benchmark snapshot report unavailability.
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["gateway"]["status"], "ready");
+    assert_eq!(body["provider_catalogs"]["status"], "unavailable");
+    assert_eq!(body["provider_catalogs"]["fresh"], 0);
+    assert_eq!(body["benchmarks"]["status"], "stale");
+    assert_eq!(body["benchmarks"]["snapshots"], 1);
+    assert_eq!(body["providers"][0]["catalog"], "stale");
+}
+
+#[tokio::test]
+async fn frontier_without_benchmark_latency_reports_missing_and_uses_cost_order() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (provider_name, input, output) in [("provider-a", 0.2, 1.2), ("provider-b", 5.0, 30.0)] {
+        store
+            .replace_catalog(
+                provider_name,
+                &[CatalogRecord {
+                    model: "gpt-5.6-luna".to_owned(),
+                    access_kind: AccessKind::Paid,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    supports_structured_output: Some(true),
+                    input_price_per_million: Some(input),
+                    output_price_per_million: Some(output),
+                }],
+            )
+            .expect("catalog");
+    }
+    let mut benchmark = BenchmarkModel::fixture("gpt-5-6-luna", 60.0, 60.0, 60.0, 0.2, 1.2);
+    benchmark.latency_seconds = None;
+    benchmark.end_to_end_response_seconds = None;
+    store
+        .replace_benchmarks("fixture", "Fixture", &[benchmark])
+        .expect("benchmarks");
+    drop(store);
+    let paid = |base: &str| {
+        let mut config = provider(format!("http://{base}/v1"));
+        config.billing_mode = BillingMode::Paid;
+        config
+    };
+    let mut config = config_for(
+        BTreeMap::from([
+            ("provider-a".to_owned(), paid(&upstream.to_string())),
+            ("provider-b".to_owned(), paid(&upstream.to_string())),
+        ]),
+        vec![TargetConfig {
+            provider: "provider-a".to_owned(),
+            model: "gpt-5.6-luna".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.frontier_quality_floor_single = 50.0;
+    let gateway = spawn_gateway(config).await;
+    let body: Value = reqwest::Client::new()
+        .get(format!("{gateway}/v1/auto-models?route=frontier&view=full"))
+        .send()
+        .await
+        .expect("auto models response")
+        .json()
+        .await
+        .expect("auto models body");
+    let route = &body["routes"]["frontier"];
+    // Missing latency is reported explicitly, never invented: no candidate had
+    // a measured latency, so the latency weight is inert and the cheaper
+    // provider wins on cost alone.
+    assert_eq!(route["latency_observed"], false);
+    assert_eq!(route["selection_policy"]["weights"]["latency"], 0.25);
+    let primary = &route["primary"];
+    assert_eq!(primary["id"], "provider-a/gpt-5.6-luna");
+    assert_eq!(primary["latency_seconds"], Value::Null);
+    assert_eq!(primary["latency_available"], false);
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-frontier",
+            "messages": [{"role": "user", "content": "latency diagnostic"}]
+        }))
+        .send()
+        .await
+        .expect("frontier response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-model-gateway-benchmark-latency-observed"],
+        "false"
+    );
+    assert!(
+        response
+            .headers()
+            .get("x-model-gateway-benchmark-latency-seconds")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn frontier_observed_latency_outranks_missing_latency_at_equal_cost() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (provider_name, model) in [
+        ("provider-a", "gpt-5.6-luna"),
+        ("provider-b", "gpt-5.6-sol"),
+    ] {
+        store
+            .replace_catalog(
+                provider_name,
+                &[CatalogRecord {
+                    model: model.to_owned(),
+                    access_kind: AccessKind::Paid,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    supports_structured_output: Some(true),
+                    input_price_per_million: Some(5.0),
+                    output_price_per_million: Some(30.0),
+                }],
+            )
+            .expect("catalog");
+    }
+    let mut observed = BenchmarkModel::fixture("gpt-5-6-luna", 60.0, 60.0, 60.0, 5.0, 30.0);
+    observed.latency_seconds = Some(1.0);
+    let mut missing = BenchmarkModel::fixture("gpt-5-6-sol", 60.0, 60.0, 60.0, 5.0, 30.0);
+    missing.latency_seconds = None;
+    missing.end_to_end_response_seconds = None;
+    store
+        .replace_benchmarks("fixture", "Fixture", &[observed, missing])
+        .expect("benchmarks");
+    drop(store);
+    let paid = |base: &str| {
+        let mut config = provider(format!("http://{base}/v1"));
+        config.billing_mode = BillingMode::Paid;
+        config
+    };
+    let mut config = config_for(
+        BTreeMap::from([
+            ("provider-a".to_owned(), paid(&upstream.to_string())),
+            ("provider-b".to_owned(), paid(&upstream.to_string())),
+        ]),
+        vec![TargetConfig {
+            provider: "provider-a".to_owned(),
+            model: "gpt-5.6-luna".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    config.server.frontier_quality_floor_single = 50.0;
+    let gateway = spawn_gateway(config).await;
+    let body: Value = reqwest::Client::new()
+        .get(format!("{gateway}/v1/auto-models?route=frontier&view=full"))
+        .send()
+        .await
+        .expect("auto models response")
+        .json()
+        .await
+        .expect("auto models body");
+    let route = &body["routes"]["frontier"];
+    assert_eq!(route["latency_observed"], true);
+    let primary = &route["primary"];
+    // Equal quality and cost: the observed-latency candidate earns the latency
+    // weight; the missing-latency candidate earns nothing and cannot win.
+    assert_eq!(primary["id"], "provider-a/gpt-5.6-luna");
+    assert_eq!(primary["latency_available"], true);
+    assert_eq!(primary["latency_seconds"], 1.0);
+    let fallback = &route["fallbacks"][0];
+    assert_eq!(fallback["id"], "provider-b/gpt-5.6-sol");
+    assert_eq!(fallback["latency_available"], false);
+    assert_eq!(fallback["latency_seconds"], Value::Null);
 }

@@ -21,8 +21,8 @@ cargo run -- serve
 ```
 
 `setup` writes non-secret configuration to `~/.config/model-gateway/config.toml`. Secrets are stored according to `MODEL_GATEWAY_SECRET_STORE`:
-- `keychain` — stored in the OS keychain (default)
-- `file` — written to protected `0700`/`0600` files
+- `file` — written to protected `0700`/`0600` files (default)
+- `keychain` — stored in the OS keychain (explicit opt-in)
 - `environment` — read from environment variables at runtime; credentials cannot be persisted by the gateway
 
 Run with `--offline` to skip catalog checks during setup.
@@ -36,6 +36,13 @@ Run with `--offline` to skip catalog checks during setup.
 ```
 
 The scripts use `set -a` so `.env.local` variables are exported to the child process.
+
+Unattended startup never depends on an interactive keychain session. When
+`MODEL_GATEWAY_SECRET_STORE` is unset, both direct `cargo run -- serve` and
+the launcher scripts use protected files under `MODEL_GATEWAY_SECRET_DIR` or
+`~/.config/model-gateway/secrets`. To use the OS keychain, set
+`MODEL_GATEWAY_SECRET_STORE=keychain` explicitly before running setup or the
+server.
 
 ## Docker Setup
 
@@ -87,4 +94,13 @@ model-gateway credentials set ARTIFICIAL_ANALYSIS_API_KEY
 model-gateway benchmarks refresh
 ```
 
-The server starts a background refresh when the key is configured and no fresh data exists. See [benchmarks.md](benchmarks.md) for the ranking endpoint, configuration, and attribution.
+When the key is configured, the server polls Artificial Analysis on the
+configured `data_refresh_interval_seconds` (one hour by default). It preserves
+the last-known-good snapshot if a refresh fails. See [benchmarks.md](benchmarks.md)
+for the ranking endpoint, freshness rules, configuration, and attribution.
+
+The same server process also polls configured provider catalogs and the public
+Models.dev pricing feed on that interval. No separate ingestion service is
+required. Content fingerprints keep unchanged polls from creating duplicate
+snapshots, while a changed catalog, price, cache rate, or benchmark score is
+picked up automatically.

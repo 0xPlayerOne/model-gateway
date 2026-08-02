@@ -110,7 +110,7 @@ pub const PROFILE_DEFINITIONS: &[ProfileDefinition] = &[
         default_secret_name: Some("DEEPSEEK_API_KEY"),
         native_base_url: "https://api.deepseek.com/v1",
         docker_base_url: None,
-        suggested_model: "deepseek-chat",
+        suggested_model: "deepseek-v4-flash",
         connection_check: ConnectionCheck::OpenAiModels,
     },
     ProfileDefinition {
@@ -253,7 +253,7 @@ pub const PROFILE_DEFINITIONS: &[ProfileDefinition] = &[
         default_secret_name: Some("SILICON_FLOW_API_KEY"),
         native_base_url: "https://api.siliconflow.com/v1",
         docker_base_url: None,
-        suggested_model: "deepseek-ai/DeepSeek-V3",
+        suggested_model: "deepseek-ai/DeepSeek-V4-Flash",
         connection_check: ConnectionCheck::OpenAiModels,
     },
 ];

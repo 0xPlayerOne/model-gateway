@@ -44,6 +44,16 @@ CLIProxyAPI is integrated as a separate loopback process, not embedded into the 
 
 Use `./scripts/start-server.sh` to start the gateway and, when configured, the CLIProxyAPI sidecar together. Logs are written to `~/.config/model-gateway/cli-proxy/server.log`; pass `--follow` or `-f` to keep the gateway in the foreground. `./scripts/restart-server.sh` restarts both services. Use the dedicated `start-cli-proxy.sh` and `restart-cli-proxy.sh` scripts when managing only the sidecar. The lower-level `model-gateway cli-proxy serve` command remains a foreground runner.
 
+The launchers use the protected-file secret store by default and print the
+effective store. Secret modes are exclusive; set
+`MODEL_GATEWAY_SECRET_STORE=keychain` explicitly for OS-keychain access or
+`MODEL_GATEWAY_SECRET_STORE=environment` for exported variables only.
+
+Run `scripts/cli-proxy-supervision-smoke.sh` after changing the launcher
+environment or process-management logic. It uses a temporary fake sidecar to
+verify duplicate-start refusal, restart behavior, and refusal to take over a
+foreign listener without touching the configured sidecar.
+
 CLIProxyAPI owns account-level round-robin selection, cooldown, token refresh, and pre-output credential failover. The gateway treats it as one provider and may fall back to a different gateway provider only after CLIProxyAPI returns a terminal response.
 
 Security and policy boundaries:

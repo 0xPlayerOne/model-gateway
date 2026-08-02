@@ -31,13 +31,17 @@ const FRONTIER_LATENCY_WEIGHT: f64 = 0.25;
 use crate::config::{
     BillingMode, Config, ProviderConfig, ProviderProfileId, ServerConfig, TargetConfig,
 };
-use crate::pricing::{EffectivePrice, PriceScope, PriceSourceKind, normalize_price_id};
+use crate::pricing::{
+    EffectivePrice, PriceScope, PriceSourceKind, fetch_models_dev, normalize_price_id,
+};
 use crate::providers::BuiltinProvider;
+use crate::providers::ConnectionCheck;
 use crate::providers::prepare_request;
+use crate::providers::{fetch_account_limit, fetch_catalog};
 use crate::routing::{
-    AccessKind, AccountLimitSnapshot, CatalogOffering, IdentityAliasEvidence, ReservationOutcome,
-    ReservationRelease, ReservationToken, RoutingError, RoutingStore, classify_access,
-    quota_reference,
+    AccessKind, AccountLimitSnapshot, CatalogOffering, CatalogRecord, IdentityAliasEvidence,
+    ReservationOutcome, ReservationRelease, ReservationToken, RoutingError, RoutingStore,
+    classify_access, quota_reference,
 };
 use crate::secrets::{SecretError, SecretResolver};
 
@@ -64,6 +68,7 @@ pub struct AppState {
     global_permits: Arc<Semaphore>,
     local_model: Arc<Mutex<Option<CachedLocalModel>>>,
     routing: Arc<RoutingStore>,
+    catalog_snapshot_cache: Arc<Mutex<BTreeMap<CatalogSnapshotCacheKey, CachedCatalogSnapshot>>>,
 }
 
 struct CachedLocalModel {
@@ -97,6 +102,15 @@ struct ErrorBody {
 }
 
 pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, GatewayBuildError> {
+    build_app_state(config, secrets).map(|(router, _)| router)
+}
+
+/// Builds the router together with the shared application state so the
+/// server can run background data refreshes against the same state.
+pub fn build_app_state(
+    config: Config,
+    secrets: &SecretResolver,
+) -> Result<(Router, Arc<AppState>), GatewayBuildError> {
     if config.server.exposure == crate::config::Exposure::LocalContainer
         && env::var("MODEL_GATEWAY_CONTAINER_MODE").as_deref() != Ok("1")
     {
@@ -119,7 +133,18 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
                 message: error.to_string(),
             })?;
         let (api_key, api_key_source) = match provider.api_key_secret.as_deref() {
-            Some(name) => (secrets.get(name)?, secrets.source(name)?),
+            Some(name) => {
+                // Treat blank values as missing for both dispatch and
+                // diagnostics. A configured variable containing only spaces
+                // must not be reported as a usable credential source.
+                let api_key = secrets.get(name)?.filter(|value| !value.trim().is_empty());
+                let source = if api_key.is_some() {
+                    secrets.source(name)?
+                } else {
+                    None
+                };
+                (api_key, source)
+            }
             None => (None, None),
         };
         let available = provider.api_key_secret.is_none()
@@ -197,10 +222,12 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
         providers: Arc::new(providers),
         local_model: Arc::new(Mutex::new(None)),
         routing,
+        catalog_snapshot_cache: Arc::new(Mutex::new(BTreeMap::new())),
     };
-    Ok(Router::new()
+    let router = Router::new()
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
+        .route("/health/diagnostics", get(health_diagnostics))
         .route(
             "/openapi.json",
             get(|| async {
@@ -218,7 +245,8 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
         .route("/v1/auto-models", get(list_auto_models))
         .route("/v1/chat/completions", post(chat_completions))
         .layer(DefaultBodyLimit::max(state.config.server.max_body_bytes))
-        .with_state(state))
+        .with_state(state.clone());
+    Ok((router, Arc::new(state)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1119,13 +1147,62 @@ pub async fn run_server(
     let shutdown_grace = Duration::from_secs(config.server.shutdown_grace_seconds);
     let state_path = config.server.state_path.clone();
     let benchmark_max_age = config.server.benchmark_max_age_seconds;
+    let data_refresh_interval = config.server.data_refresh_interval_seconds;
     let aa_api_key = secrets.get("ARTIFICIAL_ANALYSIS_API_KEY")?;
-    let app = build_app(config, secrets)?;
+    let (app, state) = build_app_state(config, secrets)?;
 
-    // Background benchmark auto-refresh
+    // Startup readiness diagnostic: reports credential and catalog state per
+    // configured provider. Names and sources only, never secret values. A
+    // healthy gateway can still lack provider catalogs; this line makes the
+    // distinction explicit.
+    let readiness = provider_readiness(&state);
+    for provider in &readiness {
+        tracing::info!(
+            provider = %provider.id,
+            credential = provider.credential,
+            credential_source = provider.credential_source.unwrap_or("none"),
+            catalog = provider.catalog,
+            available = provider.available,
+            "provider readiness"
+        );
+    }
+    let benchmark_active = state
+        .routing
+        .active_benchmark_snapshot(benchmark_max_age)
+        .ok()
+        .flatten()
+        .is_some();
+    tracing::info!(
+        secret_store = %secrets.mode(),
+        providers_configured = readiness.len(),
+        providers_with_credentials = readiness
+            .iter()
+            .filter(|provider| provider.credential == "present")
+            .count(),
+        providers_with_fresh_catalogs = readiness
+            .iter()
+            .filter(|provider| provider.catalog == "fresh")
+            .count(),
+        benchmark_key_configured = aa_api_key.is_some(),
+        benchmark_snapshot_available = benchmark_active,
+        "gateway readiness summary"
+    );
+
+    // Background source-driven refreshes. Each loop polls on the configured
+    // cadence so provider price revisions, catalog changes, and new benchmark
+    // revisions are picked up without operator intervention. Fingerprints keep
+    // unchanged responses from creating duplicate snapshots.
     tokio::spawn(async move {
-        auto_refresh_benchmarks(state_path, benchmark_max_age, aa_api_key).await;
+        auto_refresh_benchmarks(
+            state_path,
+            benchmark_max_age,
+            data_refresh_interval,
+            aa_api_key,
+        )
+        .await;
     });
+    tokio::spawn(auto_refresh_catalogs(state.clone(), data_refresh_interval));
+    tokio::spawn(auto_refresh_pricing(state, data_refresh_interval));
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -1165,16 +1242,171 @@ async fn shutdown_signal() {
     }
 }
 
+/// Liveness probe: the process is responding.
 async fn health_live() -> impl IntoResponse {
     Json(json!({"status": "ok"}))
 }
 
+/// Readiness probe: the routing database is readable. Intentionally stays
+/// green when an individual provider credential or catalog is unavailable so
+/// local-only and partially configured gateways can still start; use
+/// `/health/diagnostics` for per-provider readiness detail.
 async fn health_ready(State(state): State<AppState>) -> impl IntoResponse {
     match state.routing.catalog_summary() {
         Ok(_) => (StatusCode::OK, Json(json!({"status": "ready"}))).into_response(),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"status": "not_ready"})),
+        )
+            .into_response(),
+    }
+}
+
+/// Per-provider readiness state for diagnostics. Reports credential presence
+/// and catalog freshness only; secret values are never exposed.
+#[derive(Serialize)]
+struct ProviderReadiness {
+    id: String,
+    /// `present`, `blank` (configured but empty/whitespace), `missing` (not
+    /// resolvable), or `not_required` (provider takes no key).
+    credential: &'static str,
+    /// Store that supplied the key (`environment`, `protected-file`,
+    /// `os-keychain`) or `none` when no key is configured.
+    credential_source: Option<&'static str>,
+    /// `fresh`, `stale`, or `missing` relative to `catalog_max_age_seconds`.
+    catalog: &'static str,
+    /// Whether the provider is usable for request dispatch.
+    available: bool,
+}
+
+fn provider_readiness(state: &AppState) -> Vec<ProviderReadiness> {
+    let max_age = state.config.server.catalog_max_age_seconds;
+    let fresh = state
+        .routing
+        .all_candidates(max_age)
+        .ok()
+        .map(|offerings| {
+            offerings
+                .into_iter()
+                .map(|offering| offering.provider)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let present = state
+        .routing
+        .catalog_summary()
+        .ok()
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(provider, _, _)| provider)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    state
+        .config
+        .providers
+        .keys()
+        .map(|name| {
+            let runtime = &state.providers[name];
+            ProviderReadiness {
+                id: name.clone(),
+                credential: match runtime.config.api_key_secret.as_deref() {
+                    None => "not_required",
+                    Some(_) => match runtime.api_key.as_deref() {
+                        Some(value) if !value.trim().is_empty() => "present",
+                        Some(_) => "blank",
+                        None => "missing",
+                    },
+                },
+                credential_source: runtime.api_key_source,
+                catalog: if fresh.contains(name.as_str()) {
+                    "fresh"
+                } else if present.contains(name.as_str()) {
+                    "stale"
+                } else {
+                    "missing"
+                },
+                available: runtime.available,
+            }
+        })
+        .collect()
+}
+
+/// Readiness diagnostics: distinguishes a healthy gateway (serving requests)
+/// from unavailable provider catalogs or missing credentials. The gateway
+/// reports `ready` even when no provider catalog is fresh; the provider-level
+/// detail names exactly what is missing.
+async fn health_diagnostics(State(state): State<AppState>) -> Response {
+    let providers = provider_readiness(&state);
+    let with_credentials = providers
+        .iter()
+        .filter(|provider| provider.credential == "present")
+        .count();
+    let fresh_catalogs = providers
+        .iter()
+        .filter(|provider| provider.catalog == "fresh")
+        .count();
+    let catalog_status = if providers.is_empty() {
+        "not_configured"
+    } else if fresh_catalogs == providers.len() {
+        "available"
+    } else if fresh_catalogs == 0 {
+        "unavailable"
+    } else {
+        "partial"
+    };
+    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
+    let benchmark_active = state
+        .routing
+        .active_benchmark_snapshot(benchmark_max_age)
+        .ok()
+        .flatten()
+        .is_some();
+    let benchmark_snapshots = state
+        .routing
+        .benchmark_status()
+        .ok()
+        .map_or(0, |rows| rows.len());
+    let benchmark_status = if benchmark_active {
+        "available"
+    } else if benchmark_snapshots > 0 {
+        "stale"
+    } else {
+        "unavailable"
+    };
+    match state.routing.catalog_summary() {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ready",
+                "gateway": {
+                    "status": "ready",
+                    "providers_configured": providers.len(),
+                    "providers_with_credentials": with_credentials,
+                    "providers_with_fresh_catalogs": fresh_catalogs,
+                },
+                "provider_catalogs": {
+                    "status": catalog_status,
+                    "fresh": fresh_catalogs,
+                    "configured": providers.len(),
+                },
+                "benchmarks": {
+                    "status": benchmark_status,
+                    "snapshots": benchmark_snapshots,
+                },
+                "providers": providers,
+            })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "gateway": {"status": "not_ready"},
+                "provider_catalogs": {"status": "unknown"},
+                "benchmarks": {"status": "unknown"},
+                "providers": providers,
+            })),
         )
             .into_response(),
     }
@@ -1325,7 +1557,7 @@ struct ModelResponseContext<'a> {
     origin: &'a str,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum CatalogAccess {
     Free,
@@ -1342,6 +1574,7 @@ struct CatalogModelsQuery {
     cursor: Option<String>,
     view: Option<ModelView>,
     variants: Option<CatalogVariants>,
+    fields: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -1413,12 +1646,13 @@ async fn list_rankings(
         .benchmark_status()
         .unwrap_or_default()
         .into_iter()
-        .map(|(source, fetched_at, models, attribution)| {
+        .map(|(source, fetched_at, models, attribution, revision)| {
             json!({
                 "source": source,
                 "fetched_at": fetched_at,
                 "models": models,
-                "attribution": attribution
+                "attribution": attribution,
+                "revision": revision,
             })
         })
         .collect::<Vec<_>>();
@@ -1473,6 +1707,9 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
                 "cache_write_price_per_million": model.cache_write_price_per_million,
                 "cost_per_task_usd": model.cost_per_task_usd,
                 "latency_seconds": model.latency_seconds,
+                "latency_available": model
+                    .frontier_latency_seconds()
+                    .is_some_and(|latency| latency.is_finite()),
                 "time_to_first_answer_seconds": model.time_to_first_answer_seconds,
                 "end_to_end_response_seconds": model.end_to_end_response_seconds,
                 "output_tokens_per_second": model.output_tokens_per_second,
@@ -1644,12 +1881,16 @@ fn benchmark_metrics_json(benchmark: Option<&BenchmarkModel>) -> Value {
     json!({
         "cost_per_task_usd": benchmark.and_then(|b| b.cost_per_task_usd),
         "latency_seconds": benchmark.and_then(|b| b.latency_seconds),
+        "latency_available": benchmark
+            .and_then(BenchmarkModel::frontier_latency_seconds)
+            .is_some_and(|latency| latency.is_finite()),
         "time_to_first_answer_seconds": benchmark
             .and_then(|b| b.time_to_first_answer_seconds),
         "end_to_end_response_seconds": benchmark
             .and_then(|b| b.end_to_end_response_seconds),
         "output_tokens_per_second": benchmark
             .and_then(|b| b.output_tokens_per_second),
+        "output_tokens_per_task": benchmark.and_then(|b| b.output_tokens_per_task),
     })
 }
 
@@ -1754,6 +1995,29 @@ async fn load_free_candidates(
     Ok((candidates, account_limits))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CatalogSnapshotCacheKey {
+    access: CatalogAccess,
+    provider: Option<String>,
+    task: TaskKind,
+    include_variants: bool,
+}
+
+struct CachedCatalogSnapshot {
+    snapshot: Arc<CatalogSnapshot>,
+    expires_at: Instant,
+}
+
+const CATALOG_SNAPSHOT_CACHE_TTL: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy)]
+struct CatalogSnapshotTimestamps {
+    benchmark_fetched_at: i64,
+    identity_last_modified: i64,
+    pricing_last_modified: i64,
+    benchmark_last_modified: i64,
+}
+
 #[derive(Debug)]
 struct CatalogSnapshot {
     candidates: Vec<ModelCandidate>,
@@ -1768,6 +2032,7 @@ fn catalog_snapshot(
     access: CatalogAccess,
     task: TaskKind,
     include_variants: bool,
+    timestamps: CatalogSnapshotTimestamps,
 ) -> CatalogSnapshot {
     candidates.sort_by(|left, right| {
         let left_quality = left.benchmark.as_ref().and_then(|b| quality_for(b, task));
@@ -1793,11 +2058,14 @@ fn catalog_snapshot(
     }
 
     let mut hasher = Sha256::new();
-    hasher.update(format!("{:?}:{:?}:{include_variants}", access, task));
-    hasher.update(format!("{:?}", account_limits).as_bytes());
+    hasher.update(format!(
+        "{access:?}:{task:?}:{include_variants}:{}",
+        timestamps.benchmark_fetched_at
+    ));
+    hasher.update(format!("{account_limits:?}").as_bytes());
     let mut last_modified = 0;
     for candidate in &candidates {
-        hasher.update(format!("{:?}", candidate).as_bytes());
+        hasher.update(format!("{candidate:?}").as_bytes());
         last_modified = last_modified.max(candidate.offering.refreshed_at);
         if let Some(price) = candidate.price.as_ref() {
             last_modified = last_modified.max(price.fetched_at.unwrap_or_default());
@@ -1807,6 +2075,10 @@ fn catalog_snapshot(
     for account in account_limits.values() {
         last_modified = last_modified.max(account.fetched_at);
     }
+    last_modified = last_modified.max(timestamps.benchmark_fetched_at);
+    last_modified = last_modified.max(timestamps.identity_last_modified);
+    last_modified = last_modified.max(timestamps.pricing_last_modified);
+    last_modified = last_modified.max(timestamps.benchmark_last_modified);
     CatalogSnapshot {
         candidates,
         account_limits,
@@ -1905,6 +2177,9 @@ fn catalog_links(
         if matches!(query.variants, Some(CatalogVariants::All)) {
             params.push("variants=all".to_owned());
         }
+        if let Some(fields) = query.fields.as_deref() {
+            params.push(format!("fields={}", encode_uri_component(fields, false)));
+        }
         if let Some(cursor) = cursor {
             params.push(format!("cursor={}", encode_uri_component(&cursor, false)));
         }
@@ -1945,9 +2220,7 @@ fn cached_json_response(value: Value, request_headers: &HeaderMap, last_modified
         .get("if-none-match")
         .and_then(|value| value.to_str().ok())
     {
-        if_none_match
-            .split(',')
-            .any(|candidate| candidate.trim() == etag)
+        if_none_match_matches(if_none_match, &etag)
     } else {
         request_headers
             .get("if-modified-since")
@@ -1972,11 +2245,21 @@ fn cached_json_response(value: Value, request_headers: &HeaderMap, last_modified
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
+        .header("content-length", body.len().to_string())
         .header("etag", etag)
         .header("last-modified", last_modified)
         .header("cache-control", cache_control)
         .body(Body::from(body))
         .expect("valid JSON response")
+}
+
+/// GET/HEAD If-None-Match uses weak comparison. Accepting weak validators and
+/// the wildcard keeps conditional catalog requests interoperable with standard
+/// HTTP caches while the emitted validator remains a strong body hash.
+fn if_none_match_matches(header_value: &str, etag: &str) -> bool {
+    header_value.split(',').map(str::trim).any(|candidate| {
+        candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
+    })
 }
 
 fn parse_catalog_task(task: Option<&str>) -> Result<TaskKind, Box<Response>> {
@@ -2000,6 +2283,117 @@ fn parse_catalog_task(task: Option<&str>) -> Result<TaskKind, Box<Response>> {
     }
 }
 
+/// Strict allowlist of top-level entry field names accepted by `fields`.
+/// The union of the summary and full entry shapes: `quality` and
+/// `reasoning_effort` are summary-view fields, everything else is a
+/// full-view field.
+fn parse_catalog_limit(limit: Option<usize>) -> Result<usize, Box<Response>> {
+    match limit {
+        None => Ok(25),
+        Some(limit @ 1..=100) => Ok(limit),
+        Some(_) => Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": "limit must be between 1 and 100",
+                        "type": "invalid_request_error",
+                        "code": "invalid_limit"
+                    }
+                })),
+            )
+                .into_response(),
+        )),
+    }
+}
+
+const CATALOG_FIELD_ALLOWLIST: [&str; 15] = [
+    "id",
+    "object",
+    "links",
+    "model",
+    "composite",
+    "scores",
+    "capabilities",
+    "price_per_million",
+    "reference_price_per_million",
+    "access",
+    "benchmark_match",
+    "benchmark_id",
+    "benchmarks",
+    "quality",
+    "reasoning_effort",
+];
+
+/// Fields that the cheap summary serialization already contains.
+const CATALOG_SUMMARY_FIELDS: [&str; 4] = ["id", "links", "quality", "reasoning_effort"];
+
+/// A validated projection. Names are deduplicated and kept in canonical
+/// allowlist order so that `fields=id,quality` and `fields=quality,id`
+/// select the identical representation (and therefore the identical ETag).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatalogFields {
+    names: Vec<&'static str>,
+}
+
+impl CatalogFields {
+    fn contains(&self, name: &str) -> bool {
+        self.names.contains(&name)
+    }
+
+    fn is_summary_only(&self) -> bool {
+        self.names
+            .iter()
+            .all(|name| CATALOG_SUMMARY_FIELDS.contains(name))
+    }
+}
+
+fn catalog_fields_error(message: &str) -> Box<Response> {
+    Box::new(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": message,
+                    "type": "invalid_request_error",
+                    "code": "invalid_fields"
+                }
+            })),
+        )
+            .into_response(),
+    )
+}
+
+fn parse_catalog_fields(raw: Option<&str>) -> Result<Option<CatalogFields>, Box<Response>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let mut names: Vec<&'static str> = Vec::new();
+    for part in raw.split(',') {
+        let name = part.trim();
+        if name.is_empty() {
+            return Err(catalog_fields_error(
+                "fields must be a comma-separated allowlist of exact field names",
+            ));
+        }
+        let allowlisted = CATALOG_FIELD_ALLOWLIST
+            .iter()
+            .find(|candidate| **candidate == name)
+            .copied()
+            .ok_or_else(|| catalog_fields_error(&format!("unknown catalog field '{name}'")))?;
+        if !names.contains(&allowlisted) {
+            names.push(allowlisted);
+        }
+    }
+    names.sort_by_key(|name| {
+        CATALOG_FIELD_ALLOWLIST
+            .iter()
+            .position(|candidate| candidate == name)
+            .unwrap_or(usize::MAX)
+    });
+    Ok(Some(CatalogFields { names }))
+}
+
 fn catalog_query_error(rejection: QueryRejection) -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -2020,7 +2414,24 @@ async fn load_catalog_snapshot(
     provider_filter: Option<&str>,
     task: TaskKind,
     include_variants: bool,
-) -> Result<CatalogSnapshot, ()> {
+) -> Result<Arc<CatalogSnapshot>, ()> {
+    let cache_key = CatalogSnapshotCacheKey {
+        access,
+        provider: provider_filter.map(ToOwned::to_owned),
+        task,
+        include_variants,
+    };
+    let now = Instant::now();
+    {
+        let mut cache = state.catalog_snapshot_cache.lock().await;
+        if let Some(cached) = cache.get(&cache_key)
+            && cached.expires_at > now
+        {
+            return Ok(cached.snapshot.clone());
+        }
+        cache.retain(|_, cached| cached.expires_at > now);
+    }
+
     let (mut candidates, account_limits) = match access {
         CatalogAccess::Free => load_free_candidates(state, provider_filter).await?,
         CatalogAccess::Paid => (
@@ -2038,13 +2449,64 @@ async fn load_catalog_snapshot(
     if matches!(access, CatalogAccess::Paid) {
         candidates.retain(|candidate| candidate.offering.access_kind.is_paid_route_eligible());
     }
-    Ok(catalog_snapshot(
+    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
+    let benchmark_fetched_at = routing_operation(state.routing.clone(), move |routing| {
+        routing
+            .active_benchmark_snapshot(benchmark_max_age)
+            .map(|snapshot| snapshot.map(|(_, fetched_at, _)| fetched_at))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    let identity_last_modified = routing_operation(state.routing.clone(), |routing| {
+        routing.identity_last_modified()
+    })
+    .await
+    .map_err(|_| ())?;
+    let pricing_last_modified = routing_operation(state.routing.clone(), |routing| {
+        routing.pricing_status().map(|snapshots| {
+            snapshots
+                .into_iter()
+                .map(|snapshot| snapshot.2)
+                .max()
+                .unwrap_or(0)
+        })
+    })
+    .await
+    .map_err(|_| ())?;
+    let benchmark_last_modified = routing_operation(state.routing.clone(), |routing| {
+        routing.benchmark_status().map(|snapshots| {
+            snapshots
+                .into_iter()
+                .map(|snapshot| snapshot.1)
+                .max()
+                .unwrap_or(0)
+        })
+    })
+    .await
+    .map_err(|_| ())?;
+    let snapshot = Arc::new(catalog_snapshot(
         candidates,
         account_limits,
         access,
         task,
         include_variants,
-    ))
+        CatalogSnapshotTimestamps {
+            benchmark_fetched_at,
+            identity_last_modified,
+            pricing_last_modified,
+            benchmark_last_modified,
+        },
+    ));
+    state.catalog_snapshot_cache.lock().await.insert(
+        cache_key,
+        CachedCatalogSnapshot {
+            snapshot: snapshot.clone(),
+            expires_at: Instant::now() + CATALOG_SNAPSHOT_CACHE_TTL,
+        },
+    );
+    Ok(snapshot)
 }
 
 fn catalog_model_response(
@@ -2052,6 +2514,7 @@ fn catalog_model_response(
     rank: usize,
     account_limit: Option<AccountLimitSnapshot>,
     view: ModelView,
+    fields: Option<&CatalogFields>,
     origin: &str,
 ) -> Value {
     let composite_quality = candidate.benchmark.as_ref().and_then(composite_quality);
@@ -2070,10 +2533,33 @@ fn catalog_model_response(
         match_kind: candidate.match_kind,
         account_limit,
     };
-    if view.is_full() {
-        catalog_model_json(&entry, origin)
-    } else {
-        catalog_model_summary_json(&entry, origin)
+    match fields {
+        Some(fields) => {
+            // An explicit projection overrides the view: the entry contains
+            // exactly the requested fields. Summary-only fields are derived
+            // from the entry and merged into the full shape when requested.
+            let mut object = if fields.is_summary_only() {
+                catalog_model_summary_json(&entry, origin)
+            } else {
+                catalog_model_json(&entry, origin)
+            }
+            .as_object()
+            .expect("catalog model entries serialize to JSON objects")
+            .clone();
+            if fields.contains("quality") {
+                object.insert(
+                    "quality".to_owned(),
+                    json!({"score": composite_quality, "rank": rank}),
+                );
+            }
+            if fields.contains("reasoning_effort") {
+                object.insert("reasoning_effort".to_owned(), json!(effort_level));
+            }
+            object.retain(|key, _| fields.contains(key));
+            Value::Object(object)
+        }
+        None if view.is_full() => catalog_model_json(&entry, origin),
+        None => catalog_model_summary_json(&entry, origin),
     }
 }
 
@@ -2629,9 +3115,13 @@ fn select_mode_models(
             continue;
         }
         let benchmark = candidate.benchmark.as_ref();
+        // Missing benchmark latency is an explicit diagnostic condition, never
+        // an invented value: `f64::INFINITY` is non-finite, so the frontier's
+        // minimum-latency scan and efficiency score both ignore it and a
+        // missing value can never improve latency-aware ranking.
         let latency = benchmark
             .and_then(BenchmarkModel::frontier_latency_seconds)
-            .unwrap_or(f64::MAX);
+            .unwrap_or(f64::INFINITY);
         let reference_input_price = candidate
             .offering
             .input_price_per_million
@@ -2720,6 +3210,12 @@ fn select_mode_models(
     }
     let eligible = scored;
     let mut ranked = pareto_rank(eligible.clone());
+    // Explicit diagnostic for the latency-aware frontier: whether any
+    // candidate had a measured benchmark latency. Missing latency never
+    // fabricates a value and never improves a candidate's rank.
+    let latency_observed = ranked
+        .iter()
+        .any(|candidate| candidate.latency_seconds.is_finite());
     let rank_order = |a: &ScoredCandidate<ModeModelValue<'_>>,
                       b: &ScoredCandidate<ModeModelValue<'_>>| {
         a.expected_cost_microusd
@@ -2778,6 +3274,7 @@ fn select_mode_models(
         "mode": mode,
         "quality_floor": quality_floor,
         "max_quality_regret": max_quality_regret,
+        "latency_observed": latency_observed,
         "selection_policy": if mode == "auto-frontier" {
             Some(json!({
                 "strategy": "latency_aware_pareto",
@@ -2800,23 +3297,40 @@ fn frontier_selection_score(
     minimum_cost: u64,
     minimum_latency: f64,
 ) -> f64 {
-    let cost_efficiency =
-        if minimum_cost == u64::MAX || candidate.expected_cost_microusd == u64::MAX {
-            0.0
-        } else if minimum_cost == 0 {
-            1.0
-        } else {
-            (minimum_cost as f64 / candidate.expected_cost_microusd.max(1) as f64).min(1.0)
-        };
-    let latency_efficiency = if !minimum_latency.is_finite()
-        || !candidate.latency_seconds.is_finite()
-        || minimum_latency <= 0.0
-    {
+    frontier_score(
+        candidate.quality,
+        candidate.expected_cost_microusd,
+        candidate.latency_seconds,
+        minimum_cost,
+        minimum_latency,
+    )
+}
+
+/// Pure frontier score: 50% quality, 25% cost efficiency, 25% latency
+/// efficiency. A non-finite latency (missing benchmark latency) always earns
+/// zero latency efficiency, so missing data can never improve a candidate's
+/// latency-aware ranking or masquerade as the observed minimum.
+fn frontier_score(
+    quality: f64,
+    expected_cost_microusd: u64,
+    latency_seconds: f64,
+    minimum_cost: u64,
+    minimum_latency: f64,
+) -> f64 {
+    let cost_efficiency = if minimum_cost == u64::MAX || expected_cost_microusd == u64::MAX {
         0.0
+    } else if minimum_cost == 0 {
+        1.0
     } else {
-        (minimum_latency / candidate.latency_seconds.max(f64::EPSILON)).min(1.0)
+        (minimum_cost as f64 / expected_cost_microusd.max(1) as f64).min(1.0)
     };
-    FRONTIER_QUALITY_WEIGHT * (candidate.quality / 100.0).clamp(0.0, 1.0)
+    let latency_efficiency =
+        if !minimum_latency.is_finite() || !latency_seconds.is_finite() || minimum_latency <= 0.0 {
+            0.0
+        } else {
+            (minimum_latency / latency_seconds.max(f64::EPSILON)).min(1.0)
+        };
+    FRONTIER_QUALITY_WEIGHT * (quality / 100.0).clamp(0.0, 1.0)
         + FRONTIER_COST_WEIGHT * cost_efficiency
         + FRONTIER_LATENCY_WEIGHT * latency_efficiency
 }
@@ -2876,7 +3390,11 @@ fn mode_model_entry(
         } else {
             "unknown"
         },
-        "latency_seconds": candidate.latency_seconds,
+        // Explicit missing-latency diagnostic: null seconds plus an
+        // availability flag instead of an invented sentinel value.
+        "latency_seconds": (candidate.latency_seconds.is_finite())
+            .then_some(candidate.latency_seconds),
+        "latency_available": candidate.latency_seconds.is_finite(),
         "benchmark_cost_per_task_usd": candidate.value.benchmark_cost_per_task_usd,
         "time_to_first_answer_seconds": candidate.value.time_to_first_answer_seconds,
         "end_to_end_response_seconds": candidate.value.end_to_end_response_seconds,
@@ -2927,7 +3445,7 @@ async fn list_catalog_models(
     query: Result<Query<CatalogModelsQuery>, QueryRejection>,
 ) -> Response {
     let origin = public_origin(&headers);
-    let Query(query) = match query {
+    let Query(mut query) = match query {
         Ok(query) => query,
         Err(rejection) => return catalog_query_error(rejection),
     };
@@ -2955,7 +3473,17 @@ async fn list_catalog_models(
         Ok(task) => task,
         Err(response) => return *response,
     };
-    let limit = query.limit.unwrap_or(25).clamp(1, 100);
+    let fields = match parse_catalog_fields(query.fields.as_deref()) {
+        Ok(fields) => fields,
+        Err(response) => return *response,
+    };
+    if let Some(fields) = fields.as_ref() {
+        query.fields = Some(fields.names.join(","));
+    }
+    let limit = match parse_catalog_limit(query.limit) {
+        Ok(limit) => limit,
+        Err(response) => return *response,
+    };
     let view = query.view.unwrap_or_default();
     let include_variants = matches!(query.variants, Some(CatalogVariants::All));
     let snapshot = match load_catalog_snapshot(
@@ -3030,6 +3558,19 @@ async fn list_catalog_models(
         }
     };
     let total = snapshot.candidates.len();
+    if offset > total {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "cursor points past the end of the catalog",
+                    "type": "invalid_request_error",
+                    "code": "invalid_cursor"
+                }
+            })),
+        )
+            .into_response();
+    }
     let data = snapshot
         .candidates
         .iter()
@@ -3045,10 +3586,20 @@ async fn list_catalog_models(
                     .get(&candidate.offering.provider)
                     .copied(),
                 view,
+                fields.as_ref(),
                 &origin,
             )
         })
         .collect::<Vec<_>>();
+    let mut meta = json!({
+        "snapshot": snapshot.token,
+        "total": total,
+        "limit": limit,
+        "returned": data.len(),
+    });
+    if let Some(fields) = fields.as_ref() {
+        meta["fields"] = json!(fields.names);
+    }
     cached_json_response(
         json!({
             "object": "model.collection",
@@ -3056,12 +3607,7 @@ async fn list_catalog_models(
             "access": catalog_access_name(access),
             "task": task.as_str(),
             "variants": if include_variants { "all" } else { "collapsed" },
-            "meta": {
-                "snapshot": snapshot.token,
-                "total": total,
-                "limit": limit,
-                "returned": data.len(),
-            },
+            "meta": meta,
             "links": catalog_links(
                 &query,
                 access,
@@ -3156,6 +3702,7 @@ async fn get_catalog_model(
         rank + 1,
         snapshot.account_limits.get(provider).copied(),
         ModelView::Full,
+        None,
         &public_origin(&headers),
     );
     cached_json_response(
@@ -3768,6 +4315,9 @@ struct SelectionMetadata {
     benchmark_snapshot_id: i64,
     benchmark_as_of: i64,
     match_kind: Option<ModelMatchKind>,
+    /// The observed end-to-end benchmark latency used by routing. `None`
+    /// means the benchmark had no usable latency measurement.
+    latency_seconds: Option<f64>,
 }
 
 async fn resolve_targets(
@@ -3950,7 +4500,7 @@ async fn resolve_auto_free_targets(
             "routing_state_unavailable",
         )
     })?;
-    let (benchmark_snapshot_id, benchmark_as_of) = benchmark_snapshot.unwrap_or((0, 0));
+    let (benchmark_snapshot_id, benchmark_as_of, _) = benchmark_snapshot.unwrap_or((0, 0, None));
     let mut benchmark_map = BTreeMap::new();
     for b in &benchmarks {
         benchmark_map
@@ -4021,7 +4571,7 @@ async fn resolve_auto_free_targets(
             }
             let latency = benchmark
                 .and_then(BenchmarkModel::frontier_latency_seconds)
-                .unwrap_or(f64::MAX);
+                .unwrap_or(f64::INFINITY);
             let reference_cost_microusd = if access_kind == AccessKind::QuotaLimitedFreeTier {
                 benchmark
                     .and_then(BenchmarkModel::cost_per_task_microusd)
@@ -4076,6 +4626,9 @@ async fn resolve_auto_free_targets(
                         benchmark_snapshot_id,
                         benchmark_as_of,
                         match_kind: benchmark.map(|_| canonical.kind),
+                        latency_seconds: benchmark
+                            .and_then(BenchmarkModel::frontier_latency_seconds)
+                            .filter(|latency| latency.is_finite()),
                     }),
                 },
             })
@@ -4265,7 +4818,7 @@ async fn resolve_benchmark_targets(
         .and_then(Value::as_str)
         .filter(|effort| is_reasoning_effort(effort));
     let mut benchmark_by_model = BTreeMap::<String, Vec<_>>::new();
-    let (benchmark_snapshot_id, benchmark_as_of) = benchmark_snapshot.unwrap_or((0, 0));
+    let (benchmark_snapshot_id, benchmark_as_of, _) = benchmark_snapshot.unwrap_or((0, 0, None));
     for benchmark in benchmarks {
         benchmark_by_model
             .entry(benchmark.id.clone())
@@ -4412,11 +4965,16 @@ async fn resolve_benchmark_targets(
                         benchmark_snapshot_id,
                         benchmark_as_of,
                         match_kind: Some(canonical.kind),
+                        latency_seconds: benchmark
+                            .frontier_latency_seconds()
+                            .filter(|latency| latency.is_finite()),
                     }),
                 },
                 quality,
                 expected_cost_microusd: reference_cost_microusd,
-                latency_seconds: benchmark.frontier_latency_seconds().unwrap_or(f64::MAX),
+                latency_seconds: benchmark
+                    .frontier_latency_seconds()
+                    .unwrap_or(f64::INFINITY),
             });
         }
     }
@@ -5459,7 +6017,7 @@ fn footer_sse_event(
             }
         }
     }
-    format!("data: {}{line_ending}{line_ending}", value).into_bytes()
+    format!("data: {value}{line_ending}{line_ending}").into_bytes()
 }
 
 struct RequestLog {
@@ -5597,6 +6155,20 @@ fn add_model_headers(headers: &mut HeaderMap, metadata: &ModelMetadata) {
             "x-model-gateway-benchmark-as-of",
             header_value(&selection.benchmark_as_of.to_string()),
         );
+        headers.insert(
+            "x-model-gateway-benchmark-latency-observed",
+            header_value(if selection.latency_seconds.is_some() {
+                "true"
+            } else {
+                "false"
+            }),
+        );
+        if let Some(latency) = selection.latency_seconds {
+            headers.insert(
+                "x-model-gateway-benchmark-latency-seconds",
+                header_value(&latency.to_string()),
+            );
+        }
         if let Some(match_kind) = selection.match_kind {
             headers.insert(
                 "x-model-gateway-benchmark-match",
@@ -5700,9 +6272,10 @@ fn error_response(
 async fn auto_refresh_benchmarks(
     state_path: Option<PathBuf>,
     benchmark_max_age_seconds: u64,
+    refresh_interval_seconds: u64,
     aa_api_key: Option<String>,
 ) {
-    let refresh_interval = Duration::from_secs(benchmark_max_age_seconds.max(3_600) / 2);
+    let refresh_interval = Duration::from_secs(refresh_interval_seconds.clamp(60, 86_400));
 
     loop {
         let routing = match RoutingStore::open(state_path.as_deref()) {
@@ -5726,7 +6299,14 @@ async fn auto_refresh_benchmarks(
                     tracing::info!("Auto-refreshed {count} benchmark models");
                 }
                 Err(e) => {
-                    tracing::warn!("Benchmark auto-refresh failed (will retry): {e}");
+                    let state = routing
+                        .active_benchmark_snapshot(benchmark_max_age_seconds)
+                        .ok()
+                        .flatten();
+                    tracing::warn!(
+                        has_last_known_good = state.is_some(),
+                        "Benchmark auto-refresh failed (will retry): {e}"
+                    );
                 }
             }
         }
@@ -5786,6 +6366,122 @@ async fn fetch_aa_benchmarks(routing: &RoutingStore, api_key: &str) -> Result<us
     Ok(count)
 }
 
+/// Periodically re-ingests provider catalogs. Catalog rows are the
+/// provider-scoped price source with the highest fallback priority, so polling
+/// catches provider catalog and price revisions before the freshness window
+/// expires.
+async fn auto_refresh_catalogs(state: Arc<AppState>, refresh_interval_seconds: u64) {
+    let interval = Duration::from_secs(refresh_interval_seconds.clamp(60, 86_400));
+    loop {
+        for provider in refreshable_catalog_providers(&state) {
+            match refresh_provider_catalog(&state, &provider).await {
+                Ok(count) => {
+                    tracing::info!("Auto-refreshed catalog {provider}: {count} models");
+                }
+                Err(error) => {
+                    tracing::warn!("Catalog auto-refresh failed for {provider}: {error}");
+                }
+            }
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Providers whose upstream catalog can be queried. Configuration-only
+/// profiles never publish catalog rows, and unavailable providers are skipped.
+fn refreshable_catalog_providers(state: &AppState) -> Vec<String> {
+    state
+        .providers
+        .iter()
+        .filter(|(_name, runtime)| {
+            let connection_check = runtime
+                .config
+                .profile
+                .map(|profile| profile.definition().connection_check)
+                .unwrap_or(ConnectionCheck::OpenAiModels);
+            runtime.available && connection_check != ConnectionCheck::ConfigurationOnly
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+async fn refresh_provider_catalog(state: &AppState, name: &str) -> Result<usize, String> {
+    let runtime = state
+        .providers
+        .get(name)
+        .ok_or_else(|| format!("provider {name} is not configured"))?;
+    let provider_config = runtime.config.clone();
+    let api_key = runtime.api_key.clone();
+    let (models, account_limit) = tokio::task::spawn_blocking(move || {
+        let models = fetch_catalog(&provider_config, api_key.as_deref())?;
+        if models.is_empty() {
+            return Err(
+                "provider returned an empty catalog; preserving last-known-good data".to_owned(),
+            );
+        }
+        let account_limit = fetch_account_limit(&provider_config, api_key.as_deref())?;
+        Ok::<_, String>((models, account_limit))
+    })
+    .await
+    .map_err(|error| format!("catalog refresh task failed: {error}"))??;
+    let records = models
+        .into_iter()
+        .map(|model| CatalogRecord {
+            access_kind: classify_access(&runtime.config, &model.id, model.zero_priced),
+            model: model.id,
+            context_length: model.context_length,
+            supports_tools: model.supports_tools,
+            supports_vision: model.supports_vision,
+            supports_structured_output: model.supports_structured_output,
+            input_price_per_million: model.input_price_per_million,
+            output_price_per_million: model.output_price_per_million,
+        })
+        .collect::<Vec<_>>();
+    state
+        .routing
+        .replace_catalog(name, &records)
+        .map_err(|error| error.to_string())?;
+    if let Some(account_limit) = account_limit {
+        state
+            .routing
+            .record_account_limit(name, &account_limit)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(records.len())
+}
+
+/// Periodically re-ingests models.dev pricing. models.dev revises a
+/// provider/model's rates and cache rates in place, so each poll observes the
+/// current source and the content fingerprint prevents unchanged snapshots
+/// from accumulating.
+async fn auto_refresh_pricing(state: Arc<AppState>, refresh_interval_seconds: u64) {
+    let interval = Duration::from_secs(refresh_interval_seconds.clamp(60, 86_400));
+    loop {
+        match tokio::task::spawn_blocking(fetch_models_dev).await {
+            Ok(Ok(observations)) => match state.routing.replace_pricing(
+                "models.dev",
+                PriceSourceKind::ModelsDev,
+                "Models.dev (https://models.dev/)",
+                &observations,
+            ) {
+                Ok(snapshot) => {
+                    tracing::info!("Auto-refreshed models.dev pricing snapshot {snapshot}");
+                }
+                Err(error) => {
+                    tracing::warn!("Pricing auto-refresh store failed: {error}");
+                }
+            },
+            Ok(Err(error)) => {
+                tracing::warn!("Pricing auto-refresh fetch failed: {error}");
+            }
+            Err(error) => {
+                tracing::warn!("Pricing auto-refresh task failed: {error}");
+            }
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -5794,26 +6490,30 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        BenchmarkIdentityIndex, ModelMatchKind, ModelMetadata, RequestRequirements,
-        SelectionMetadata, StreamChoice, add_model_headers, benchmark_ids_match,
-        benchmark_price_for_model, benchmarks_for_effort, catalog_capabilities_json,
-        copy_safe_headers, decorate_json_response, encode_uri_component, estimate_request_tokens,
+        BenchmarkIdentityIndex, CatalogFields, ModelCandidate, ModelMatchKind, ModelMetadata,
+        ModelView, RequestRequirements, SelectionMetadata, StreamChoice, add_model_headers,
+        benchmark_ids_match, benchmark_price_for_model, benchmarks_for_effort,
+        catalog_capabilities_json, catalog_model_response, copy_safe_headers,
+        decorate_json_response, encode_uri_component, estimate_request_tokens,
         expected_cost_microusd, find_all_matching_benchmarks, find_benchmark,
         find_exact_matching_benchmarks, find_exact_matching_benchmarks_indexed,
-        find_suggested_benchmark, footer_sse_event, has_dynamic_or_release_suffix, header_value,
-        identity_mapping_indexes, is_exact_model_identity, is_fallback_status, is_model_denied,
-        is_provider_auto_route, is_reasoning_effort, log_request, malformed_sse_event,
-        parse_json_usage, parse_sse_usage, parse_usage_value, public_origin, rank_benchmark_models,
-        rate_limit_reset_delay, request_id, request_id_from_response, session_material, sse_model,
-        strip_model_noise, take_sse_event, transform_sse_event,
+        find_suggested_benchmark, footer_sse_event, frontier_score, has_dynamic_or_release_suffix,
+        header_value, identity_mapping_indexes, is_exact_model_identity, is_fallback_status,
+        is_model_denied, is_provider_auto_route, is_reasoning_effort, log_request,
+        malformed_sse_event, parse_catalog_fields, parse_json_usage, parse_sse_usage,
+        parse_usage_value, public_origin, rank_benchmark_models, rate_limit_reset_delay,
+        request_id, request_id_from_response, session_material, sse_model, strip_model_noise,
+        take_sse_event, transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
     use crate::identity::{
         IdentityAliasRecord, IdentityConfidence, IdentityEntityRecord, IdentityImport,
     };
+    use crate::pricing::{EffectivePrice, PriceScope, PriceSourceKind};
     use crate::routing::{AccessKind, CatalogOffering, RoutingStore};
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
-    use serde_json::json;
+    use futures_util::FutureExt;
+    use serde_json::{Value, json};
     use tracing_subscriber::fmt::MakeWriter;
 
     #[derive(Clone, Default)]
@@ -6500,6 +7200,165 @@ mod tests {
     }
 
     #[test]
+    fn slug_suffixed_variants_without_effort_fields_stay_distinct() {
+        // Artificial Analysis may publish reasoning variants as separate slugs
+        // (deepseek-v4-flash-high) without a parsed effort field. They must
+        // remain distinct candidates, never fuzzy-merged into the base model.
+        let benchmarks = BTreeMap::from([
+            (
+                "deepseek-v4-flash".to_owned(),
+                vec![BenchmarkModel::fixture(
+                    "deepseek-v4-flash",
+                    40.3,
+                    56.2,
+                    31.1,
+                    0.14,
+                    0.28,
+                )],
+            ),
+            (
+                "deepseek-v4-flash-high".to_owned(),
+                vec![BenchmarkModel::fixture(
+                    "deepseek-v4-flash-high",
+                    37.5,
+                    52.0,
+                    28.2,
+                    0.14,
+                    0.28,
+                )],
+            ),
+        ]);
+        let base = find_exact_matching_benchmarks(&benchmarks, "deepseek-v4-flash");
+        assert_eq!(base.len(), 1);
+        assert_eq!(base[0].id, "deepseek-v4-flash");
+        let high = find_exact_matching_benchmarks(&benchmarks, "deepseek-v4-flash-high");
+        assert_eq!(high.len(), 1);
+        assert_eq!(high[0].id, "deepseek-v4-flash-high");
+        assert!(
+            find_all_matching_benchmarks(&benchmarks, "deepseek-v4-flash")
+                .iter()
+                .all(|benchmark| benchmark.id == "deepseek-v4-flash"),
+            "fuzzy matching must not merge the -high variant into the base"
+        );
+    }
+
+    #[test]
+    fn provider_readiness_distinguishes_credential_states_without_values() {
+        use super::{AppState, ProviderReadiness, ProviderRuntime, provider_readiness};
+        use crate::config::{Config, ProviderConfig, ServerConfig};
+        use crate::routing::CatalogRecord;
+        use tokio::sync::Semaphore;
+
+        let routing = Arc::new(RoutingStore::open(None).expect("in-memory routing"));
+        routing
+            .replace_catalog(
+                "with-catalog",
+                &[CatalogRecord {
+                    model: "model-a".to_owned(),
+                    access_kind: AccessKind::Paid,
+                    context_length: None,
+                    supports_tools: None,
+                    supports_vision: None,
+                    supports_structured_output: None,
+                    input_price_per_million: None,
+                    output_price_per_million: None,
+                }],
+            )
+            .expect("catalog");
+        let runtime = |key: Option<String>, secret: Option<&'static str>| ProviderRuntime {
+            config: ProviderConfig {
+                api_key_secret: secret.map(str::to_owned),
+                ..ProviderConfig::default()
+            },
+            api_key: key.clone(),
+            api_key_source: None,
+            client: reqwest::Client::new(),
+            permits: Arc::new(Semaphore::new(4)),
+            available: secret.is_none()
+                || key.as_deref().is_some_and(|value| !value.trim().is_empty()),
+        };
+        let names = ["present", "blank", "missing", "no-key", "with-catalog"];
+        let mut config = Config {
+            server: ServerConfig::default(),
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+        };
+        for name in names {
+            config
+                .providers
+                .insert(name.to_owned(), ProviderConfig::default());
+        }
+        let state = AppState {
+            config: Arc::new(config),
+            providers: Arc::new(BTreeMap::from([
+                (
+                    "present".to_owned(),
+                    runtime(Some("sk-real-value".to_owned()), Some("PRESENT_KEY")),
+                ),
+                (
+                    "blank".to_owned(),
+                    runtime(Some("   ".to_owned()), Some("BLANK_KEY")),
+                ),
+                ("missing".to_owned(), runtime(None, Some("MISSING_KEY"))),
+                ("no-key".to_owned(), runtime(None, None)),
+                ("with-catalog".to_owned(), runtime(None, None)),
+            ])),
+            global_permits: Arc::new(Semaphore::new(8)),
+            local_model: Arc::new(tokio::sync::Mutex::new(None)),
+            routing,
+            catalog_snapshot_cache: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+        };
+        let report = provider_readiness(&state);
+        let by_id = |id: &str| {
+            report
+                .iter()
+                .find(|p: &&ProviderReadiness| p.id == id)
+                .expect(id)
+        };
+        assert_eq!(by_id("present").credential, "present");
+        assert!(by_id("present").available);
+        assert_eq!(
+            by_id("blank").credential,
+            "blank",
+            "blank values must be explicit"
+        );
+        assert!(!by_id("blank").available);
+        assert_eq!(by_id("missing").credential, "missing");
+        assert!(!by_id("missing").available);
+        assert_eq!(by_id("no-key").credential, "not_required");
+        assert!(by_id("no-key").available);
+        assert_eq!(by_id("with-catalog").catalog, "fresh");
+        assert!(
+            report.iter().all(|provider| !provider.id.contains('\0')),
+            "internal runtime providers must never appear in readiness"
+        );
+        let serialized = serde_json::to_string(&report).expect("serialize");
+        assert!(
+            !serialized.contains("sk-real-value"),
+            "secret values must never leak"
+        );
+    }
+
+    #[test]
+    fn frontier_score_never_rewards_missing_latency() {
+        // Identical quality/cost candidates: the one with observed latency
+        // strictly beats the one with missing latency because the missing
+        // value earns zero latency efficiency instead of an invented one.
+        let observed = frontier_score(60.0, 100, 1.0, 100, 1.0);
+        let missing = frontier_score(60.0, 100, f64::INFINITY, 100, 1.0);
+        assert!(observed > missing);
+        // Missing latency contributes exactly nothing: the score is the
+        // quality and cost terms alone (0.5*0.6 + 0.25*1.0).
+        assert_eq!(missing, 0.5 * 0.6 + 0.25 * 1.0 + 0.25 * 0.0);
+        // When every candidate lacks latency, none of them earns latency
+        // credit; the weight is inert rather than fabricated.
+        let all_missing = frontier_score(60.0, 100, f64::INFINITY, 100, f64::MAX);
+        assert_eq!(all_missing, missing);
+        // A candidate exactly at the observed minimum earns full credit.
+        assert_eq!(observed, 0.5 * 0.6 + 0.25 * 1.0 + 0.25 * 1.0);
+    }
+
+    #[test]
     fn malformed_sse_payloads_fail_closed() {
         assert!(malformed_sse_event(b"data: not-json\n\n"));
         assert!(!malformed_sse_event(b"data: {\"choices\":[]}\n\n"));
@@ -7057,6 +7916,7 @@ mod tests {
                 benchmark_snapshot_id: 42,
                 benchmark_as_of: 1700000000,
                 match_kind: Some(ModelMatchKind::Approved),
+                latency_seconds: Some(1.25),
             }),
         };
         let mut headers = HeaderMap::new();
@@ -7110,6 +7970,22 @@ mod tests {
                 .unwrap(),
             "90"
         );
+        assert_eq!(
+            headers
+                .get("x-model-gateway-benchmark-latency-observed")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            headers
+                .get("x-model-gateway-benchmark-latency-seconds")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "1.25"
+        );
 
         // Without selection, only basic headers are set
         let minimal = ModelMetadata {
@@ -7120,5 +7996,275 @@ mod tests {
         add_model_headers(&mut headers, &minimal);
         assert!(headers.get("x-model-gateway-task").is_none());
         assert!(headers.get("x-model-gateway-quality").is_none());
+    }
+
+    fn catalog_candidate_fixture(model: &str, quality: f64) -> ModelCandidate {
+        let mut benchmark = BenchmarkModel::fixture(model, 82.0, 80.0, 78.0, 2.5, 10.0);
+        benchmark.creator = Some("Fixture Labs".to_owned());
+        benchmark.cost_per_task_usd = Some(0.042);
+        benchmark.latency_seconds = Some(0.7);
+        benchmark.time_to_first_answer_seconds = Some(1.8);
+        benchmark.end_to_end_response_seconds = Some(3.6);
+        benchmark.output_tokens_per_second = Some(125.0);
+        benchmark.cache_read_price_per_million = Some(1.1);
+        benchmark.cache_write_price_per_million = Some(3.3);
+        benchmark.reasoning_effort = Some("high".to_owned());
+        let offering = CatalogOffering {
+            provider: "fixture".to_owned(),
+            model: model.to_owned(),
+            refreshed_at: 1_700_000_000,
+            access_kind: AccessKind::Paid,
+            context_length: Some(128_000),
+            supports_tools: Some(true),
+            supports_vision: Some(true),
+            supports_structured_output: Some(true),
+            input_price_per_million: Some(2.5),
+            output_price_per_million: Some(10.0),
+        };
+        let price = EffectivePrice {
+            input_price_per_million: 2.5,
+            output_price_per_million: 10.0,
+            cache_read_price_per_million: Some(1.25),
+            cache_write_price_per_million: Some(3.75),
+            source: "models.dev".to_owned(),
+            source_kind: PriceSourceKind::ModelsDev,
+            scope: PriceScope::RuntimeProvider,
+            provider_key: Some("fixture".to_owned()),
+            model_id: model.to_owned(),
+            fetched_at: Some(1_700_000_000),
+            valid_from: None,
+            valid_until: None,
+            estimated: false,
+        };
+        ModelCandidate {
+            quality: Some(quality),
+            benchmark: Some(benchmark),
+            price: Some(price),
+            offering,
+            match_kind: Some(ModelMatchKind::Exact),
+        }
+    }
+
+    fn catalog_fields(names: &[&'static str]) -> CatalogFields {
+        CatalogFields {
+            names: names.to_vec(),
+        }
+    }
+
+    fn object_keys(value: &Value) -> Vec<String> {
+        value
+            .as_object()
+            .expect("entry object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn catalog_field_projection_is_strict_allowlisted_and_deterministic() {
+        let candidate = catalog_candidate_fixture("gpt-4o", 82.0);
+        let origin = "http://localhost:8008";
+
+        // The default summary shape is unchanged without fields.
+        let summary = catalog_model_response(&candidate, 1, None, ModelView::Summary, None, origin);
+        assert_eq!(
+            object_keys(&summary),
+            ["id", "links", "quality", "reasoning_effort"]
+        );
+
+        // A projection emits exactly the requested fields, never more.
+        let selected = catalog_model_response(
+            &candidate,
+            1,
+            None,
+            ModelView::Full,
+            Some(&catalog_fields(&["id", "quality"])),
+            origin,
+        );
+        assert_eq!(object_keys(&selected), ["id", "quality"]);
+        assert_eq!(selected["quality"]["score"], 81.4);
+        assert_eq!(selected["quality"]["rank"], 1);
+
+        // Full-view fields can be pulled in regardless of the view default.
+        let detailed = catalog_model_response(
+            &candidate,
+            1,
+            None,
+            ModelView::Summary,
+            Some(&catalog_fields(&["id", "benchmarks", "price_per_million"])),
+            origin,
+        );
+        assert_eq!(
+            object_keys(&detailed),
+            ["benchmarks", "id", "price_per_million"]
+        );
+        assert_eq!(detailed["benchmarks"]["cost_per_task_usd"], 0.042);
+        assert_eq!(detailed["price_per_million"]["input"], 2.5);
+
+        // An explicit projection overrides the view: same fields, same entry.
+        let overridden = catalog_model_response(
+            &candidate,
+            1,
+            None,
+            ModelView::Full,
+            Some(&catalog_fields(&["id", "quality"])),
+            origin,
+        );
+        assert_eq!(overridden, selected);
+
+        // Canonical ordering: field order in the query never changes the
+        // representation (deterministic ETag across equivalent spellings).
+        let reordered = catalog_model_response(
+            &candidate,
+            1,
+            None,
+            ModelView::Full,
+            Some(&catalog_fields(&["quality", "id"])),
+            origin,
+        );
+        assert_eq!(reordered, selected);
+
+        // Strict parsing: exact case-sensitive allowlist, no fuzzy matching.
+        for invalid in [
+            "bogus",
+            "ID",
+            "",
+            "id,",
+            ",quality",
+            "id,,quality",
+            "id,bogus",
+        ] {
+            let rejection =
+                parse_catalog_fields(Some(invalid)).expect_err("fields must reject invalid input");
+            let status = rejection.status();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let body = rejection.into_body();
+            let bytes = axum::body::to_bytes(body, 16 * 1024)
+                .now_or_never()
+                .expect("body available")
+                .expect("body read");
+            let parsed: Value = serde_json::from_slice(&bytes).expect("error JSON");
+            assert_eq!(parsed["error"]["code"], "invalid_fields");
+        }
+        assert!(parse_catalog_fields(None).expect("no fields").is_none());
+
+        // Duplicates collapse and names are canonicalized.
+        let deduped = parse_catalog_fields(Some("quality,id,id"))
+            .expect("valid fields")
+            .expect("fields present");
+        assert_eq!(deduped.names, ["id", "quality"]);
+        // Whitespace around names is tolerated; names still match exactly.
+        let trimmed = parse_catalog_fields(Some(" id , quality "))
+            .expect("valid fields")
+            .expect("fields present");
+        assert_eq!(trimmed.names, ["id", "quality"]);
+    }
+
+    #[test]
+    fn catalog_representation_sizes_are_strictly_ordered_and_deterministic() {
+        let candidate = catalog_candidate_fixture("gpt-4o", 82.0);
+        let origin = "http://localhost:8008";
+        let render = |view: ModelView, fields: Option<&CatalogFields>| {
+            serde_json::to_vec(&catalog_model_response(
+                &candidate, 1, None, view, fields, origin,
+            ))
+            .expect("serialized entry")
+        };
+
+        let full = render(ModelView::Full, None);
+        let summary = render(ModelView::Summary, None);
+        let selected = render(
+            ModelView::Summary,
+            Some(&catalog_fields(&["id", "quality"])),
+        );
+        let minimal = render(ModelView::Summary, Some(&catalog_fields(&["id"])));
+
+        // Relative ordering only: no absolute byte counts, so representation
+        // growth or key renames cannot silently pass as "smaller".
+        assert!(
+            full.len() > summary.len(),
+            "full ({}) must be strictly larger than summary ({})",
+            full.len(),
+            summary.len()
+        );
+        assert!(
+            summary.len() > selected.len(),
+            "summary ({}) must be strictly larger than selected fields ({})",
+            summary.len(),
+            selected.len()
+        );
+        assert!(
+            selected.len() > minimal.len(),
+            "id+quality ({}) must be strictly larger than id only ({})",
+            selected.len(),
+            minimal.len()
+        );
+        // Field selection must cut the payload meaningfully, not shave a key
+        // or two off the full representation.
+        assert!(
+            full.len() > selected.len() * 2,
+            "full ({}) must be more than twice the selected-fields size ({})",
+            full.len(),
+            selected.len()
+        );
+
+        // Deterministic serialization: identical input, identical bytes.
+        let again = render(
+            ModelView::Summary,
+            Some(&catalog_fields(&["id", "quality"])),
+        );
+        assert_eq!(again, selected);
+        // Equivalent field orderings produce byte-identical representations.
+        let reordered = render(ModelView::Full, Some(&catalog_fields(&["quality", "id"])));
+        assert_eq!(reordered, selected);
+
+        // Exercise a realistic maximum page rather than only a single entry.
+        // This is intentionally a relative benchmark: it catches accidental
+        // projection regressions without baking machine-specific byte budgets
+        // into the test suite.
+        let full_page = (0..100)
+            .map(|index| {
+                catalog_model_response(
+                    &catalog_candidate_fixture(&format!("gpt-4o-{index}"), 82.0),
+                    index + 1,
+                    None,
+                    ModelView::Full,
+                    None,
+                    origin,
+                )
+            })
+            .collect::<Vec<_>>();
+        let summary_page = (0..100)
+            .map(|index| {
+                catalog_model_response(
+                    &catalog_candidate_fixture(&format!("gpt-4o-{index}"), 82.0),
+                    index + 1,
+                    None,
+                    ModelView::Summary,
+                    None,
+                    origin,
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected_page = (0..100)
+            .map(|index| {
+                catalog_model_response(
+                    &catalog_candidate_fixture(&format!("gpt-4o-{index}"), 82.0),
+                    index + 1,
+                    None,
+                    ModelView::Summary,
+                    Some(&catalog_fields(&["id", "quality"])),
+                    origin,
+                )
+            })
+            .collect::<Vec<_>>();
+        let full_page_bytes =
+            serde_json::to_vec(&json!({"data": full_page})).expect("full page bytes");
+        let summary_page_bytes =
+            serde_json::to_vec(&json!({"data": summary_page})).expect("summary page bytes");
+        let selected_page_bytes =
+            serde_json::to_vec(&json!({"data": selected_page})).expect("selected page bytes");
+        assert!(full_page_bytes.len() > summary_page_bytes.len());
+        assert!(summary_page_bytes.len() > selected_page_bytes.len());
     }
 }

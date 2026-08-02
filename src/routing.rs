@@ -168,6 +168,10 @@ pub struct AccountLimitSnapshot {
 }
 pub type PricingSnapshotStatus = (String, String, i64, u64, String);
 
+/// (source, fetched_at, model_count, attribution, source revision or None
+/// when the source exposed no revision and the snapshot is observed-only).
+pub type BenchmarkSnapshotStatus = (String, i64, u64, String, Option<String>);
+
 pub const PROVIDER_LIMIT_REFERENCES: &[ProviderLimitReference] = &[
     limit(ProviderProfileId::Custom, "", "user_defined"),
     limit(
@@ -332,7 +336,7 @@ impl RoutingStore {
         };
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > 8 {
+        if version > 10 {
             return Err(RoutingError::UnsupportedSchema(version));
         }
         connection.execute_batch(
@@ -385,7 +389,9 @@ impl RoutingStore {
                  source TEXT NOT NULL,
                  fetched_at INTEGER NOT NULL,
                  active INTEGER NOT NULL DEFAULT 0,
-                 attribution TEXT NOT NULL
+                 attribution TEXT NOT NULL,
+                 revision TEXT,
+                 fingerprint TEXT
              );
              CREATE TABLE IF NOT EXISTS benchmark_scores (
                  snapshot_id INTEGER NOT NULL,
@@ -452,7 +458,8 @@ impl RoutingStore {
                     source_kind TEXT NOT NULL,
                     fetched_at INTEGER NOT NULL,
                     active INTEGER NOT NULL DEFAULT 0,
-                    attribution TEXT NOT NULL
+                    attribution TEXT NOT NULL,
+                    fingerprint TEXT
                 );
                  CREATE TABLE IF NOT EXISTS price_observations (
                     snapshot_id INTEGER NOT NULL,
@@ -545,11 +552,13 @@ impl RoutingStore {
             [],
         )?;
         ensure_benchmark_columns(&connection)?;
+        ensure_benchmark_snapshot_columns(&connection)?;
+        ensure_pricing_snapshot_columns(&connection)?;
         connection.execute(
             "DELETE FROM benchmark_snapshots WHERE source = 'pricing-overrides'",
             [],
         )?;
-        connection.pragma_update(None, "user_version", 8)?;
+        connection.pragma_update(None, "user_version", 10)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -613,6 +622,43 @@ impl RoutingStore {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Returns the newest timestamp from identity data that can change
+    /// catalog benchmark enrichment. This is separate from the catalog
+    /// content fingerprint because HTTP Last-Modified needs a stable,
+    /// second-resolution timestamp even when an approval changes no provider
+    /// catalog row.
+    pub fn identity_last_modified(&self) -> Result<i64, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let modified: Option<i64> = connection.query_row(
+            "SELECT MAX(value) FROM (
+                 SELECT MAX(fetched_at) AS value
+                 FROM identity_snapshots
+                 WHERE active = 1
+                 UNION ALL
+                 SELECT MAX(observed_at) AS value
+                 FROM model_identity_aliases
+                 UNION ALL
+                 SELECT MAX(updated_at) AS value
+                 FROM model_entities
+                 UNION ALL
+                 SELECT MAX(approved_at) AS value
+                 FROM approved_model_mappings
+                 UNION ALL
+                 SELECT MAX(observed_at) AS value
+                 FROM benchmark_identity_links
+                 UNION ALL
+                 SELECT MAX(approved_at) AS value
+                 FROM benchmark_identity_links
+                 UNION ALL
+                 SELECT MAX(approved_at) AS value
+                 FROM approved_entity_aliases
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(modified.unwrap_or_default())
     }
 
     pub fn replace_identity_source(&self, import: &IdentityImport) -> Result<i64, RoutingError> {
@@ -876,16 +922,38 @@ impl RoutingStore {
                 )));
             }
         }
+        let fingerprint = crate::pricing::fingerprint_price_observations(observations);
         let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let transaction = connection.transaction()?;
+        let now = epoch_seconds();
+        let existing = transaction
+            .query_row(
+                "SELECT id, fingerprint FROM pricing_snapshots
+                 WHERE source = ?1 AND active = 1
+                 ORDER BY id DESC LIMIT 1",
+                [source],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        if let Some((snapshot_id, Some(existing_fingerprint))) = existing
+            && existing_fingerprint == fingerprint
+        {
+            transaction.execute(
+                "UPDATE pricing_snapshots SET fetched_at = ?1, attribution = ?2
+                 WHERE id = ?3",
+                params![now, attribution, snapshot_id],
+            )?;
+            transaction.commit()?;
+            return Ok(snapshot_id);
+        }
         transaction.execute(
             "UPDATE pricing_snapshots SET active = 0 WHERE source = ?1",
             [source],
         )?;
         transaction.execute(
-            "INSERT INTO pricing_snapshots(source, source_kind, fetched_at, active, attribution)
-             VALUES (?1, ?2, ?3, 0, ?4)",
-            params![source, source_kind.as_str(), epoch_seconds(), attribution],
+            "INSERT INTO pricing_snapshots(source, source_kind, fetched_at, active, attribution, fingerprint)
+             VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+            params![source, source_kind.as_str(), now, attribution, fingerprint],
         )?;
         let snapshot_id = transaction.last_insert_rowid();
         for observation in observations {
@@ -941,6 +1009,31 @@ impl RoutingStore {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Returns the active pricing snapshot (id, fetched_at, content fingerprint)
+    /// for a source when it was observed within the freshness window. Used by
+    /// diagnostics and freshness-aware callers.
+    pub fn active_pricing_snapshot(
+        &self,
+        source: &str,
+        max_age_seconds: u64,
+    ) -> Result<Option<(i64, i64, Option<String>)>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        connection
+            .query_row(
+                "SELECT id, fetched_at, fingerprint FROM pricing_snapshots
+                 WHERE active = 1 AND source = ?1 AND fetched_at >= ?2
+                 ORDER BY fetched_at DESC, id DESC LIMIT 1",
+                params![
+                    source,
+                    epoch_seconds()
+                        .saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX))
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(RoutingError::from)
     }
 
     pub fn effective_price(
@@ -1152,18 +1245,43 @@ impl RoutingStore {
         provider: &str,
         models: &[CatalogRecord],
     ) -> Result<(), RoutingError> {
+        if provider.trim().is_empty() || models.is_empty() {
+            return Err(RoutingError::Background(
+                "catalog refresh requires a provider and at least one model".to_owned(),
+            ));
+        }
         let now = epoch_seconds();
         let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let transaction = connection.transaction()?;
-        let version_map = build_version_map(&transaction);
+        let filtered_models = models
+            .iter()
+            .filter(|model| !is_specialty_model(&model.model))
+            .cloned()
+            .collect::<Vec<_>>();
+        if filtered_models.is_empty() {
+            return Err(RoutingError::Background(
+                "catalog refresh contained no routable models".to_owned(),
+            ));
+        }
+        let fingerprint = catalog_records_fingerprint(&filtered_models);
+        let fingerprint_key = format!("catalog:fingerprint:{provider}");
+        let existing_fingerprint = transaction
+            .query_row(
+                "SELECT value FROM routing_meta WHERE key = ?1",
+                [&fingerprint_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if existing_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+            transaction.execute(
+                "UPDATE catalog_models SET refreshed_at = ?1 WHERE provider = ?2",
+                params![now, provider],
+            )?;
+            transaction.commit()?;
+            return Ok(());
+        }
         transaction.execute("DELETE FROM catalog_models WHERE provider = ?1", [provider])?;
-        for model in models {
-            if is_specialty_model(&model.model) {
-                continue;
-            }
-            if is_stale_generation(&model.model, &version_map) {
-                continue;
-            }
+        for model in &filtered_models {
             transaction.execute(
                 "INSERT INTO catalog_models(
                     provider, model, is_free, refreshed_at, context_length,
@@ -1185,6 +1303,11 @@ impl RoutingStore {
                 ],
             )?;
         }
+        transaction.execute(
+            "INSERT INTO routing_meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![fingerprint_key, fingerprint],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -1211,6 +1334,10 @@ impl RoutingStore {
                 access_kind.as_str()
             ],
         )?;
+        connection.execute(
+            "DELETE FROM routing_meta WHERE key = ?1",
+            [format!("catalog:fingerprint:{provider}")],
+        )?;
         Ok(())
     }
 
@@ -1228,7 +1355,7 @@ impl RoutingStore {
                  AND refreshed_at >= ?1
              ORDER BY provider, model",
         )?;
-        Ok(statement
+        let rows = statement
             .query_map(
                 [epoch_seconds()
                     .saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX))],
@@ -1247,7 +1374,12 @@ impl RoutingStore {
                     })
                 },
             )?
-            .collect::<Result<Vec<_>, _>>()?)
+            .collect::<Result<Vec<_>, _>>()?;
+        let version_map = build_version_map(&connection, max_age_seconds);
+        Ok(rows
+            .into_iter()
+            .filter(|offering| !is_stale_generation(&offering.model, &version_map))
+            .collect())
     }
 
     pub fn all_candidates(
@@ -1261,7 +1393,7 @@ impl RoutingStore {
                      , input_price_per_million, output_price_per_million
               FROM catalog_models WHERE refreshed_at >= ?1 ORDER BY provider, model",
         )?;
-        Ok(statement
+        let rows = statement
             .query_map(
                 [epoch_seconds()
                     .saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX))],
@@ -1280,7 +1412,12 @@ impl RoutingStore {
                     })
                 },
             )?
-            .collect::<Result<Vec<_>, _>>()?)
+            .collect::<Result<Vec<_>, _>>()?;
+        let version_map = build_version_map(&connection, max_age_seconds);
+        Ok(rows
+            .into_iter()
+            .filter(|offering| !is_stale_generation(&offering.model, &version_map))
+            .collect())
     }
 
     pub fn replace_benchmarks(
@@ -1311,14 +1448,45 @@ impl RoutingStore {
         }
         let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let transaction = connection.transaction()?;
+        // The snapshot revision is the newest source-published revision among
+        // its rows. Rows without source revision metadata contribute nothing,
+        // so a fully observed-only import stores revision NULL.
+        let revision = models
+            .iter()
+            .filter_map(|model| model.as_of.as_deref())
+            .max()
+            .map(ToOwned::to_owned);
+        let fingerprint = crate::benchmarks::fingerprint_benchmark_models(models);
+        let now = epoch_seconds();
+        let existing = transaction
+            .query_row(
+                "SELECT id, fingerprint FROM benchmark_snapshots
+                 WHERE source = ?1 AND active = 1
+                 ORDER BY id DESC LIMIT 1",
+                [source],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        if let Some((snapshot_id, Some(existing_fingerprint))) = existing
+            && existing_fingerprint == fingerprint
+        {
+            transaction.execute(
+                "UPDATE benchmark_snapshots
+                 SET fetched_at = ?1, attribution = ?2, revision = ?3
+                 WHERE id = ?4",
+                params![now, attribution, revision, snapshot_id],
+            )?;
+            transaction.commit()?;
+            return Ok(snapshot_id);
+        }
         transaction.execute(
             "UPDATE benchmark_snapshots SET active = 0 WHERE source = ?1",
             [source],
         )?;
         transaction.execute(
-            "INSERT INTO benchmark_snapshots(source, fetched_at, active, attribution)
-             VALUES (?1, ?2, 0, ?3)",
-            params![source, epoch_seconds(), attribution],
+            "INSERT INTO benchmark_snapshots(source, fetched_at, active, attribution, revision, fingerprint)
+             VALUES (?1, ?2, 0, ?3, ?4, ?5)",
+            params![source, now, attribution, revision, fingerprint],
         )?;
         let snapshot_id = transaction.last_insert_rowid();
         for model in models {
@@ -1408,42 +1576,40 @@ impl RoutingStore {
              WHERE s.active = 1 AND s.fetched_at >= ?1
              ORDER BY m.model_id, s.source",
         )?;
+        let cutoff =
+            epoch_seconds().saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX));
         let rows = statement
-            .query_map(
-                [epoch_seconds()
-                    .saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX))],
-                |row| {
-                    Ok(BenchmarkModel {
-                        id: row.get(0)?,
-                        creator: row.get(1)?,
-                        intelligence: row.get(2)?,
-                        coding_quality: row.get(3)?,
-                        agentic_quality: row.get(4)?,
-                        input_price_per_million: row.get(5)?,
-                        output_price_per_million: row.get(6)?,
-                        cache_read_price_per_million: row.get(7)?,
-                        cache_write_price_per_million: row.get(8)?,
-                        cost_per_task_usd: row.get(9)?,
-                        latency_seconds: row.get(10)?,
-                        time_to_first_answer_seconds: row.get(11)?,
-                        end_to_end_response_seconds: row.get(12)?,
-                        output_tokens_per_second: row.get(13)?,
-                        output_tokens_per_task: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
-                        reasoning_effort: row.get(15)?,
-                        as_of: row.get(16)?,
-                        release_date: row.get(17)?,
-                        raw_metrics: BTreeMap::new(),
-                    })
-                },
-            )?
+            .query_map([cutoff], |row| {
+                Ok(BenchmarkModel {
+                    id: row.get(0)?,
+                    creator: row.get(1)?,
+                    intelligence: row.get(2)?,
+                    coding_quality: row.get(3)?,
+                    agentic_quality: row.get(4)?,
+                    input_price_per_million: row.get(5)?,
+                    output_price_per_million: row.get(6)?,
+                    cache_read_price_per_million: row.get(7)?,
+                    cache_write_price_per_million: row.get(8)?,
+                    cost_per_task_usd: row.get(9)?,
+                    latency_seconds: row.get(10)?,
+                    time_to_first_answer_seconds: row.get(11)?,
+                    end_to_end_response_seconds: row.get(12)?,
+                    output_tokens_per_second: row.get(13)?,
+                    output_tokens_per_task: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
+                    reasoning_effort: row.get(15)?,
+                    as_of: row.get(16)?,
+                    release_date: row.get(17)?,
+                    raw_metrics: BTreeMap::new(),
+                })
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    pub fn benchmark_status(&self) -> Result<Vec<(String, i64, u64, String)>, RoutingError> {
+    pub fn benchmark_status(&self) -> Result<Vec<BenchmarkSnapshotStatus>, RoutingError> {
         let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let mut statement = connection.prepare(
-            "SELECT s.source, s.fetched_at, COUNT(m.model_id), s.attribution
+            "SELECT s.source, s.fetched_at, COUNT(m.model_id), s.attribution, s.revision
              FROM benchmark_snapshots s
              LEFT JOIN benchmark_models m ON m.snapshot_id = s.id
              WHERE s.active = 1 GROUP BY s.id ORDER BY s.source",
@@ -1455,6 +1621,7 @@ impl RoutingStore {
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?.try_into().unwrap_or(0),
                     row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?)
@@ -1477,16 +1644,17 @@ impl RoutingStore {
     pub fn active_benchmark_snapshot(
         &self,
         max_age_seconds: u64,
-    ) -> Result<Option<(i64, i64)>, RoutingError> {
+    ) -> Result<Option<(i64, i64, Option<String>)>, RoutingError> {
         let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let cutoff =
+            epoch_seconds().saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX));
         connection
             .query_row(
-                "SELECT id, fetched_at FROM benchmark_snapshots
+                "SELECT id, fetched_at, revision FROM benchmark_snapshots
                  WHERE active = 1 AND fetched_at >= ?1
                  ORDER BY fetched_at DESC, id DESC LIMIT 1",
-                [epoch_seconds()
-                    .saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX))],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                [cutoff],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(RoutingError::from)
@@ -1872,7 +2040,7 @@ impl RoutingStore {
                 );
                 let salt = Sha256::digest(seed.as_bytes())
                     .iter()
-                    .map(|b| format!("{:02x}", b))
+                    .map(|b| format!("{b:02x}"))
                     .collect::<String>();
                 connection.execute(
                     "INSERT OR IGNORE INTO routing_meta(key, value) VALUES ('session_salt', ?1)",
@@ -1891,7 +2059,7 @@ impl RoutingStore {
         Ok(digest
             .finalize()
             .iter()
-            .map(|b| format!("{:02x}", b))
+            .map(|b| format!("{b:02x}"))
             .collect::<String>())
     }
 
@@ -2440,7 +2608,44 @@ fn ensure_benchmark_columns(connection: &Connection) -> Result<(), rusqlite::Err
     Ok(())
 }
 
-fn epoch_seconds() -> i64 {
+/// Schema v9+: benchmark_snapshots carries the source-published data revision.
+/// NULL means the source exposed no revision and the snapshot is observed-only.
+/// Schema v10 adds the content fingerprint used to skip unchanged re-stores.
+fn ensure_benchmark_snapshot_columns(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare("PRAGMA table_info(benchmark_snapshots)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (name, sql_type) in [("revision", "TEXT"), ("fingerprint", "TEXT")] {
+        if !columns.iter().any(|column| column == name) {
+            connection.execute(
+                &format!("ALTER TABLE benchmark_snapshots ADD COLUMN {name} {sql_type}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Schema v10: pricing_snapshots carries the content fingerprint used to skip
+/// unchanged re-stores while still catching in-place price revisions.
+fn ensure_pricing_snapshot_columns(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare("PRAGMA table_info(pricing_snapshots)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if !columns.iter().any(|column| column == "fingerprint") {
+        connection.execute(
+            "ALTER TABLE pricing_snapshots ADD COLUMN fingerprint TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn epoch_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -2449,14 +2654,73 @@ fn epoch_seconds() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-/// Extracts (family_name, version_number) from a normalized model ID.
-/// Handles both embedded versions (gemma4 → gemma+4) and tokenized versions
-/// (mistral-3 → mistral+3, mistral-medium-3-5 → mistral+3).
+/// Deterministic, order-insensitive content fingerprint for catalog records.
+/// A provider price or cache-rate revision changes the fingerprint while
+/// unchanged catalogs keep it stable across polls.
+pub(crate) fn catalog_records_fingerprint(records: &[CatalogRecord]) -> String {
+    let lines = records
+        .iter()
+        .map(|record| {
+            format!(
+                "{}|{}|{}|{}|{}|{}|{}|{}",
+                record.model,
+                record.access_kind.as_str(),
+                opt_u64(record.context_length),
+                opt_bool(record.supports_tools),
+                opt_bool(record.supports_vision),
+                opt_bool(record.supports_structured_output),
+                opt_f64(record.input_price_per_million),
+                opt_f64(record.output_price_per_million),
+            )
+        })
+        .collect::<Vec<_>>();
+    fingerprint_lines(lines)
+}
+
+fn fingerprint_lines(mut lines: Vec<String>) -> String {
+    lines.sort();
+    let mut digest = Sha256::new();
+    for line in lines {
+        digest.update(line.as_bytes());
+        digest.update(b"\n");
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn opt_u64(value: Option<u64>) -> String {
+    value.map_or_else(String::new, |value| value.to_string())
+}
+
+fn opt_f64(value: Option<f64>) -> String {
+    value.map_or_else(String::new, |value| value.to_string())
+}
+
+fn opt_bool(value: Option<bool>) -> String {
+    value.map_or_else(String::new, |value| value.to_string())
+}
+
+/// Extracts (family_name, version_number) from a model ID.
+/// Handles embedded versions (gemma4 → gemma+4) and direct tokenized versions
+/// (deepseek-v4-flash → deepseek+4). Ambiguous slugs fail closed instead of
+/// guessing which token is the family, so this helper never participates in
+/// benchmark identity matching.
 fn extract_model_family_version(normalized: &str) -> Option<(String, u64)> {
-    let tokens: Vec<&str> = normalized.split('-').collect();
+    let slug = normalized
+        .rsplit('/')
+        .next()
+        .unwrap_or(normalized)
+        .to_ascii_lowercase();
+    let tokens: Vec<&str> = slug.split('-').collect();
 
     // Case 1: letter-digit boundary within a single token (gemma4, qwen3)
-    for token in &tokens {
+    for (index, token) in tokens.iter().enumerate() {
+        if index != 0 {
+            continue;
+        }
         let bytes = token.as_bytes();
         for i in 0..bytes.len().saturating_sub(1) {
             // Family prefix must be at least 2 chars to avoid matching r1, a100, etc.
@@ -2480,59 +2744,62 @@ fn extract_model_family_version(normalized: &str) -> Option<(String, u64)> {
         }
     }
 
-    // Case 2: find first all-alpha family token where the NEXT token
-    // is a numeric version (handles google/gemma-3 → gemma+3,
-    // skips provider prefixes like "google" since the next token isn't a number)
-    for i in 0..tokens.len() {
-        let token = tokens[i];
-        if token.is_empty() || !token.chars().all(|c| c.is_ascii_alphabetic()) || token.len() < 2 {
-            continue;
-        }
-        if i + 1 < tokens.len() {
-            let version_token = tokens[i + 1];
-            let version = if token == "gpt" && version_token.len() == 2 {
-                version_token[..1].parse().ok()
-            } else {
-                version_token.parse().ok()
-            };
-            if let Some(version) = version {
-                return Some((token.to_lowercase(), version));
-            }
-        }
+    // Case 2: only accept a version immediately after the first family token.
+    // Provider prefixes are removed above; slugs with an extra variant token
+    // before the version (for example mistral-medium-3-5) remain unclassified.
+    let token = tokens.first().copied()?;
+    if token.is_empty() || !token.chars().all(|c| c.is_ascii_alphabetic()) || token.len() < 2 {
+        return None;
     }
-
+    let version_token = tokens.get(1).copied()?;
+    let version = if token == "gpt" && version_token.len() == 2 {
+        version_token[..1].parse().ok()
+    } else {
+        version_token.parse().ok()
+    };
+    if let Some(version) = version {
+        return Some((token.to_lowercase(), version));
+    }
+    // The token must be exactly v followed by digits so names like qwen-vl or
+    // deepseek-r1 are never mistaken for version markers.
+    if let Some(digits) = version_token.strip_prefix('v')
+        && !digits.is_empty()
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && let Ok(version) = digits.parse::<u64>()
+    {
+        return Some((token.to_lowercase(), version));
+    }
     None
 }
 
-/// Builds a map of model family → max version from active AA benchmarks.
-/// Used to detect stale catalog models from older generations.
-fn build_version_map(connection: &Connection) -> BTreeMap<String, u64> {
+/// Builds a map of model family → max version from fresh active benchmarks.
+/// Used only for catalog hygiene; strict benchmark identity matching remains
+/// separate and never falls back to this heuristic.
+fn build_version_map(connection: &Connection, max_age_seconds: u64) -> BTreeMap<String, u64> {
     let mut map = BTreeMap::new();
-    if let Ok(mut statement) =
-        connection.prepare("SELECT model_id FROM benchmark_models WHERE snapshot_id IN (SELECT id FROM benchmark_snapshots WHERE active = 1)")
-        && let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
-            for row in rows.flatten() {
-                if let Some((family, version)) = extract_model_family_version(&row) {
-                    let entry = map.entry(family).or_insert(0);
-                    if version > *entry {
-                        *entry = version;
-                    }
+    let cutoff = epoch_seconds().saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX));
+    if let Ok(mut statement) = connection.prepare(
+        "SELECT m.model_id
+             FROM benchmark_models m
+             JOIN benchmark_snapshots s ON s.id = m.snapshot_id
+             WHERE s.active = 1 AND s.fetched_at >= ?1",
+    ) && let Ok(rows) = statement.query_map([cutoff], |row| row.get::<_, String>(0))
+    {
+        for row in rows.flatten() {
+            if let Some((family, version)) = extract_model_family_version(&row) {
+                let entry = map.entry(family).or_insert(0);
+                if version > *entry {
+                    *entry = version;
                 }
             }
         }
+    }
     map
 }
 
 /// Returns true if a catalog model is from an older generation than what AA benchmarks.
 fn is_stale_generation(model: &str, version_map: &BTreeMap<String, u64>) -> bool {
-    let normalized = model
-        .to_ascii_lowercase()
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-
-    if let Some((family, cat_version)) = extract_model_family_version(&normalized)
+    if let Some((family, cat_version)) = extract_model_family_version(model)
         && let Some(&aa_max_version) = version_map.get(&family)
     {
         return cat_version < aa_max_version;
@@ -2590,7 +2857,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v8_backfills_v6_free_access_kinds() {
+    fn schema_v10_backfills_v6_free_access_kinds() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("routing.sqlite3");
         let connection = rusqlite::Connection::open(&path).expect("legacy database");
@@ -2631,11 +2898,11 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 8);
+        assert_eq!(version, 10);
     }
 
     #[test]
-    fn schema_v8_preserves_v7_catalog_access_kinds() {
+    fn schema_v10_preserves_v7_catalog_access_kinds() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("routing.sqlite3");
         let connection = rusqlite::Connection::open(&path).expect("v7 database");
@@ -2670,7 +2937,123 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 8);
+        assert_eq!(version, 10);
+    }
+
+    #[test]
+    fn schema_v10_adds_snapshot_revision_and_fingerprint_columns() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("routing.sqlite3");
+        let connection = rusqlite::Connection::open(&path).expect("v8 database");
+        connection
+            .execute_batch(
+                "CREATE TABLE benchmark_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    fetched_at INTEGER NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 0,
+                    attribution TEXT NOT NULL
+                );
+                INSERT INTO benchmark_snapshots(source, fetched_at, active, attribution)
+                    VALUES ('legacy', 9999999999, 1, 'legacy');
+                PRAGMA user_version = 8;",
+            )
+            .expect("v8 schema");
+        drop(connection);
+
+        let store = RoutingStore::open(Some(&path)).expect("migrated store");
+        let connection = rusqlite::Connection::open(path).expect("migrated database");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(version, 10);
+        let columns = connection
+            .prepare("PRAGMA table_info(benchmark_snapshots)")
+            .expect("columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("column rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("columns");
+        assert!(columns.iter().any(|column| column == "revision"));
+        assert!(columns.iter().any(|column| column == "fingerprint"));
+        let pricing_columns = connection
+            .prepare("PRAGMA table_info(pricing_snapshots)")
+            .expect("columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("column rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("columns");
+        assert!(pricing_columns.iter().any(|column| column == "fingerprint"));
+        let status = store.benchmark_status().expect("legacy status");
+        assert_eq!(status[0].4, None, "legacy rows are observed-only");
+    }
+
+    #[test]
+    fn catalog_fingerprint_changes_on_price_revision() {
+        let records = vec![
+            catalog("gpt-5.6-luna", false),
+            catalog("deepseek-v4-flash", true),
+        ];
+        let original = super::catalog_records_fingerprint(&records);
+
+        // A price revision on one row changes the fingerprint.
+        let mut revised = records.clone();
+        revised[0].input_price_per_million = Some(0.2);
+        revised[0].output_price_per_million = Some(1.2);
+        assert_ne!(original, super::catalog_records_fingerprint(&revised));
+    }
+
+    #[test]
+    fn catalog_replacement_invalidates_manual_fingerprint_cache() {
+        let store = RoutingStore::open(None).expect("store");
+        let records = vec![catalog("gpt-5.6-luna", false)];
+        store
+            .replace_catalog("provider", &records)
+            .expect("catalog");
+        store
+            .upsert_offering("provider", "manual-only", AccessKind::Paid)
+            .expect("manual offering");
+        store
+            .replace_catalog("provider", &records)
+            .expect("catalog refresh");
+        assert!(
+            store
+                .all_candidates(86_400)
+                .expect("candidates")
+                .iter()
+                .all(|offering| offering.model != "manual-only")
+        );
+    }
+
+    #[test]
+    fn pricing_snapshot_stores_content_fingerprint() {
+        let store = RoutingStore::open(None).expect("store");
+        store
+            .replace_pricing(
+                "models.dev",
+                PriceSourceKind::ModelsDev,
+                "Models.dev (https://models.dev/)",
+                &[luna_observation(1.0, 6.0)],
+            )
+            .expect("pricing");
+        let (_, _, first) = store
+            .active_pricing_snapshot("models.dev", 3600)
+            .expect("snapshot")
+            .expect("active");
+        assert!(first.is_some(), "snapshots store a content fingerprint");
+        store
+            .replace_pricing(
+                "models.dev",
+                PriceSourceKind::ModelsDev,
+                "Models.dev (https://models.dev/)",
+                &[luna_observation(0.2, 1.2)],
+            )
+            .expect("revised pricing");
+        let (_, _, second) = store
+            .active_pricing_snapshot("models.dev", 3600)
+            .expect("snapshot")
+            .expect("active");
+        assert_ne!(first, second, "a price revision changes the fingerprint");
     }
 
     #[test]
@@ -2938,6 +3321,19 @@ mod tests {
                 .remove_model_mapping("provider-a", "catalog-model")
                 .expect("idempotent remove")
         );
+    }
+
+    #[test]
+    fn identity_last_modified_tracks_operator_changes() {
+        let store = RoutingStore::open(None).expect("store");
+        assert_eq!(
+            store.identity_last_modified().expect("initial timestamp"),
+            0
+        );
+        store
+            .approve_model_mapping("provider-a", "catalog-model", "benchmark-v1")
+            .expect("approve mapping");
+        assert!(store.identity_last_modified().expect("updated timestamp") > 0);
     }
 
     #[test]
@@ -3580,12 +3976,9 @@ mod tests {
             extract_model_family_version("phi-3-vision"),
             Some(("phi".to_owned(), 3))
         );
-        // With j=1 only, mistral-medium-3-5 picks "medium" as the
-        // closest alpha token with a number as the next token
-        assert_eq!(
-            extract_model_family_version("mistral-medium-3-5"),
-            Some(("medium".to_owned(), 3))
-        );
+        // Ambiguous family/variant slugs fail closed rather than treating
+        // "medium" as a model family.
+        assert!(extract_model_family_version("mistral-medium-3-5").is_none());
         assert_eq!(
             extract_model_family_version("gemini-3-5-flash"),
             Some(("gemini".to_owned(), 3))
@@ -3633,5 +4026,311 @@ mod tests {
         assert!(is_stale_generation("gpt35-turbo", &versions));
         assert!(is_stale_generation("gpt-35-turbo", &versions));
         assert!(!is_stale_generation("gpt-5.6-sol", &versions));
+    }
+
+    #[test]
+    fn extract_model_family_version_handles_v_prefixed_tokens() {
+        use super::extract_model_family_version;
+        assert_eq!(
+            extract_model_family_version("deepseek-v4-flash"),
+            Some(("deepseek".to_owned(), 4))
+        );
+        assert_eq!(
+            extract_model_family_version("deepseek-v3-0324"),
+            Some(("deepseek".to_owned(), 3))
+        );
+        assert_eq!(
+            extract_model_family_version("deepseek-v2-5"),
+            Some(("deepseek".to_owned(), 2))
+        );
+        assert_eq!(
+            extract_model_family_version("deepseek-ai/DeepSeek-V4-Flash"),
+            Some(("deepseek".to_owned(), 4))
+        );
+        // rN names and vision tokens are never version markers.
+        assert!(extract_model_family_version("deepseek-r1").is_none());
+        assert!(extract_model_family_version("qwen-vl").is_none());
+        assert!(extract_model_family_version("glm-4v").is_none());
+        assert_eq!(
+            extract_model_family_version("gpt-5-6-luna"),
+            Some(("gpt".to_owned(), 5))
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_generation_prunes_older_models() {
+        use super::is_stale_generation;
+        use std::collections::BTreeMap;
+
+        let mut versions = BTreeMap::new();
+        versions.insert("deepseek".to_owned(), 4u64);
+
+        assert!(is_stale_generation("deepseek/deepseek-v3-0324", &versions));
+        assert!(is_stale_generation("deepseek-ai/DeepSeek-V3", &versions));
+        assert!(is_stale_generation("deepseek-v3", &versions));
+        assert!(!is_stale_generation(
+            "deepseek/deepseek-v4-flash",
+            &versions
+        ));
+        assert!(!is_stale_generation("deepseek-v4-pro", &versions));
+        // Unversioned aliases and r-series names are never pruned by generation.
+        assert!(!is_stale_generation("deepseek-chat", &versions));
+        assert!(!is_stale_generation("deepseek-r1", &versions));
+    }
+
+    #[test]
+    fn catalog_replace_prunes_older_deepseek_generations() {
+        let store = RoutingStore::open(None).expect("store");
+        store
+            .replace_benchmarks(
+                "fixture",
+                "Fixture",
+                &[BenchmarkModel::fixture(
+                    "deepseek-v4-flash",
+                    40.0,
+                    40.0,
+                    40.0,
+                    0.14,
+                    0.28,
+                )],
+            )
+            .expect("benchmarks");
+        store
+            .replace_catalog(
+                "provider",
+                &[
+                    catalog("deepseek/deepseek-v3-0324", false),
+                    catalog("deepseek/deepseek-v3", false),
+                    catalog("deepseek/deepseek-v4-flash", false),
+                    catalog("deepseek/deepseek-v4-flash-high", false),
+                    catalog("deepseek/deepseek-chat", false),
+                ],
+            )
+            .expect("catalog");
+        let models = store
+            .all_candidates(u64::MAX)
+            .expect("candidates")
+            .into_iter()
+            .map(|offering| offering.model)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            models,
+            vec![
+                "deepseek/deepseek-chat".to_owned(),
+                "deepseek/deepseek-v4-flash".to_owned(),
+                "deepseek/deepseek-v4-flash-high".to_owned(),
+            ]
+        );
+    }
+
+    fn luna_observation(input: f64, output: f64) -> PriceObservation {
+        PriceObservation {
+            source: "models.dev".to_owned(),
+            source_kind: PriceSourceKind::ModelsDev,
+            scope: PriceScope::ProviderProfile,
+            provider_key: Some("openai".to_owned()),
+            model_id: "gpt-5.6-luna".to_owned(),
+            rates: PriceRates {
+                input_price_per_million: Some(input),
+                output_price_per_million: Some(output),
+                ..PriceRates::default()
+            },
+            fetched_at: Some(100),
+            as_of: None,
+            valid_from: None,
+            valid_until: None,
+            attribution: None,
+        }
+    }
+
+    #[test]
+    fn pricing_refresh_supersedes_previous_rates() {
+        let store = RoutingStore::open(None).expect("store");
+        store
+            .replace_pricing(
+                "models.dev",
+                PriceSourceKind::ModelsDev,
+                "Models.dev (https://models.dev/)",
+                &[luna_observation(1.0, 6.0)],
+            )
+            .expect("first refresh");
+        let price = store
+            .effective_price("runtime", Some("openai"), "gpt-5.6-luna", None, 3600)
+            .expect("price lookup")
+            .expect("effective price");
+        assert_eq!(price.input_price_per_million, 1.0);
+        assert_eq!(price.output_price_per_million, 6.0);
+        let initial_snapshot = store
+            .active_pricing_snapshot("models.dev", 3600)
+            .expect("snapshot")
+            .expect("active")
+            .0;
+        store
+            .replace_pricing(
+                "models.dev",
+                PriceSourceKind::ModelsDev,
+                "Models.dev (https://models.dev/)",
+                &[luna_observation(1.0, 6.0)],
+            )
+            .expect("unchanged refresh");
+        assert_eq!(
+            store
+                .active_pricing_snapshot("models.dev", 3600)
+                .expect("snapshot")
+                .expect("active")
+                .0,
+            initial_snapshot,
+            "unchanged source data should touch, not replace, the active snapshot"
+        );
+
+        // models.dev revises the Luna price; a refresh must supersede the old
+        // observation without operator edits or hard-coded prices.
+        store
+            .replace_pricing(
+                "models.dev",
+                PriceSourceKind::ModelsDev,
+                "Models.dev (https://models.dev/)",
+                &[luna_observation(0.2, 1.2)],
+            )
+            .expect("revised refresh");
+        let price = store
+            .effective_price("runtime", Some("openai"), "gpt-5.6-luna", None, 3600)
+            .expect("price lookup")
+            .expect("effective price");
+        assert_eq!(price.input_price_per_million, 0.2);
+        assert_eq!(price.output_price_per_million, 1.2);
+        assert_eq!(
+            store.pricing_status().expect("status").len(),
+            1,
+            "the superseded snapshot must not stay active"
+        );
+    }
+
+    #[test]
+    fn benchmark_refresh_supersedes_previous_snapshot_and_preserves_revision() {
+        let store = RoutingStore::open(None).expect("store");
+        let today = "2026-08-01".to_owned();
+        let mut v1 = BenchmarkModel::fixture("gpt-5-6-luna", 50.0, 50.0, 50.0, 1.0, 6.0);
+        v1.as_of = Some(today.clone());
+        store
+            .replace_benchmarks("fixture", "Fixture", &[v1])
+            .expect("first snapshot");
+        let (first_id, _, first_revision) = store
+            .active_benchmark_snapshot(3600)
+            .expect("snapshot")
+            .expect("active");
+        assert_eq!(first_revision.as_deref(), Some(today.as_str()));
+
+        let mut unchanged = BenchmarkModel::fixture("gpt-5-6-luna", 50.0, 50.0, 50.0, 1.0, 6.0);
+        unchanged.as_of = Some(today.clone());
+        store
+            .replace_benchmarks("fixture", "Fixture", &[unchanged])
+            .expect("unchanged snapshot");
+        assert_eq!(
+            store
+                .active_benchmark_snapshot(3600)
+                .expect("snapshot")
+                .expect("active")
+                .0,
+            first_id,
+            "unchanged benchmark data should not create a new snapshot"
+        );
+
+        let mut v2 = BenchmarkModel::fixture("gpt-5-6-luna", 60.0, 60.0, 60.0, 1.0, 6.0);
+        v2.as_of = Some(today.clone());
+        store
+            .replace_benchmarks("fixture", "Fixture", &[v2])
+            .expect("revised snapshot");
+        let (second_id, _, second_revision) = store
+            .active_benchmark_snapshot(3600)
+            .expect("snapshot")
+            .expect("active");
+        assert_ne!(
+            first_id, second_id,
+            "a newer revision supersedes the old snapshot"
+        );
+        assert_eq!(second_revision.as_deref(), Some(today.as_str()));
+
+        let models = store.benchmark_models(3600).expect("models");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].intelligence, Some(60.0));
+        let status = store.benchmark_status().expect("status");
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].4.as_deref(), Some(today.as_str()));
+    }
+
+    #[test]
+    fn benchmark_fetch_expiry_marks_snapshot_stale() {
+        let directory = tempfile::tempdir().expect("state directory");
+        let path = directory.path().join("routing.sqlite3");
+        let store = RoutingStore::open(Some(&path)).expect("store");
+        let mut stale = BenchmarkModel::fixture("stale-model", 50.0, 50.0, 50.0, 1.0, 1.0);
+        stale.as_of = Some("2020-01-01".to_owned());
+        store
+            .replace_benchmarks("fixture", "Fixture", &[stale])
+            .expect("stale snapshot");
+        rusqlite::Connection::open(&path)
+            .expect("database")
+            .execute(
+                "UPDATE benchmark_snapshots SET fetched_at = ?1 WHERE active = 1",
+                [super::epoch_seconds().saturating_sub(120)],
+            )
+            .expect("age snapshot");
+        assert!(
+            store
+                .active_benchmark_snapshot(60)
+                .expect("snapshot")
+                .is_none(),
+            "an expired fetch must fail closed"
+        );
+        assert!(store.benchmark_models(60).expect("models").is_empty());
+
+        // Observed-only snapshots (no source revision) stay fresh within the
+        // observation window instead of inventing a revision.
+        let observed = BenchmarkModel::fixture("observed-model", 50.0, 50.0, 50.0, 1.0, 1.0);
+        store
+            .replace_benchmarks("fixture", "Fixture", &[observed])
+            .expect("observed snapshot");
+        assert!(
+            store
+                .active_benchmark_snapshot(60)
+                .expect("snapshot")
+                .is_some()
+        );
+        assert_eq!(store.benchmark_models(60).expect("models").len(), 1);
+    }
+
+    #[test]
+    fn active_pricing_snapshot_tracks_the_freshness_window() {
+        let store = RoutingStore::open(None).expect("store");
+        assert!(
+            store
+                .active_pricing_snapshot("models.dev", 3600)
+                .expect("snapshot")
+                .is_none()
+        );
+        let observations = [luna_observation(0.2, 1.2)];
+        store
+            .replace_pricing(
+                "models.dev",
+                PriceSourceKind::ModelsDev,
+                "Models.dev (https://models.dev/)",
+                &observations,
+            )
+            .expect("pricing");
+        let (_, _, fingerprint) = store
+            .active_pricing_snapshot("models.dev", 3600)
+            .expect("snapshot")
+            .expect("active");
+        assert_eq!(
+            fingerprint.as_deref(),
+            Some(crate::pricing::fingerprint_price_observations(&observations).as_str())
+        );
+        assert!(
+            store
+                .active_pricing_snapshot("other-source", 3600)
+                .expect("snapshot")
+                .is_none()
+        );
     }
 }

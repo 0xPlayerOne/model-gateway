@@ -46,4 +46,4 @@ targets = [{ provider = "nvidia-nim", model = "nvidia/llama-3.1-nemotron-ultra-2
 targets = [{ provider = "groq", model = "llama-3.3-70b-versatile" }]
 
 [models.silicon-flow]
-targets = [{ provider = "silicon-flow", model = "deepseek-ai/DeepSeek-V3" }]
+targets = [{ provider = "silicon-flow", model = "deepseek-ai/DeepSeek-V4-Flash" }]
