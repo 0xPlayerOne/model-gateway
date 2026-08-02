@@ -6,7 +6,7 @@ package_manager: none
 runtime_repository: 0xPlayerOne/code-foundry
 runtime_ref: v0.34.4
 runner: ubuntu-latest
-unit_runner: ubuntu-slim
+unit_runner: ubuntu-latest
 ci_runner: ubuntu-latest
 test_runner: ubuntu-latest
 security_runner: ubuntu-slim
