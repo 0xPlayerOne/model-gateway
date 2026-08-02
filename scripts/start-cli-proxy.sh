@@ -37,7 +37,27 @@ fi
 
 mkdir -p "$CLI_PROXY_HOME"
 
-PORT="${MODEL_GATEWAY_CLI_PROXY_PORT:-8317}"
+read_config_port() {
+    if [ ! -f "$CONFIG" ]; then
+        return 0
+    fi
+    sed -nE 's/^[[:space:]]*port:[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' "$CONFIG" | head -n 1
+}
+
+CONFIG_PORT="$(read_config_port)"
+if [ -n "${MODEL_GATEWAY_CLI_PROXY_PORT:-}" ]; then
+    PORT="$MODEL_GATEWAY_CLI_PROXY_PORT"
+    if [ -n "$CONFIG_PORT" ] && [ "$PORT" != "$CONFIG_PORT" ]; then
+        echo "MODEL_GATEWAY_CLI_PROXY_PORT=$PORT does not match the configured CLIProxy port $CONFIG_PORT in $CONFIG; update the config or unset the override." >&2
+        exit 1
+    fi
+else
+    PORT="${CONFIG_PORT:-8317}"
+fi
+if ! [[ "$PORT" =~ ^[1-9][0-9]{0,4}$ ]] || [ "$PORT" -gt 65535 ]; then
+    echo "Invalid CLIProxy port '$PORT'; expected an integer from 1 to 65535." >&2
+    exit 2
+fi
 if [ "$OPTIONAL" = true ] && [ ! -f "$CONFIG" ]; then
     echo "CLIProxyAPI is not configured; skipping sidecar startup."
     exit 0
@@ -116,4 +136,20 @@ for _ in $(seq 1 40); do
     sleep 0.25
 done
 echo "CLIProxyAPI failed to listen on port $PORT; check $LOG" >&2
+if kill -0 "$PID" 2>/dev/null; then
+    kill "$PID" 2>/dev/null || true
+    for _ in $(seq 1 10); do
+        if ! kill -0 "$PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    if kill -0 "$PID" 2>/dev/null; then
+        kill -9 "$PID" 2>/dev/null || true
+    fi
+fi
+wait "$PID" 2>/dev/null || true
+if [ -f "$PIDFILE" ] && [ "$(cat "$PIDFILE" 2>/dev/null || true)" = "$PID" ]; then
+    rm -f "$PIDFILE"
+fi
 exit 1

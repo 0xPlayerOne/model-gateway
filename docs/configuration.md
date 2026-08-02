@@ -50,6 +50,7 @@ The launcher scripts print the effective store before starting. See
 | `MODEL_GATEWAY_CLI_PROXY_BINARY` | versioned binary under the sidecar root | Manually managed executable |
 | `MODEL_GATEWAY_CLI_PROXY_CONFIG` | `<home>/config.yaml` | Sidecar YAML configuration |
 | `MODEL_GATEWAY_CLI_PROXY_AUTH_DIR` | `<home>/auth` | OAuth credential directory |
+| `MODEL_GATEWAY_CLI_PROXY_PORT` | `8317` during setup | Optional listener port; set it before `cli-proxy setup`, then keep it unset or equal to the generated config at launch |
 | `CLI_PROXY_API_KEY` | generated secret-store value | Frontend bearer key for manual/environment-only setup |
 
 `model-gateway cli-proxy setup` reports which store received the generated frontend key (`Stored the CLIProxyAPI frontend key in the <source> secret store`). In a non-interactive environment set `MODEL_GATEWAY_SECRET_STORE=file` (and optionally `MODEL_GATEWAY_SECRET_DIR`) before running setup.

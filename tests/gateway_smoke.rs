@@ -4221,6 +4221,16 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         .await
         .expect("OpenAPI JSON");
     assert_eq!(openapi["openapi"], "3.1.0");
+    assert_eq!(openapi["info"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        openapi["components"]["schemas"]["RankingList"]["properties"]["object"]["const"],
+        "benchmark.rankings"
+    );
+    assert_eq!(
+        openapi["paths"]["/v1/chat/completions"]["post"]["requestBody"]["content"]["application/json"]
+            ["schema"]["required"],
+        json!(["model"])
+    );
     for path in [
         "/health/live",
         "/health/ready",
@@ -4443,6 +4453,22 @@ async fn paid_models_lists_only_paid_provider_offerings() {
     let next_link = collection_body["links"]["next"]
         .as_str()
         .expect("next link");
+    let snapshot = collection_body["meta"]["snapshot"]
+        .as_str()
+        .expect("snapshot token");
+    let second_page: Value = client
+        .get(next_link)
+        .send()
+        .await
+        .expect("second catalog page response")
+        .json()
+        .await
+        .expect("second catalog page JSON");
+    assert_eq!(second_page["meta"]["snapshot"], snapshot);
+    assert_eq!(second_page["meta"]["returned"], 1);
+    assert_eq!(second_page["data"][0]["id"], "free/gemini-free");
+    assert!(second_page["links"]["prev"].is_string());
+    assert!(second_page["links"].get("next").is_none());
     let cursor = next_link.split("cursor=").nth(1).expect("cursor");
     let stale_cursor = client
         .get(format!(
@@ -4453,9 +4479,6 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         .expect("stale cursor response");
     assert_eq!(stale_cursor.status(), StatusCode::CONFLICT);
 
-    let snapshot = collection_body["meta"]["snapshot"]
-        .as_str()
-        .expect("snapshot token");
     let past_end: Value = client
         .get(format!(
             "{gateway}/v1/catalog/models?access=all&limit=1&cursor={snapshot}:999"
