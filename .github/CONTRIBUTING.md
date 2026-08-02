@@ -78,12 +78,17 @@ The repository runtime detects supported tools and skips checks that do not appl
 
 ```sh
 npx code-foundry doctor
-npm run format:check   # or the package manager's equivalent
-npm run lint
-npm run type-check
-npm test
-Security and dependency audits run through the GitHub Security workflow.
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --locked
+cargo build --release --locked
 ```
+
+GitHub Actions uses the tiered caller in
+[`.github/workflows/validation.yml`](./workflows/validation.yml). It runs the
+applicable CI and test tiers for the event and publishes the aggregate
+`Validation / Gate` status. Security, CodeQL, integration, E2E, and smoke tiers
+are skipped when the selected validation mode does not require them.
 
 Run the checks relevant to the change. For a release or security-sensitive change, run the complete set. Record the commands and results in the pull request.
 
@@ -153,15 +158,17 @@ Keep pull requests focused and reviewable. Include screenshots or recordings for
 
 ## Workflow and check behavior
 
-| Event                            | Expected automation                      |
-| -------------------------------- | ---------------------------------------- |
-| Push to `main` or `staging`      | CI, Test, Security, and CodeQL workflows |
-| Pull request targeting `staging` | CI, Test, Security, and CodeQL workflows |
-| Push to a working branch         | Draft PR workflow                        |
-| Push to `staging`                | Release PR workflow                      |
-| Version tag such as `v1.2.3`     | Release workflow                         |
+| Event                                   | Expected automation                              |
+| --------------------------------------- | ------------------------------------------------ |
+| Pull request targeting `main`/`staging` | Tiered validation and `Validation / Gate`        |
+| Push to a working branch                | Draft PR workflow                                |
+| Push to `staging`                       | Release PR workflow                              |
+| Push to `main`                          | Release workflow                                 |
+| Monday schedule or manual dispatch      | Tiered validation according to the selected mode |
 
-The workflows use separate concurrency groups keyed by the commit under test. A newer run for the same commit cancels a duplicate event-triggered run, while newer commits cancel older runs and independent CI, Test, Security, and CodeQL workflows continue in parallel.
+The tiered validation workflow uses a concurrency group keyed by the event and
+branch or pull request. A newer update cancels the superseded validation run;
+the `Validation / Gate` result is the stable status consumed by branch rulesets.
 
 Required checks are enforced by branch protection. Do not duplicate their checklists in the pull request description; document validation commands and results instead.
 
