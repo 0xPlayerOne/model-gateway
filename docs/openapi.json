@@ -10,7 +10,9 @@
       "get": {
         "summary": "List routable model IDs",
         "responses": {
-          "200": { "$ref": "#/components/responses/ModelList" }
+          "200": {
+            "$ref": "#/components/responses/ModelList"
+          }
         }
       }
     },
@@ -21,11 +23,15 @@
           {
             "name": "available",
             "in": "query",
-            "schema": { "type": "boolean" }
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/ProviderList" }
+          "200": {
+            "$ref": "#/components/responses/ProviderList"
+          }
         }
       }
     },
@@ -37,14 +43,24 @@
           {
             "name": "route",
             "in": "query",
-            "schema": { "type": "string", "enum": ["free", "efficient", "balanced", "frontier"] }
+            "schema": {
+              "type": "string",
+              "enum": [
+                "free",
+                "efficient",
+                "balanced",
+                "frontier"
+              ]
+            }
           },
           {
             "$ref": "#/components/parameters/View"
           }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/AutoModelRoutes" }
+          "200": {
+            "$ref": "#/components/responses/AutoModelRoutes"
+          }
         }
       }
     },
@@ -52,11 +68,17 @@
       "get": {
         "summary": "List benchmark rankings",
         "parameters": [
-          { "$ref": "#/components/parameters/Task" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/Task"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/RankingList" }
+          "200": {
+            "$ref": "#/components/responses/RankingList"
+          }
         }
       }
     },
@@ -65,36 +87,92 @@
         "summary": "Proxy an OpenAI-compatible chat completion",
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": {
-            "type": "object",
-            "properties": {
-              "reasoning_effort": {
-                "type": "string",
-                "enum": ["low", "medium", "high", "xhigh", "max"]
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reasoning_effort": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max"
+                    ]
+                  }
+                }
               }
             }
-          } } }
+          }
         },
         "responses": {
-          "200": { "description": "OpenAI-compatible completion or event stream." },
-          "400": { "$ref": "#/components/responses/Error" },
-          "404": { "$ref": "#/components/responses/Error" },
-          "502": { "$ref": "#/components/responses/Error" }
+          "200": {
+            "description": "OpenAI-compatible completion or event stream.",
+            "headers": {
+              "XModelGatewayBenchmarkLatencyObserved": {
+                "description": "Whether the selected automatic-route benchmark included a usable latency measurement.",
+                "schema": {
+                  "type": "boolean"
+                }
+              },
+              "XModelGatewayBenchmarkLatencySeconds": {
+                "description": "The latency measurement used for selection when one was available.",
+                "schema": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/health/live": {
       "get": {
         "summary": "Liveness probe",
-        "responses": { "200": { "$ref": "#/components/responses/Health" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Health"
+          }
+        }
       }
     },
     "/health/ready": {
       "get": {
-        "summary": "Readiness probe",
+        "summary": "Gateway readiness probe",
+        "description": "Returns 200 when the routing database is readable. This is process readiness, not provider credential or catalog readiness; use /health/diagnostics for provider-level status.",
         "responses": {
-          "200": { "$ref": "#/components/responses/Health" },
-          "503": { "$ref": "#/components/responses/Health" }
+          "200": {
+            "$ref": "#/components/responses/Health"
+          },
+          "503": {
+            "$ref": "#/components/responses/Health"
+          }
+        }
+      }
+    },
+    "/health/diagnostics": {
+      "get": {
+        "summary": "Readiness diagnostics",
+        "description": "Reports per-provider credential presence and catalog freshness without exposing secret values. The gateway status distinguishes a healthy gateway from unavailable provider catalogs or missing credentials.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Diagnostics"
+          },
+          "503": {
+            "$ref": "#/components/responses/Diagnostics"
+          }
         }
       }
     },
@@ -104,7 +182,13 @@
         "responses": {
           "200": {
             "description": "OpenAPI document.",
-            "content": { "application/json": { "schema": { "type": "object" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           }
         }
       }
@@ -113,17 +197,44 @@
       "get": {
         "summary": "List catalog model resources",
         "parameters": [
-          { "$ref": "#/components/parameters/Access" },
-          { "$ref": "#/components/parameters/Task" },
-          { "$ref": "#/components/parameters/Provider" },
-          { "$ref": "#/components/parameters/Limit" },
-          { "$ref": "#/components/parameters/Cursor" },
-          { "$ref": "#/components/parameters/View" },
-          { "$ref": "#/components/parameters/Variants" }
+          {
+            "$ref": "#/components/parameters/Access"
+          },
+          {
+            "$ref": "#/components/parameters/Task"
+          },
+          {
+            "$ref": "#/components/parameters/Provider"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/View"
+          },
+          {
+            "$ref": "#/components/parameters/Variants"
+          },
+          {
+            "$ref": "#/components/parameters/Fields"
+          },
+          {
+            "$ref": "#/components/parameters/IfNoneMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IfModifiedSince"
+          }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/CatalogCollection" },
-          "304": { "$ref": "#/components/responses/NotModified" }
+          "200": {
+            "$ref": "#/components/responses/CatalogCollection"
+          },
+          "304": {
+            "$ref": "#/components/responses/NotModified"
+          }
         }
       }
     },
@@ -135,21 +246,37 @@
             "name": "provider",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Provider namespace returned by the catalog collection."
           },
           {
             "name": "model",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "URI-encoded model identifier returned by the catalog collection."
+          },
+          {
+            "$ref": "#/components/parameters/IfNoneMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IfModifiedSince"
           }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/ModelResource" },
-          "304": { "$ref": "#/components/responses/NotModified" },
-          "404": { "$ref": "#/components/responses/Error" }
+          "200": {
+            "$ref": "#/components/responses/ModelResource"
+          },
+          "304": {
+            "$ref": "#/components/responses/NotModified"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     }
@@ -159,202 +286,701 @@
       "Access": {
         "name": "access",
         "in": "query",
-        "schema": { "type": "string", "enum": ["free", "paid", "all"], "default": "all" }
+        "schema": {
+          "type": "string",
+          "enum": [
+            "free",
+            "paid",
+            "all"
+          ],
+          "default": "all"
+        }
       },
       "Task": {
         "name": "task",
         "in": "query",
-        "schema": { "type": "string", "enum": ["general", "coding", "agentic"], "default": "general" }
+        "schema": {
+          "type": "string",
+          "enum": [
+            "general",
+            "coding",
+            "agentic"
+          ],
+          "default": "general"
+        }
       },
       "Provider": {
         "name": "provider",
         "in": "query",
-        "schema": { "type": "string" }
+        "schema": {
+          "type": "string"
+        }
       },
       "Limit": {
         "name": "limit",
         "in": "query",
-        "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 }
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 25
+        }
       },
       "Cursor": {
         "name": "cursor",
         "in": "query",
-        "schema": { "type": "string" }
+        "schema": {
+          "type": "string"
+        }
       },
       "View": {
         "name": "view",
         "in": "query",
-        "schema": { "type": "string", "enum": ["summary", "full"], "default": "summary" }
-      }
-      ,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "summary",
+            "full"
+          ],
+          "default": "summary"
+        }
+      },
       "Variants": {
         "name": "variants",
         "in": "query",
         "description": "Use all reasoning-effort benchmark variants instead of one variant per provider/model.",
-        "schema": { "type": "string", "enum": ["collapsed", "all"], "default": "collapsed" }
+        "schema": {
+          "type": "string",
+          "enum": [
+            "collapsed",
+            "all"
+          ],
+          "default": "collapsed"
+        }
+      },
+      "Fields": {
+        "name": "fields",
+        "in": "query",
+        "description": "Optional comma-separated allowlist of exact top-level fields to return for each catalog item. Without fields, view selects the default summary or full representation. With fields, the requested allowlisted fields are returned exactly. Projection does not change filtering, ranking, pagination, or snapshot cursors; equivalent field orderings are canonicalized for stable links and ETags.",
+        "schema": {
+          "type": "string",
+          "example": "id,links,quality,reasoning_effort"
+        }
+      },
+      "IfNoneMatch": {
+        "name": "If-None-Match",
+        "in": "header",
+        "description": "Return 304 when the current representation matches the supplied entity tag. Weak comparison and the wildcard are supported for GET.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "IfModifiedSince": {
+        "name": "If-Modified-Since",
+        "in": "header",
+        "description": "Return 304 when the representation has not changed since this HTTP date. Ignored when If-None-Match is supplied.",
+        "schema": {
+          "type": "string",
+          "format": "http-date"
+        }
       }
     },
     "responses": {
       "ModelList": {
         "description": "OpenAI-compatible list of routable model IDs.",
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelList" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ModelList"
+            }
+          }
+        }
       },
       "CatalogCollection": {
         "description": "Snapshot-consistent catalog collection.",
         "headers": {
-          "ETag": { "$ref": "#/components/headers/ETag" },
-          "Last-Modified": { "$ref": "#/components/headers/LastModified" }
+          "ETag": {
+            "$ref": "#/components/headers/ETag"
+          },
+          "Last-Modified": {
+            "$ref": "#/components/headers/LastModified"
+          }
         },
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CatalogCollection" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CatalogCollection"
+            }
+          }
+        }
       },
       "ModelResource": {
         "description": "Complete catalog model resource.",
         "headers": {
-          "ETag": { "$ref": "#/components/headers/ETag" },
-          "Last-Modified": { "$ref": "#/components/headers/LastModified" }
+          "ETag": {
+            "$ref": "#/components/headers/ETag"
+          },
+          "Last-Modified": {
+            "$ref": "#/components/headers/LastModified"
+          }
         },
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ModelResourceResponse" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ModelResourceResponse"
+            }
+          }
+        }
       },
-      "NotModified": { "description": "The representation has not changed." },
+      "NotModified": {
+        "description": "The representation has not changed. The response has no body.",
+        "headers": {
+          "ETag": {
+            "$ref": "#/components/headers/ETag"
+          },
+          "Last-Modified": {
+            "$ref": "#/components/headers/LastModified"
+          }
+        }
+      },
       "Error": {
         "description": "Typed API error.",
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Diagnostics": {
+        "description": "Provider readiness diagnostics",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "ready",
+                    "not_ready"
+                  ]
+                },
+                "gateway": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "providers_configured": {
+                      "type": "integer"
+                    },
+                    "providers_with_credentials": {
+                      "type": "integer"
+                    },
+                    "providers_with_fresh_catalogs": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "provider_catalogs": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "available",
+                        "partial",
+                        "unavailable",
+                        "not_configured",
+                        "unknown"
+                      ]
+                    },
+                    "fresh": {
+                      "type": "integer"
+                    },
+                    "configured": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "benchmarks": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "available",
+                        "stale",
+                        "unavailable",
+                        "unknown"
+                      ]
+                    },
+                    "snapshots": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "providers": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "credential": {
+                        "type": "string",
+                        "enum": [
+                          "present",
+                          "missing",
+                          "not_required"
+                        ]
+                      },
+                      "credential_source": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "catalog": {
+                        "type": "string",
+                        "enum": [
+                          "fresh",
+                          "stale",
+                          "missing"
+                        ]
+                      },
+                      "available": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "headers": {
-      "ETag": { "description": "Strong representation validator.", "schema": { "type": "string" } },
-      "LastModified": { "description": "Catalog data modification time.", "schema": { "type": "string", "format": "http-date" } }
+      "ETag": {
+        "description": "Strong representation validator.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "LastModified": {
+        "description": "Catalog data modification time.",
+        "schema": {
+          "type": "string",
+          "format": "http-date"
+        }
+      }
     },
     "schemas": {
       "ModelList": {
         "type": "object",
-        "required": ["object", "data"],
+        "required": [
+          "object",
+          "data"
+        ],
         "properties": {
-          "object": { "const": "list" },
-          "data": { "type": "array", "items": { "$ref": "#/components/schemas/ModelIdentifier" } }
+          "object": {
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelIdentifier"
+            }
+          }
         }
       },
       "ModelIdentifier": {
         "type": "object",
-        "required": ["id", "object"],
+        "required": [
+          "id",
+          "object"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "object": { "const": "model" },
-          "owned_by": { "type": "string" }
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "const": "model"
+          },
+          "owned_by": {
+            "type": "string"
+          }
         }
       },
       "ModelResource": {
         "type": "object",
-        "required": ["id", "object", "links"],
+        "required": [
+          "id",
+          "object",
+          "links"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "object": { "const": "model" },
-          "links": { "$ref": "#/components/schemas/Links" },
-          "model": { "type": "object" },
-          "benchmarks": { "$ref": "#/components/schemas/BenchmarkMetrics" },
-          "capabilities": { "type": ["object", "null"] },
-          "price_per_million": { "type": "object" },
-          "access": { "type": "object" }
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "const": "model"
+          },
+          "links": {
+            "$ref": "#/components/schemas/Links"
+          },
+          "model": {
+            "type": "object"
+          },
+          "benchmarks": {
+            "$ref": "#/components/schemas/BenchmarkMetrics"
+          },
+          "capabilities": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "price_per_million": {
+            "type": "object"
+          },
+          "access": {
+            "type": "object"
+          }
         }
       },
       "ProviderList": {
         "type": "object",
-        "required": ["object", "data"],
+        "required": [
+          "object",
+          "data"
+        ],
         "properties": {
-          "object": { "const": "list" },
-          "data": { "type": "array", "items": { "type": "object" } }
+          "object": {
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         }
       },
       "AutoModelRoutes": {
         "type": "object",
         "properties": {
-          "object": { "const": "auto_models" },
-          "view": { "type": "string", "enum": ["summary", "full"] },
-          "routes": { "type": "object" }
+          "object": {
+            "const": "auto_models"
+          },
+          "view": {
+            "type": "string",
+            "enum": [
+              "summary",
+              "full"
+            ]
+          },
+          "routes": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AutoModelRoute"
+            }
+          }
+        }
+      },
+      "AutoModelRoute": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "quality_floor": {
+            "type": "number"
+          },
+          "latency_observed": {
+            "type": "boolean",
+            "description": "Whether any eligible benchmark candidate has a usable latency measurement."
+          },
+          "primary": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AutoModelCandidate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fallbacks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AutoModelCandidate"
+            }
+          }
+        }
+      },
+      "AutoModelCandidate": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "links": {
+            "$ref": "#/components/schemas/Links"
+          },
+          "quality": {
+            "type": [
+              "number",
+              "object"
+            ]
+          },
+          "reasoning_effort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latency_seconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "latency_available": {
+            "type": "boolean"
+          }
         }
       },
       "RankingList": {
         "type": "object",
-        "required": ["object", "data"],
+        "required": [
+          "object",
+          "data"
+        ],
         "properties": {
-          "object": { "const": "list" },
-          "data": { "type": "array", "items": { "type": "object" } }
+          "object": {
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         }
       },
       "Health": {
         "type": "object",
-        "required": ["status"],
-        "properties": { "status": { "type": "string", "enum": ["ok", "ready", "not_ready"] } }
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "ready",
+              "not_ready"
+            ]
+          }
+        }
       },
       "ModelResourceResponse": {
         "type": "object",
-        "required": ["id", "object", "links", "data"],
+        "required": [
+          "id",
+          "object",
+          "links",
+          "data"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "object": { "const": "model" },
-          "links": { "$ref": "#/components/schemas/Links" },
-          "data": { "$ref": "#/components/schemas/ModelResource" },
-          "meta": { "type": "object" }
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "const": "model"
+          },
+          "links": {
+            "$ref": "#/components/schemas/Links"
+          },
+          "data": {
+            "$ref": "#/components/schemas/ModelResource"
+          },
+          "meta": {
+            "type": "object"
+          }
         }
       },
       "CatalogCollection": {
         "type": "object",
-        "required": ["object", "data", "meta", "links"],
+        "required": [
+          "object",
+          "data",
+          "meta",
+          "links"
+        ],
         "properties": {
-          "object": { "const": "model.collection" },
-          "data": { "type": "array", "items": { "oneOf": [
-            { "$ref": "#/components/schemas/ModelSummary" },
-            { "$ref": "#/components/schemas/ModelResource" }
-          ] } },
-          "meta": { "type": "object" },
-          "links": { "$ref": "#/components/schemas/Links" }
+          "object": {
+            "const": "model.collection"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogItem"
+            }
+          },
+          "meta": {
+            "type": "object"
+          },
+          "links": {
+            "$ref": "#/components/schemas/Links"
+          }
         }
       },
       "Links": {
         "type": "object",
         "properties": {
-          "self": { "type": "string", "format": "uri" },
-          "prev": { "type": "string", "format": "uri" },
-          "next": { "type": "string", "format": "uri" }
+          "self": {
+            "type": "string",
+            "format": "uri"
+          },
+          "prev": {
+            "type": "string",
+            "format": "uri"
+          },
+          "next": {
+            "type": "string",
+            "format": "uri"
+          }
         }
       },
       "ModelSummary": {
         "type": "object",
-        "required": ["id", "links", "quality", "reasoning_effort"],
+        "required": [
+          "id",
+          "links",
+          "quality",
+          "reasoning_effort"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "links": { "$ref": "#/components/schemas/Links" },
+          "id": {
+            "type": "string"
+          },
+          "links": {
+            "$ref": "#/components/schemas/Links"
+          },
           "quality": {
             "type": "object",
             "properties": {
-              "score": { "type": ["number", "null"] },
-              "rank": { "type": "integer" }
+              "score": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "rank": {
+                "type": "integer"
+              }
             }
           },
-          "reasoning_effort": { "type": ["string", "null"] }
+          "reasoning_effort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
+      },
+      "CatalogItem": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ModelSummary"
+          },
+          {
+            "$ref": "#/components/schemas/ModelResource"
+          },
+          {
+            "type": "object",
+            "description": "Partial catalog item returned when the fields query parameter is used.",
+            "additionalProperties": true
+          }
+        ]
       },
       "BenchmarkMetrics": {
         "type": "object",
         "properties": {
-          "cost_per_task_usd": { "type": ["number", "null"] },
-          "latency_seconds": { "type": ["number", "null"] },
-          "time_to_first_answer_seconds": { "type": ["number", "null"] },
-          "end_to_end_response_seconds": { "type": ["number", "null"] },
-          "output_tokens_per_second": { "type": ["number", "null"] }
+          "cost_per_task_usd": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "latency_seconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "latency_available": {
+            "type": "boolean",
+            "description": "Whether end-to-end or fallback latency data is available for ranking."
+          },
+          "time_to_first_answer_seconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "end_to_end_response_seconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "output_tokens_per_second": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "output_tokens_per_task": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Measured average output size for the benchmark task."
+          }
         }
       },
       "Error": {
         "type": "object",
-        "required": ["error"],
+        "required": [
+          "error"
+        ],
         "properties": {
           "error": {
             "type": "object",
-            "required": ["type", "message"],
+            "required": [
+              "type",
+              "message"
+            ],
             "properties": {
-              "type": { "type": "string" },
-              "message": { "type": "string" },
-              "code": { "type": "string" }
+              "type": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              }
             }
           }
         }

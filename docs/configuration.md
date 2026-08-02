@@ -17,7 +17,17 @@ Environment overrides are applied on every load and take precedence over TOML.
 | `MODEL_GATEWAY_MAX_IN_FLIGHT` | `64` | Concurrent request limit |
 | `MODEL_GATEWAY_ADMISSION_TIMEOUT_MS` | `250` | Admission wait timeout |
 | `MODEL_GATEWAY_SHUTDOWN_GRACE_SECONDS` | `30` | Graceful shutdown timeout |
-| `MODEL_GATEWAY_SECRET_STORE` | `keychain` | `keychain`, `file`, or `environment` |
+| `MODEL_GATEWAY_SECRET_STORE` | `file` | `file`, `keychain`, or `environment` |
+
+The application default is the protected-file store so direct and unattended
+startup never prompts for an OS keychain. The modes are exclusive: `file`
+reads `MODEL_GATEWAY_SECRET_DIR`, `keychain` reads only the OS keychain, and
+`environment` reads only exported variables. Set
+`MODEL_GATEWAY_SECRET_STORE=keychain` explicitly when using the OS keychain.
+The launcher scripts print the effective store before starting. See
+[getting-started.md](getting-started.md).
+
+| `MODEL_GATEWAY_SECRET_DIR` | `~/.config/model-gateway/secrets` | Directory for `file` store values (`0700`, files `0600`) |
 | `MODEL_GATEWAY_STATE_PATH` | `~/.config/model-gateway/routing.sqlite3` | SQLite database path |
 | `MODEL_GATEWAY_LOG_FORMAT` | `text` | `text` or `json` |
 | `MODEL_GATEWAY_CONFIG` | `~/.config/model-gateway/config.toml` | Configuration file path |
@@ -41,6 +51,8 @@ Environment overrides are applied on every load and take precedence over TOML.
 | `MODEL_GATEWAY_CLI_PROXY_CONFIG` | `<home>/config.yaml` | Sidecar YAML configuration |
 | `MODEL_GATEWAY_CLI_PROXY_AUTH_DIR` | `<home>/auth` | OAuth credential directory |
 | `CLI_PROXY_API_KEY` | generated secret-store value | Frontend bearer key for manual/environment-only setup |
+
+`model-gateway cli-proxy setup` reports which store received the generated frontend key (`Stored the CLIProxyAPI frontend key in the <source> secret store`). In a non-interactive environment set `MODEL_GATEWAY_SECRET_STORE=file` (and optionally `MODEL_GATEWAY_SECRET_DIR`) before running setup.
 
 Use `MODEL_GATEWAY_CLI_PROXY_MODEL_ALLOWLIST` to expose only reviewed sidecar models. The provider defaults to `billing_mode = "subscription"`; changing it to `paid` authorizes per-token billing semantics and should not be done for OAuth subscription accounts.
 
