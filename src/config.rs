@@ -70,6 +70,8 @@ pub struct ServerConfig {
     pub benchmark_max_age_seconds: u64,
     #[serde(default = "default_pricing_max_age_seconds")]
     pub pricing_max_age_seconds: u64,
+    #[serde(default = "default_data_refresh_interval_seconds")]
+    pub data_refresh_interval_seconds: u64,
     #[serde(default = "default_true")]
     pub auto_frontier_enabled: bool,
     #[serde(default = "default_true")]
@@ -434,6 +436,7 @@ impl Default for ServerConfig {
             catalog_max_age_seconds: default_catalog_max_age_seconds(),
             benchmark_max_age_seconds: default_benchmark_max_age_seconds(),
             pricing_max_age_seconds: default_pricing_max_age_seconds(),
+            data_refresh_interval_seconds: default_data_refresh_interval_seconds(),
             auto_frontier_enabled: true,
             auto_free_enabled: true,
             auto_efficient_enabled: true,
@@ -542,6 +545,11 @@ impl Config {
         {
             return Err(ConfigError::Invalid(
                 "benchmark age and quality floors must be valid (0-100)".to_owned(),
+            ));
+        }
+        if !(60..=86_400).contains(&self.server.data_refresh_interval_seconds) {
+            return Err(ConfigError::Invalid(
+                "data refresh interval must be between 60 and 86400 seconds".to_owned(),
             ));
         }
         if self
@@ -905,6 +913,10 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
     apply_env_u64(
         "MODEL_GATEWAY_PRICING_MAX_AGE_SECONDS",
         &mut server.pricing_max_age_seconds,
+    )?;
+    apply_env_u64(
+        "MODEL_GATEWAY_DATA_REFRESH_INTERVAL_SECONDS",
+        &mut server.data_refresh_interval_seconds,
     )?;
     apply_env_bool(
         "MODEL_GATEWAY_AUTO_FRONTIER_ENABLED",
@@ -1350,6 +1362,13 @@ const fn default_pricing_max_age_seconds() -> u64 {
     604_800
 }
 
+/// Source polling cadence for catalog, pricing, and benchmark refreshes,
+/// independent of the freshness windows. Small enough to catch revisions
+/// quickly, bounded so sources are not hammered.
+const fn default_data_refresh_interval_seconds() -> u64 {
+    3_600
+}
+
 const fn default_free_quality_min_composite() -> f64 {
     30.0
 }
@@ -1489,6 +1508,23 @@ mod tests {
         config
             .validate_structure()
             .expect("built-in local route should not require aliases");
+    }
+
+    #[test]
+    fn validates_data_refresh_interval_bounds() {
+        let mut config = Config {
+            server: ServerConfig::default(),
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+        };
+        config.server.data_refresh_interval_seconds = 59;
+        assert!(config.validate_structure().is_err());
+        config.server.data_refresh_interval_seconds = 60;
+        config.validate_structure().expect("minimum interval");
+        config.server.data_refresh_interval_seconds = 86_400;
+        config.validate_structure().expect("maximum interval");
+        config.server.data_refresh_interval_seconds = 86_401;
+        assert!(config.validate_structure().is_err());
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Digest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -157,6 +158,60 @@ pub fn summarize_pricing(observations: &[PriceObservation]) -> PricingCoverageSu
         }
     }
     summary
+}
+
+/// Deterministic content fingerprint for a set of price observations.
+/// Order-insensitive and stable across refreshes, so callers can skip storing
+/// a new snapshot when the source content is unchanged while still catching
+/// in-place revisions (a changed rate, cache rate, or source as-of changes the
+/// fingerprint).
+pub fn fingerprint_price_observations(observations: &[PriceObservation]) -> String {
+    let mut lines = observations
+        .iter()
+        .map(|observation| {
+            let rates = &observation.rates;
+            format!(
+                "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}",
+                observation.scope.as_str(),
+                observation.provider_key.as_deref().unwrap_or(""),
+                observation.model_id,
+                fmt_number(rates.input_price_per_million),
+                fmt_number(rates.output_price_per_million),
+                fmt_number(rates.cache_read_price_per_million),
+                fmt_number(rates.cache_write_price_per_million),
+                fmt_number(rates.reasoning_price_per_million),
+                fmt_number(rates.input_audio_price_per_million),
+                fmt_number(rates.output_audio_price_per_million),
+                fmt_number(rates.request_price),
+                observation.as_of.as_deref().unwrap_or(""),
+                observation
+                    .valid_from
+                    .map_or_else(String::new, |value| value.to_string()),
+                observation
+                    .valid_until
+                    .map_or_else(String::new, |value| value.to_string()),
+                rates.modifiers,
+            )
+        })
+        .collect::<Vec<_>>();
+    lines.sort();
+    let mut digest = sha2::Sha256::new();
+    for line in lines {
+        digest.update(line.as_bytes());
+        digest.update(b"\n");
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn fmt_number(value: Option<f64>) -> String {
+    match value {
+        Some(value) => format!("{value}"),
+        None => String::new(),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -383,6 +438,44 @@ mod tests {
         ManualPriceImport, PriceObservation, PriceRates, PriceScope, PriceSourceKind,
         parse_models_dev, summarize_pricing,
     };
+
+    #[test]
+    fn pricing_fingerprint_catches_revisions_and_ignores_order() {
+        use super::{fingerprint_price_observations, parse_models_dev};
+        let body = |input: f64, output: f64| {
+            json!({ "openai": { "models": {
+                "gpt-5.6-luna": {"cost": {"input": input, "output": output}, "last_updated": "2026-07-09"},
+                "gpt-5.6-sol": {"cost": {"input": 5.0, "output": 30.0}, "last_updated": "2026-07-09"}
+            }}})
+        };
+        let original = parse_models_dev(&body(0.2, 1.2), 100).expect("fixture");
+        let mut reordered = original.clone();
+        reordered.reverse();
+        assert_eq!(
+            fingerprint_price_observations(&original),
+            fingerprint_price_observations(&reordered),
+            "fingerprint must be order-insensitive"
+        );
+        let revised = parse_models_dev(&body(0.2, 1.2), 200).expect("fixture");
+        assert_eq!(
+            fingerprint_price_observations(&original),
+            fingerprint_price_observations(&revised),
+            "unchanged content must not change the fingerprint"
+        );
+        let price_revision = parse_models_dev(&body(0.14, 0.28), 300).expect("fixture");
+        assert_ne!(
+            fingerprint_price_observations(&original),
+            fingerprint_price_observations(&price_revision),
+            "an in-place price revision must change the fingerprint"
+        );
+        let mut cache_revision = original;
+        cache_revision[0].rates.cache_read_price_per_million = Some(0.01);
+        assert_ne!(
+            fingerprint_price_observations(&revised),
+            fingerprint_price_observations(&cache_revision),
+            "cache pricing revisions must change the fingerprint"
+        );
+    }
 
     #[test]
     fn models_dev_parser_preserves_provider_scope_and_zero_prices() {
