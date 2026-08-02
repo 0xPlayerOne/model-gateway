@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.13.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.12.0...v0.13.0) (2026-08-02)
+
+
+### Features
+
+* **api:** provide compact model resources with links, deterministic field selection, cursor pagination, and conditional caching ([#103](https://github.com/0xPlayerOne/model-gateway/pull/103))
+* **catalog:** expose reasoning-effort-specific quality, benchmark, and pricing metadata ([#103](https://github.com/0xPlayerOne/model-gateway/pull/103))
+* **cli:** manage CLIProxyAPI setup, OAuth supervision, explicit secret stores, and readiness checks ([#103](https://github.com/0xPlayerOne/model-gateway/pull/103))
+
+### Performance Improvements
+
+* **catalog:** reuse normalized identity indexes and short-lived snapshots during reconciliation and catalog assembly ([#103](https://github.com/0xPlayerOne/model-gateway/pull/103))
+* **identity:** fetch identity sources concurrently ([#97](https://github.com/0xPlayerOne/model-gateway/issues/97)) ([5839314](https://github.com/0xPlayerOne/model-gateway/commit/583931457fe62176c038e9650824d326b59adf65))
+
+### Bug Fixes
+
+* **routing:** use measured benchmark signals and latency-aware Pareto selection for automatic model routing ([#103](https://github.com/0xPlayerOne/model-gateway/pull/103))
+* **security:** avoid logging secret-derived CLIProxy metadata ([#105](https://github.com/0xPlayerOne/model-gateway/pull/105))
+
+### Documentation
+
+* **docs:** clarify installation, startup responsibilities, OAuth setup, catalog fields, pagination, and caching ([#103](https://github.com/0xPlayerOne/model-gateway/pull/103))
+
+### CI
+
+* **ci:** replace stale validation callers with a tiered Code Foundry workflow and a single required gate ([#103](https://github.com/0xPlayerOne/model-gateway/pull/103))
+
 ## [0.12.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.11.0...v0.12.0) (2026-07-29)
 
 
