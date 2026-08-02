@@ -3,8 +3,6 @@ name: Code Foundry
 on:
   push:
     branches: [staging]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -13,12 +11,11 @@ permissions:
 
 jobs:
   release-pr:
-    if: >-
-      github.event_name == 'push' ||
-      github.event_name == 'workflow_dispatch' ||
-      startsWith(github.head_ref, 'release-please--branches--main')
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     name: Release PR
     uses: 0xPlayerOne/code-foundry/.github/workflows/release-pr.yml@v0.34.4
     with:
       runner: ubuntu-slim
-    secrets: inherit
+    secrets:
+      CODE_FOUNDRY_TOKEN: ${{ secrets.CODE_FOUNDRY_TOKEN }}
+      RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}

@@ -20,7 +20,9 @@ jobs:
       token: ${{ steps.detect.outputs.token }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Detect configuration and token
         id: detect
         env:
@@ -37,7 +39,7 @@ jobs:
     name: OpenCode Security / Scan
     needs: detect
     if: needs.detect.outputs.enabled == 'true' && needs.detect.outputs.token == 'true'
-    uses: 0xPlayerOne/opencode-security/.github/workflows/opencode-security.yml@main
+    uses: 0xPlayerOne/opencode-security/.github/workflows/opencode-security.yml@b3dce823322672b285fbe99b870ea984c01826cb # main
     with:
       source_ref: ${{ github.event.pull_request.head.ref || 'main' }}
       runner: ubuntu-latest
