@@ -48,7 +48,11 @@
     ".": {
       "release-type": "rust",
       "extra-files": [
-        "docs/openapi.json"
+        {
+          "type": "json",
+          "path": "docs/openapi.json",
+          "jsonpath": "$.info.version"
+        }
       ]
     }
   }
