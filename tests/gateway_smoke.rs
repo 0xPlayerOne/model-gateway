@@ -4226,6 +4226,13 @@ async fn paid_models_lists_only_paid_provider_offerings() {
         openapi["components"]["schemas"]["RankingList"]["properties"]["object"]["const"],
         "benchmark.rankings"
     );
+    for schema in ["AutoModelCandidate", "RankingEntry", "BenchmarkMetrics"] {
+        assert!(
+            openapi["components"]["schemas"][schema]["properties"]["output_tokens_per_task"]
+                .is_object(),
+            "missing response-size benchmark field in {schema}"
+        );
+    }
     assert_eq!(
         openapi["paths"]["/v1/chat/completions"]["post"]["requestBody"]["content"]["application/json"]
             ["schema"]["required"],
