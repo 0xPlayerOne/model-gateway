@@ -176,6 +176,8 @@ Required checks are enforced by branch protection. Do not duplicate their checkl
 
 Use Conventional Commits so the release automation can determine the next version: `fix:` produces a patch release, `feat:` produces a minor release, and `!` or `BREAKING CHANGE:` produces a major release. Add `Release-As: x.y.z` only when a deliberate version override is needed. The release workflow maintains the changelog and GitHub release after changes land on `main`; npm publication is opt-in through `.github/code-foundry.yml`. Keep the generated Release Please pull-request body intact: the release workflow uses its marker and version section to recognize the merged release and publish the tag. Put manual context in the source changelog or commit history instead.
 
+After a GitHub release is published, [`Release Artifacts`](./workflows/release-artifacts.yml) builds and uploads the Linux x86_64, macOS Intel, and macOS ARM archives, then publishes the versioned multi-architecture image to GHCR. If delivery is interrupted, rerun that workflow with the exact published tag; it validates the release before replacing same-named assets.
+
 Security checks can be skipped when repository visibility or the GitHub plan does not support a feature. A skipped optional check must not be configured as a required status check.
 
 ## Review and merge protocol

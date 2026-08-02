@@ -191,7 +191,7 @@ cargo run -- --help                 # CLI help
 cargo install --locked --path .
 ```
 
-Tagged releases publish checksummed native archives (Linux x86_64, macOS Intel, macOS ARM) plus multi-arch container images on GitHub Container Registry.
+Published GitHub releases automatically publish checksummed native archives (Linux x86_64, macOS Intel, macOS ARM) plus multi-arch container images on GitHub Container Registry. See [Releasing](docs/releasing.md) for the normal flow and recovery procedure.
 
 ## Limits
 
