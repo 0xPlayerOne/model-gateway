@@ -21,4 +21,6 @@ jobs:
     uses: 0xPlayerOne/code-foundry/.github/workflows/draft-pr.yml@v0.34.4
     with:
       runner: ubuntu-slim
-    secrets: inherit
+    secrets:
+      CODE_FOUNDRY_TOKEN: ${{ secrets.CODE_FOUNDRY_TOKEN }}
+      RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
