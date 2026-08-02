@@ -484,19 +484,19 @@ pub fn reconcile_model_matches(
                 .get(&(provider_key.to_owned(), offering.model.clone()))
                 .cloned()
         });
-        if !matches!(resolution, BenchmarkResolution::Exact(_)) {
-            if let Some(alternatives) = identity_conflict {
-                report.push(ModelMatchReport {
-                    provider: offering.provider,
-                    catalog_model: offering.model,
-                    status: ModelMatchKind::Ambiguous,
-                    benchmark_model: None,
-                    alternatives,
-                    source: Some("canonical_entity_conflict".to_owned()),
-                    identity_evidence,
-                });
-                continue;
-            }
+        if !matches!(resolution, BenchmarkResolution::Exact(_))
+            && let Some(alternatives) = identity_conflict
+        {
+            report.push(ModelMatchReport {
+                provider: offering.provider,
+                catalog_model: offering.model,
+                status: ModelMatchKind::Ambiguous,
+                benchmark_model: None,
+                alternatives,
+                source: Some("canonical_entity_conflict".to_owned()),
+                identity_evidence,
+            });
+            continue;
         }
         let entry = match resolution {
             BenchmarkResolution::Exact(models) => ModelMatchReport {
@@ -1037,10 +1037,10 @@ async fn list_providers(
     // Collect configured profile IDs to avoid duplicates in unconfigured section
     let mut configured_profiles: Vec<ProviderProfileId> = Vec::new();
     for runtime in state.providers.values() {
-        if let Some(profile) = runtime.config.profile {
-            if !configured_profiles.contains(&profile) {
-                configured_profiles.push(profile);
-            }
+        if let Some(profile) = runtime.config.profile
+            && !configured_profiles.contains(&profile)
+        {
+            configured_profiles.push(profile);
         }
     }
 
@@ -2700,14 +2700,13 @@ fn select_mode_models(
         });
     }
 
-    if let Some(max_regret) = max_quality_regret {
-        if let Some(best_quality) = scored
+    if let Some(max_regret) = max_quality_regret
+        && let Some(best_quality) = scored
             .iter()
             .map(|candidate| candidate.quality)
             .reduce(f64::max)
-        {
-            scored.retain(|candidate| best_quality - candidate.quality <= max_regret);
-        }
+    {
+        scored.retain(|candidate| best_quality - candidate.quality <= max_regret);
     }
     let has_measured_cost = scored
         .iter()
@@ -2937,20 +2936,20 @@ async fn list_catalog_models(
         None | Some("all") => None,
         Some(provider) => Some(provider),
     };
-    if let Some(provider) = provider_filter {
-        if !state.config.providers.contains_key(provider) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": format!("unknown provider '{provider}'"),
-                        "type": "invalid_request_error",
-                        "code": "invalid_provider"
-                    }
-                })),
-            )
-                .into_response();
-        }
+    if let Some(provider) = provider_filter
+        && !state.config.providers.contains_key(provider)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": format!("unknown provider '{provider}'"),
+                    "type": "invalid_request_error",
+                    "code": "invalid_provider"
+                }
+            })),
+        )
+            .into_response();
     }
     let task = match parse_catalog_task(query.task.as_deref()) {
         Ok(task) => task,
@@ -3447,10 +3446,10 @@ async fn chat_completions(
             ));
             continue;
         }
-        if target_request.get("reasoning_effort").is_none() {
-            if let Some(effort) = &target.reasoning_effort {
-                target_request["reasoning_effort"] = Value::String(effort.clone());
-            }
+        if target_request.get("reasoning_effort").is_none()
+            && let Some(effort) = &target.reasoning_effort
+        {
+            target_request["reasoning_effort"] = Value::String(effort.clone());
         }
         if prepare_request(provider.config.adapter, &mut target_request, &target.model).is_err() {
             release_reservation(&state, reservation, ReservationRelease::BeforeDispatch).await;
@@ -3648,15 +3647,14 @@ async fn chat_completions(
                 .get("x-ratelimit-remaining")
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|value| value.trim() == "0")
+            && let Some(delay) = rate_limit_reset_delay(&response_headers)
         {
-            if let Some(delay) = rate_limit_reset_delay(&response_headers) {
-                let provider = target.provider.clone();
-                let upstream_model = target.model.clone();
-                let _ = routing_operation(state.routing.clone(), move |routing| {
-                    routing.apply_cooldown(&provider, &upstream_model, Some(delay))
-                })
-                .await;
-            }
+            let provider = target.provider.clone();
+            let upstream_model = target.model.clone();
+            let _ = routing_operation(state.routing.clone(), move |routing| {
+                routing.apply_cooldown(&provider, &upstream_model, Some(delay))
+            })
+            .await;
         }
         if target.runtime_provider == LOCAL_RUNTIME_PROVIDER
             && status == StatusCode::NOT_FOUND
@@ -4677,10 +4675,10 @@ async fn resolve_local_model(
         return Ok(model.clone());
     }
     let mut cache = state.local_model.lock().await;
-    if let Some(cached) = cache.as_ref() {
-        if cached.expires_at > Instant::now() {
-            return Ok(cached.model.clone());
-        }
+    if let Some(cached) = cache.as_ref()
+        && cached.expires_at > Instant::now()
+    {
+        return Ok(cached.model.clone());
     }
     let provider = state
         .providers
@@ -5405,22 +5403,21 @@ fn transform_sse_event(
                 .get("delta")
                 .and_then(|delta| delta.get("content"))
                 .and_then(Value::as_str)
+                && !content.is_empty()
             {
-                if !content.is_empty() {
-                    state.saw_content = true;
-                    state.tail.push_str(content);
-                    if state.tail.len() > footer.len() * 2 + 32 {
-                        let keep = footer.len() * 2 + 32;
-                        state.tail = state
-                            .tail
-                            .chars()
-                            .rev()
-                            .take(keep)
-                            .collect::<String>()
-                            .chars()
-                            .rev()
-                            .collect();
-                    }
+                state.saw_content = true;
+                state.tail.push_str(content);
+                if state.tail.len() > footer.len() * 2 + 32 {
+                    let keep = footer.len() * 2 + 32;
+                    state.tail = state
+                        .tail
+                        .chars()
+                        .rev()
+                        .take(keep)
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
                 }
             }
             if item
@@ -5723,15 +5720,13 @@ async fn auto_refresh_benchmarks(
             .flatten()
             .is_none();
 
-        if needs_refresh {
-            if let Some(ref key) = aa_api_key {
-                match fetch_aa_benchmarks(&routing, key).await {
-                    Ok(count) => {
-                        tracing::info!("Auto-refreshed {count} benchmark models");
-                    }
-                    Err(e) => {
-                        tracing::warn!("Benchmark auto-refresh failed (will retry): {e}");
-                    }
+        if needs_refresh && let Some(ref key) = aa_api_key {
+            match fetch_aa_benchmarks(&routing, key).await {
+                Ok(count) => {
+                    tracing::info!("Auto-refreshed {count} benchmark models");
+                }
+                Err(e) => {
+                    tracing::warn!("Benchmark auto-refresh failed (will retry): {e}");
                 }
             }
         }

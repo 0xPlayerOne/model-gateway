@@ -144,12 +144,11 @@ impl FreeModelsQualityBar {
             .unwrap_or(i64::MAX);
 
         // Quality filter: skip if benchmark exists but composite score is below threshold
-        if let Some(benchmark) = benchmark {
-            if let Some(score) = crate::benchmarks::composite_quality(benchmark) {
-                if score < self.min_composite_quality {
-                    return false;
-                }
-            }
+        if let Some(benchmark) = benchmark
+            && let Some(score) = crate::benchmarks::composite_quality(benchmark)
+            && score < self.min_composite_quality
+        {
+            return false;
         }
 
         // Age filter: use benchmark release_date if available, else refreshed_at
@@ -174,37 +173,33 @@ impl FreeModelsQualityBar {
         }
 
         // Cost filters: skip if effective price exceeds threshold
-        if self.max_input_price_per_million > 0.0 {
-            if let Some(price) = effective_input_price {
-                if price > self.max_input_price_per_million {
-                    return false;
-                }
-            }
+        if self.max_input_price_per_million > 0.0
+            && let Some(price) = effective_input_price
+            && price > self.max_input_price_per_million
+        {
+            return false;
         }
-        if self.max_output_price_per_million > 0.0 {
-            if let Some(price) = effective_output_price {
-                if price > self.max_output_price_per_million {
-                    return false;
-                }
-            }
+        if self.max_output_price_per_million > 0.0
+            && let Some(price) = effective_output_price
+            && price > self.max_output_price_per_million
+        {
+            return false;
         }
 
         // Context length filter: skip models with tiny context windows
-        if self.min_context_length > 0 {
-            if let Some(ctx) = context_length {
-                if ctx < self.min_context_length {
-                    return false;
-                }
-            }
+        if self.min_context_length > 0
+            && let Some(ctx) = context_length
+            && ctx < self.min_context_length
+        {
+            return false;
         }
 
         // Model size filter: skip tiny models based on parameter count in ID
-        if self.min_model_size_b > 0 {
-            if let Some(size_b) = parse_model_size(model_id) {
-                if size_b < self.min_model_size_b {
-                    return false;
-                }
-            }
+        if self.min_model_size_b > 0
+            && let Some(size_b) = parse_model_size(model_id)
+            && size_b < self.min_model_size_b
+        {
+            return false;
         }
 
         true
