@@ -821,6 +821,28 @@ fn healthcheck_passes_against_a_ready_gateway_stub() {
 }
 
 #[test]
+fn healthcheck_reports_safe_diagnostics_for_a_not_ready_gateway() {
+    let body = r#"{"status":"not_ready","providers":[{"id":"fixture","credential":"missing"}]}"#;
+    let response = Box::leak(
+        format!(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_boxed_str(),
+    );
+    let address = spawn_stub_server(response);
+    let output = Command::new(env!("CARGO_BIN_EXE_model-gateway"))
+        .args(["healthcheck", "--endpoint", &format!("http://{address}")])
+        .output()
+        .expect("run healthcheck");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("gateway health check failed (503"));
+    assert!(stderr.contains("credential"));
+    assert!(stderr.contains("missing"));
+}
+
+#[test]
 fn healthcheck_fails_when_the_gateway_is_unreachable() {
     // Reserve a port and drop the listener so nothing answers.
     let address = {
@@ -1105,5 +1127,35 @@ api_key_secret = "CLI_PROXY_API_KEY"
         .expect("run cli-proxy status");
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("expected a data array"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("ready"));
+}
+
+#[test]
+fn cli_proxy_status_rejects_empty_model_lists_as_unauthenticated() {
+    let address = spawn_stub_server(Box::leak(http_ok(r#"{"data":[]}"#).into_boxed_str()));
+    let directory = tempfile::tempdir().expect("config directory");
+    let config_path = directory.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[providers.cli-proxy]
+profile = "cli_proxy_api"
+adapter = "openai_chat"
+base_url = "http://{address}/v1"
+api_key_secret = "CLI_PROXY_API_KEY"
+"#
+        ),
+    )
+    .expect("write config");
+    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
+        .args(["cli-proxy", "status"])
+        .env("MODEL_GATEWAY_CONFIG", &config_path)
+        .env("MODEL_GATEWAY_SECRET_STORE", "environment")
+        .env("CLI_PROXY_API_KEY", "fixture-sidecar-key")
+        .output()
+        .expect("run cli-proxy status");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("returned no models"));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("ready"));
 }

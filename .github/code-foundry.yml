@@ -29,7 +29,10 @@ toolchain: auto
 post_release: false
 post_release_workflow:
 post_release_mode: auto
-opencode_security: true
+# The OpenCode caller is repository-owned because Code Foundry v0.34.4 renders
+# the scanner's source_ref from the consumer PR branch. Keep this disabled so
+# sync preserves the pinned caller below instead of reintroducing that drift.
+opencode_security: false
 sync_mode: overlay
 custom_workflows: preserve
 codeql_rust_shards: '["all"]'
