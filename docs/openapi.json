@@ -829,6 +829,14 @@
               "null"
             ]
           },
+          "output_tokens_per_task": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 9223372036854775807,
+            "description": "Measured average output size for the benchmark task."
+          },
           "pricing_eligible": {
             "type": "boolean"
           },
@@ -969,6 +977,14 @@
               "number",
               "null"
             ]
+          },
+          "output_tokens_per_task": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 9223372036854775807,
+            "description": "Measured average output size for the benchmark task."
           },
           "reasoning_effort": {
             "type": [
@@ -1204,6 +1220,7 @@
               "integer",
               "null"
             ],
+            "maximum": 9223372036854775807,
             "description": "Measured average output size for the benchmark task."
           }
         }
