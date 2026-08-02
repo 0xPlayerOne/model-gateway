@@ -174,7 +174,7 @@ Required checks are enforced by branch protection. Do not duplicate their checkl
 
 ### Release conventions
 
-Use Conventional Commits so the release automation can determine the next version: `fix:` produces a patch release, `feat:` produces a minor release, and `!` or `BREAKING CHANGE:` produces a major release. Add `Release-As: x.y.z` only when a deliberate version override is needed. The release workflow maintains the changelog and GitHub release after changes land on `main`; npm publication is opt-in through `.github/code-foundry.yml`.
+Use Conventional Commits so the release automation can determine the next version: `fix:` produces a patch release, `feat:` produces a minor release, and `!` or `BREAKING CHANGE:` produces a major release. Add `Release-As: x.y.z` only when a deliberate version override is needed. The release workflow maintains the changelog and GitHub release after changes land on `main`; npm publication is opt-in through `.github/code-foundry.yml`. Keep the generated Release Please pull-request body intact: the release workflow uses its marker and version section to recognize the merged release and publish the tag. Put manual context in the source changelog or commit history instead.
 
 Security checks can be skipped when repository visibility or the GitHub plan does not support a feature. A skipped optional check must not be configured as a required status check.
 

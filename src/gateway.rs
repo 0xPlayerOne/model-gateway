@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::{BytesRejection, QueryRejection};
@@ -1706,6 +1706,11 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
                 "cache_read_price_per_million": model.cache_read_price_per_million,
                 "cache_write_price_per_million": model.cache_write_price_per_million,
                 "cost_per_task_usd": model.cost_per_task_usd,
+                "cost_source": if model.cost_per_task_usd.is_some() {
+                    "measured"
+                } else {
+                    "unavailable"
+                },
                 "latency_seconds": model.latency_seconds,
                 "latency_available": model
                     .frontier_latency_seconds()
@@ -2206,41 +2211,132 @@ fn catalog_links(
     Value::Object(links)
 }
 
-fn cached_json_response(value: Value, request_headers: &HeaderMap, last_modified: i64) -> Response {
-    let body = serde_json::to_vec(&value).unwrap_or_else(|_| b"{}".to_vec());
-    let etag = format!("\"{}\"", digest_hex(Sha256::digest(&body)));
+/// The normalized representation parameters of a catalog collection page.
+/// The page body is a deterministic function of these values together with
+/// the snapshot token and the public origin, so a validator derived from
+/// them is a strong ETag: equal validators imply byte-identical
+/// representations.
+#[derive(Debug, Clone)]
+struct CatalogRepresentation {
+    access: CatalogAccess,
+    task: TaskKind,
+    include_variants: bool,
+    view: ModelView,
+    fields: Option<CatalogFields>,
+    offset: usize,
+    limit: usize,
+}
+
+/// Deterministic representation validator for a catalog collection page: a
+/// strong ETag derived from the catalog snapshot token and the normalized
+/// request representation parameters (origin, access/task/variants, view,
+/// fields, offset, limit). The page body is a deterministic function of the
+/// same values, so an `If-None-Match`/`If-Modified-Since` hit can be
+/// answered with `304` before the page data is materialized or serialized.
+fn catalog_representation_validator(
+    snapshot_token: &str,
+    origin: &str,
+    representation: &CatalogRepresentation,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"catalog:v1");
+    hasher.update(snapshot_token.as_bytes());
+    hasher.update(b":origin=");
+    hasher.update(origin.as_bytes());
+    hasher.update(b":access=");
+    hasher.update(catalog_access_name(representation.access).as_bytes());
+    hasher.update(b":task=");
+    hasher.update(representation.task.as_str().as_bytes());
+    hasher.update(b":variants=");
+    hasher.update(
+        if representation.include_variants {
+            "all"
+        } else {
+            "collapsed"
+        }
+        .as_bytes(),
+    );
+    hasher.update(b":view=");
+    hasher.update(
+        if representation.view.is_full() {
+            "full"
+        } else {
+            "summary"
+        }
+        .as_bytes(),
+    );
+    if let Some(fields) = representation.fields.as_ref() {
+        hasher.update(b":fields=");
+        hasher.update(fields.names.join(",").as_bytes());
+    }
+    hasher.update(b":offset=");
+    hasher.update(representation.offset.to_string().as_bytes());
+    hasher.update(b":limit=");
+    hasher.update(representation.limit.to_string().as_bytes());
+    digest_hex(hasher.finalize())
+}
+
+fn http_last_modified(last_modified: i64) -> String {
     let modified_at = if last_modified > 0 {
         UNIX_EPOCH + Duration::from_secs(last_modified as u64)
     } else {
-        SystemTime::now()
+        // A missing persisted timestamp must still produce a stable validator;
+        // using the wall clock here would defeat If-Modified-Since on every
+        // request until the catalog receives its first real revision.
+        UNIX_EPOCH
     };
-    let last_modified = httpdate::fmt_http_date(modified_at);
-    let cache_control = "private, max-age=30, must-revalidate";
-    let not_modified = if let Some(if_none_match) = request_headers
+    httpdate::fmt_http_date(modified_at)
+}
+
+/// Conditional `If-None-Match`/`If-Modified-Since` evaluation shared by the
+/// catalog 304 fast path and the 200 emission path. `If-None-Match` takes
+/// precedence over `If-Modified-Since`, weak comparison and the wildcard are
+/// accepted, and `Last-Modified` uses the snapshot's strongest observed
+/// timestamp.
+fn conditional_not_modified(request_headers: &HeaderMap, etag: &str, last_modified: &str) -> bool {
+    if let Some(if_none_match) = request_headers
         .get("if-none-match")
         .and_then(|value| value.to_str().ok())
     {
-        if_none_match_matches(if_none_match, &etag)
-    } else {
-        request_headers
-            .get("if-modified-since")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| httpdate::parse_http_date(value).ok())
-            .and_then(|since| {
-                httpdate::parse_http_date(&last_modified)
-                    .ok()
-                    .map(|modified| modified <= since)
-            })
-            .unwrap_or(false)
-    };
-    if not_modified {
-        return Response::builder()
-            .status(StatusCode::NOT_MODIFIED)
-            .header("etag", etag)
-            .header("last-modified", last_modified)
-            .header("cache-control", cache_control)
-            .body(Body::empty())
-            .expect("valid cache response");
+        return if_none_match_matches(if_none_match, etag);
+    }
+    request_headers
+        .get("if-modified-since")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| httpdate::parse_http_date(value).ok())
+        .and_then(|since| {
+            httpdate::parse_http_date(last_modified)
+                .ok()
+                .map(|modified| modified <= since)
+        })
+        .unwrap_or(false)
+}
+
+fn not_modified_response(etag: &str, last_modified: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .header("etag", etag)
+        .header("last-modified", last_modified)
+        .header("cache-control", "private, max-age=30, must-revalidate")
+        .body(Body::empty())
+        .expect("valid cache response")
+}
+
+/// Emit a JSON response with a strong `ETag`, `Last-Modified`, and
+/// conditional `304 Not Modified` support. The validator is caller-provided
+/// so the catalog collection can derive it from the snapshot token and the
+/// normalized representation parameters before the page data is
+/// materialized.
+fn cached_json_response(
+    value: Value,
+    request_headers: &HeaderMap,
+    last_modified: i64,
+    etag: &str,
+) -> Response {
+    let body = serde_json::to_vec(&value).unwrap_or_else(|_| b"{}".to_vec());
+    let last_modified = http_last_modified(last_modified);
+    if conditional_not_modified(request_headers, etag, &last_modified) {
+        return not_modified_response(etag, &last_modified);
     }
     Response::builder()
         .status(StatusCode::OK)
@@ -2248,14 +2344,22 @@ fn cached_json_response(value: Value, request_headers: &HeaderMap, last_modified
         .header("content-length", body.len().to_string())
         .header("etag", etag)
         .header("last-modified", last_modified)
-        .header("cache-control", cache_control)
+        .header("cache-control", "private, max-age=30, must-revalidate")
         .body(Body::from(body))
         .expect("valid JSON response")
 }
 
+/// Strong body-hash ETag for responses whose representation is cheap to
+/// materialize (single model detail resources).
+fn body_hash_etag(value: &Value) -> String {
+    let body = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
+    format!("\"{}\"", digest_hex(Sha256::digest(&body)))
+}
+
 /// GET/HEAD If-None-Match uses weak comparison. Accepting weak validators and
 /// the wildcard keeps conditional catalog requests interoperable with standard
-/// HTTP caches while the emitted validator remains a strong body hash.
+/// HTTP caches while the emitted validator remains a strong deterministic
+/// representation validator.
 fn if_none_match_matches(header_value: &str, etag: &str) -> bool {
     header_value.split(',').map(str::trim).any(|candidate| {
         candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
@@ -2724,6 +2828,7 @@ struct ModeModelValue<'a> {
     end_to_end_response_seconds: Option<f64>,
     output_tokens_per_second: Option<f64>,
     reasoning_effort: Option<&'a str>,
+    as_of: Option<&'a str>,
 }
 
 fn effective_access_kind(provider: &ProviderConfig, offering: &CatalogOffering) -> AccessKind {
@@ -3186,6 +3291,7 @@ fn select_mode_models(
                 end_to_end_response_seconds: benchmark.and_then(|b| b.end_to_end_response_seconds),
                 output_tokens_per_second: benchmark.and_then(|b| b.output_tokens_per_second),
                 reasoning_effort: benchmark.and_then(|b| b.reasoning_effort.as_deref()),
+                as_of: benchmark.and_then(|b| b.as_of.as_deref()),
             },
         });
     }
@@ -3396,6 +3502,10 @@ fn mode_model_entry(
             .then_some(candidate.latency_seconds),
         "latency_available": candidate.latency_seconds.is_finite(),
         "benchmark_cost_per_task_usd": candidate.value.benchmark_cost_per_task_usd,
+        // Benchmark freshness metadata: the source-published revision date
+        // (`as_of`), null when the row was observed without source revision
+        // metadata. Never invented.
+        "benchmark_as_of": candidate.value.as_of,
         "time_to_first_answer_seconds": candidate.value.time_to_first_answer_seconds,
         "end_to_end_response_seconds": candidate.value.end_to_end_response_seconds,
         "output_tokens_per_second": candidate.value.output_tokens_per_second,
@@ -3557,6 +3667,29 @@ async fn list_catalog_models(
             }
         }
     };
+    // Pagination links echo the canonical `snapshot:offset` cursor, and only
+    // when the page is not the first, so equivalent cursor spellings select
+    // the identical representation (and therefore the identical validator).
+    query.cursor = (offset > 0).then(|| format!("{}:{offset}", snapshot.token));
+    let representation = CatalogRepresentation {
+        access,
+        task,
+        include_variants,
+        view,
+        fields: fields.clone(),
+        offset,
+        limit,
+    };
+    let etag = format!(
+        "\"{}\"",
+        catalog_representation_validator(&snapshot.token, &origin, &representation)
+    );
+    let last_modified = http_last_modified(snapshot.last_modified);
+    if conditional_not_modified(&headers, &etag, &last_modified) {
+        // The validator is a strong ETag for this page, so a conditional hit
+        // returns 304 without materializing or serializing the entries.
+        return not_modified_response(&etag, &last_modified);
+    }
     let total = snapshot.candidates.len();
     if offset > total {
         return (
@@ -3621,6 +3754,7 @@ async fn list_catalog_models(
         }),
         &headers,
         snapshot.last_modified,
+        &etag,
     )
 }
 
@@ -3697,25 +3831,24 @@ async fn get_catalog_model(
         )
             .into_response();
     };
+    let origin = public_origin(&headers);
     let resource = catalog_model_response(
         candidate,
         rank + 1,
         snapshot.account_limits.get(provider).copied(),
         ModelView::Full,
         None,
-        &public_origin(&headers),
+        &origin,
     );
-    cached_json_response(
-        json!({
-            "object": "model",
-            "id": model_resource_id(&candidate.offering),
-            "links": {"self": catalog_model_link(&candidate.offering, &public_origin(&headers))},
-            "data": resource,
-            "meta": {"snapshot": snapshot.token},
-        }),
-        &headers,
-        snapshot.last_modified,
-    )
+    let body = json!({
+        "object": "model",
+        "id": model_resource_id(&candidate.offering),
+        "links": {"self": catalog_model_link(&candidate.offering, &origin)},
+        "data": resource,
+        "meta": {"snapshot": snapshot.token},
+    });
+    let etag = body_hash_etag(&body);
+    cached_json_response(body, &headers, snapshot.last_modified, &etag)
 }
 
 async fn chat_completions(
@@ -6490,22 +6623,22 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        BenchmarkIdentityIndex, CatalogFields, ModelCandidate, ModelMatchKind, ModelMetadata,
-        ModelView, RequestRequirements, SelectionMetadata, StreamChoice, add_model_headers,
-        benchmark_ids_match, benchmark_price_for_model, benchmarks_for_effort,
-        catalog_capabilities_json, catalog_model_response, copy_safe_headers,
-        decorate_json_response, encode_uri_component, estimate_request_tokens,
+        BenchmarkIdentityIndex, CatalogFields, ModeModelValue, ModelCandidate, ModelMatchKind,
+        ModelMetadata, ModelResponseContext, ModelView, RequestRequirements, SelectionMetadata,
+        StreamChoice, add_model_headers, benchmark_ids_match, benchmark_price_for_model,
+        benchmarks_for_effort, catalog_capabilities_json, catalog_model_response,
+        copy_safe_headers, decorate_json_response, encode_uri_component, estimate_request_tokens,
         expected_cost_microusd, find_all_matching_benchmarks, find_benchmark,
         find_exact_matching_benchmarks, find_exact_matching_benchmarks_indexed,
         find_suggested_benchmark, footer_sse_event, frontier_score, has_dynamic_or_release_suffix,
-        header_value, identity_mapping_indexes, is_exact_model_identity, is_fallback_status,
-        is_model_denied, is_provider_auto_route, is_reasoning_effort, log_request,
-        malformed_sse_event, parse_catalog_fields, parse_json_usage, parse_sse_usage,
-        parse_usage_value, public_origin, rank_benchmark_models, rate_limit_reset_delay,
-        request_id, request_id_from_response, session_material, sse_model, strip_model_noise,
-        take_sse_event, transform_sse_event,
+        header_value, http_last_modified, identity_mapping_indexes, is_exact_model_identity,
+        is_fallback_status, is_model_denied, is_provider_auto_route, is_reasoning_effort,
+        log_request, malformed_sse_event, mode_model_entry, parse_catalog_fields, parse_json_usage,
+        parse_sse_usage, parse_usage_value, public_origin, rank_benchmark_models,
+        rate_limit_reset_delay, request_id, request_id_from_response, session_material, sse_model,
+        strip_model_noise, take_sse_event, transform_sse_event,
     };
-    use crate::benchmarks::{BenchmarkModel, TaskKind};
+    use crate::benchmarks::{BenchmarkModel, ScoredCandidate, TaskKind};
     use crate::identity::{
         IdentityAliasRecord, IdentityConfidence, IdentityEntityRecord, IdentityImport,
     };
@@ -6548,6 +6681,170 @@ mod tests {
         );
         assert_eq!(encode_uri_component("model/name", true), "model/name");
         assert_eq!(encode_uri_component("coding task", false), "coding%20task");
+    }
+
+    /// Builds a scored auto-model candidate whose provenance matches the
+    /// benchmark row: measured cost and revision metadata come from the
+    /// benchmark, the estimated cost and latency are explicit inputs.
+    fn mode_candidate<'a>(
+        model: &'static str,
+        benchmark: &'a BenchmarkModel,
+        estimated_cost_microusd: Option<u64>,
+        latency_seconds: f64,
+    ) -> ScoredCandidate<ModeModelValue<'a>> {
+        let measured_cost_microusd = benchmark.cost_per_task_microusd();
+        ScoredCandidate {
+            quality: 60.0,
+            expected_cost_microusd: measured_cost_microusd
+                .or(estimated_cost_microusd)
+                .unwrap_or(u64::MAX),
+            latency_seconds,
+            value: ModeModelValue {
+                model,
+                provider: "fixture",
+                price: None,
+                pricing_eligible: true,
+                match_kind: Some(ModelMatchKind::Exact),
+                access_kind: AccessKind::Paid,
+                reference_input_price: benchmark.input_price_per_million,
+                reference_output_price: benchmark.output_price_per_million,
+                benchmark_cost_per_task_usd: benchmark.cost_per_task_usd,
+                measured_cost_microusd,
+                estimated_cost_microusd,
+                time_to_first_answer_seconds: benchmark.time_to_first_answer_seconds,
+                end_to_end_response_seconds: benchmark.end_to_end_response_seconds,
+                output_tokens_per_second: benchmark.output_tokens_per_second,
+                reasoning_effort: benchmark.reasoning_effort.as_deref(),
+                as_of: benchmark.as_of.as_deref(),
+            },
+        }
+    }
+
+    #[test]
+    fn mode_full_entries_expose_measured_estimated_and_unavailable_provenance() {
+        let context = ModelResponseContext {
+            view: ModelView::Full,
+            origin: "http://localhost:8008",
+        };
+        let render =
+            |candidate: &ScoredCandidate<ModeModelValue<'_>>| mode_model_entry(candidate, context);
+
+        // Measured: source-published revision date, measured task cost, and
+        // observed latency.
+        let mut measured = BenchmarkModel::fixture("gpt-5.6-luna", 60.0, 60.0, 60.0, 5.0, 30.0);
+        measured.cost_per_task_usd = Some(0.042);
+        measured.latency_seconds = Some(0.7);
+        measured.as_of = Some("2026-07-09".to_owned());
+        let entry = render(&mode_candidate("gpt-5.6-luna", &measured, None, 0.7));
+        assert_eq!(entry["benchmark_as_of"], "2026-07-09");
+        assert_eq!(entry["cost_source"], "artificial_analysis_task");
+        assert_eq!(entry["latency_available"], true);
+        assert_eq!(entry["latency_seconds"], 0.7);
+
+        // Estimated: no measured task cost, price-derived estimate; missing
+        // latency and revision metadata stay explicit nulls.
+        let mut estimated = BenchmarkModel::fixture("gpt-5.6-sol", 59.0, 59.0, 59.0, 5.0, 30.0);
+        estimated.cost_per_task_usd = None;
+        estimated.latency_seconds = None;
+        estimated.end_to_end_response_seconds = None;
+        estimated.as_of = None;
+        let entry = render(&mode_candidate(
+            "gpt-5.6-sol",
+            &estimated,
+            Some(358),
+            f64::INFINITY,
+        ));
+        assert_eq!(entry["benchmark_as_of"], Value::Null);
+        assert_eq!(entry["cost_source"], "token_price_scenario");
+        assert_eq!(entry["latency_available"], false);
+        assert_eq!(entry["latency_seconds"], Value::Null);
+
+        // Unavailable: neither a measured cost nor any price basis. The
+        // missing latency never invents a value either.
+        let mut unavailable = BenchmarkModel::fixture("gpt-5.6-nova", 58.0, 58.0, 58.0, 5.0, 30.0);
+        unavailable.input_price_per_million = None;
+        unavailable.output_price_per_million = None;
+        unavailable.cost_per_task_usd = None;
+        unavailable.latency_seconds = None;
+        unavailable.end_to_end_response_seconds = None;
+        unavailable.as_of = None;
+        let entry = render(&mode_candidate(
+            "gpt-5.6-nova",
+            &unavailable,
+            None,
+            f64::INFINITY,
+        ));
+        assert_eq!(entry["benchmark_as_of"], Value::Null);
+        assert_eq!(entry["cost_source"], "unknown");
+        assert_eq!(entry["latency_available"], false);
+        assert_eq!(entry["latency_seconds"], Value::Null);
+    }
+
+    #[test]
+    fn mode_summary_entries_stay_limited_to_their_intended_fields() {
+        let context = ModelResponseContext {
+            view: ModelView::Summary,
+            origin: "http://localhost:8008",
+        };
+        let mut measured = BenchmarkModel::fixture("gpt-5.6-luna", 60.0, 60.0, 60.0, 5.0, 30.0);
+        measured.cost_per_task_usd = Some(0.042);
+        measured.latency_seconds = Some(0.7);
+        measured.as_of = Some("2026-07-09".to_owned());
+        let entry = mode_model_entry(
+            &mode_candidate("gpt-5.6-luna", &measured, None, 0.7),
+            context,
+        );
+        assert_eq!(
+            entry
+                .as_object()
+                .map(|object| object.keys().map(String::as_str).collect::<Vec<_>>()),
+            Some(vec!["id", "links", "quality", "reasoning_effort"]),
+            "provenance diagnostics belong to the full view only"
+        );
+        for diagnostic in ["benchmark_as_of", "cost_source", "latency_available"] {
+            assert!(
+                entry.get(diagnostic).is_none(),
+                "{diagnostic} leaked into summary"
+            );
+        }
+    }
+
+    #[test]
+    fn rankings_distinguish_measured_and_unavailable_provenance() {
+        let mut measured = BenchmarkModel::fixture("gpt-5-6-luna", 60.0, 60.0, 60.0, 5.0, 30.0);
+        measured.cost_per_task_usd = Some(0.042);
+        measured.latency_seconds = Some(0.7);
+        measured.as_of = Some("2026-07-09".to_owned());
+        let mut missing = BenchmarkModel::fixture("gpt-5-6-sol", 59.0, 59.0, 59.0, 5.0, 30.0);
+        missing.cost_per_task_usd = None;
+        missing.latency_seconds = None;
+        missing.end_to_end_response_seconds = None;
+        missing.as_of = None;
+        let rankings = rank_benchmark_models(vec![measured, missing], TaskKind::General, 10);
+        let by_id = |id: &str| {
+            rankings
+                .iter()
+                .find(|entry| entry["id"] == id)
+                .unwrap_or_else(|| panic!("missing ranking {id}"))
+        };
+        let luna = by_id("gpt-5-6-luna");
+        assert_eq!(luna["as_of"], "2026-07-09");
+        assert_eq!(luna["cost_source"], "measured");
+        assert_eq!(luna["latency_available"], true);
+        assert_eq!(luna["latency_seconds"], 0.7);
+        assert_eq!(luna["rank"], 1);
+        let sol = by_id("gpt-5-6-sol");
+        assert_eq!(sol["as_of"], Value::Null);
+        assert_eq!(sol["cost_source"], "unavailable");
+        assert_eq!(sol["latency_available"], false);
+        assert_eq!(sol["latency_seconds"], Value::Null);
+        assert_eq!(sol["rank"], 2);
+    }
+
+    #[test]
+    fn missing_last_modified_timestamp_is_stable_for_conditional_requests() {
+        assert_eq!(http_last_modified(0), "Thu, 01 Jan 1970 00:00:00 GMT");
+        assert_eq!(http_last_modified(-1), "Thu, 01 Jan 1970 00:00:00 GMT");
     }
 
     #[test]
