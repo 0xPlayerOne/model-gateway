@@ -157,6 +157,17 @@ fn credential_list_succeeds_before_configuration_exists() {
 }
 
 #[test]
+fn healthcheck_fails_closed_when_the_gateway_is_unreachable() {
+    let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
+        .args(["healthcheck", "http://127.0.0.1:1"])
+        .output()
+        .expect("run healthcheck");
+
+    assert!(!output.status.success());
+    assert!(!output.stderr.is_empty());
+}
+
+#[test]
 fn config_check_discovers_environment_providers_without_setup() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = strip_provider_env_vars(Command::new(env!("CARGO_BIN_EXE_model-gateway")))
