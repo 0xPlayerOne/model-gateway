@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.14.1](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.0...v0.14.1) (2026-08-02)
+
+
+### Bug Fixes
+
+* **ci:** skip optional scans for release metadata ([9ee29a2](https://github.com/0xPlayerOne/model-gateway/commit/9ee29a2fc1af541d95146f3f91c05e86a08a78a7))
+* **release:** configure root manifest package ([5f6f9ce](https://github.com/0xPlayerOne/model-gateway/commit/5f6f9ce624f0cd63739d4ef29d50999b43fea14c))
+
+
+### Performance
+
+* **gateway:** offload routing reads and invalidate catalog cache ([4e8eba1](https://github.com/0xPlayerOne/model-gateway/commit/4e8eba18b91b6d5d38e1bf4d07690843a811ce7f))
+
+
+### CI
+
+* **release:** publish versioned artifacts ([0b21109](https://github.com/0xPlayerOne/model-gateway/commit/0b21109f9badc3542aad33c62210f3e412928947))
+
 ## [0.14.0](https://github.com/0xPlayerOne/model-gateway/compare/v0.13.0...v0.14.0) (2026-08-02)
 
 ### Features
