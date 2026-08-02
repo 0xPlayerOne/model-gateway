@@ -44,7 +44,7 @@ jobs:
             metadata_only=true
             while IFS= read -r path; do
               case "$path" in
-                CHANGELOG.md|Cargo.lock|Cargo.toml|.release-please-manifest.json) ;;
+              CHANGELOG.md|Cargo.lock|Cargo.toml|.release-please-manifest.json|docs/openapi.json) ;;
                 *) metadata_only=false; break ;;
               esac
             done < <(git diff --name-only "$BASE_SHA" HEAD)
