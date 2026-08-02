@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Model Gateway Catalog API",
-    "version": "0.11.0",
+    "version": "0.13.0",
     "description": "Discovery and metadata resources for models available through Model Gateway."
   },
   "paths": {
@@ -92,6 +92,10 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "Routable model ID or automatic route alias."
+                  },
                   "reasoning_effort": {
                     "type": "string",
                     "enum": [
@@ -102,7 +106,10 @@
                       "max"
                     ]
                   }
-                }
+                },
+                "required": [
+                  "model"
+                ]
               }
             }
           }
@@ -534,6 +541,7 @@
                         "type": "string",
                         "enum": [
                           "present",
+                          "blank",
                           "missing",
                           "not_required"
                         ]
@@ -732,6 +740,12 @@
           "id": {
             "type": "string"
           },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
           "links": {
             "$ref": "#/components/schemas/Links"
           },
@@ -755,6 +769,224 @@
           },
           "latency_available": {
             "type": "boolean"
+          },
+          "expected_cost_microusd": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Effective request cost in microdollars; zero for included subscription/free access."
+          },
+          "reference_cost_microusd": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Reference scarcity cost used for quota-limited or included access."
+          },
+          "estimated_cost_microusd": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cost_source": {
+            "type": "string",
+            "enum": [
+              "artificial_analysis_task",
+              "token_price_scenario",
+              "unknown"
+            ]
+          },
+          "benchmark_cost_per_task_usd": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "benchmark_as_of": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Source-published benchmark revision date; null when the source did not provide one."
+          },
+          "time_to_first_answer_seconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "end_to_end_response_seconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "output_tokens_per_second": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "pricing_eligible": {
+            "type": "boolean"
+          },
+          "benchmark_match": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "exact",
+              "configured",
+              "approved",
+              "suggested",
+              "ambiguous",
+              "unmatched",
+              null
+            ]
+          },
+          "access": {
+            "type": "object"
+          },
+          "price_per_million": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "reference_price_per_million": {
+            "type": "object"
+          }
+        }
+      },
+      "RankingEntry": {
+        "type": "object",
+        "required": [
+          "rank",
+          "id",
+          "scores",
+          "cost_source",
+          "latency_available",
+          "reasoning_effort",
+          "as_of"
+        ],
+        "properties": {
+          "rank": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "id": {
+            "type": "string"
+          },
+          "creator": {
+            "type": "string"
+          },
+          "scores": {
+            "type": "object",
+            "properties": {
+              "intelligence": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "coding": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "agentic": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            }
+          },
+          "input_price_per_million": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "output_price_per_million": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cache_read_price_per_million": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cache_write_price_per_million": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cost_per_task_usd": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cost_source": {
+            "type": "string",
+            "enum": [
+              "measured",
+              "unavailable"
+            ]
+          },
+          "latency_seconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "latency_available": {
+            "type": "boolean"
+          },
+          "time_to_first_answer_seconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "end_to_end_response_seconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "output_tokens_per_second": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "reasoning_effort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "as_of": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "release_date": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -766,12 +998,29 @@
         ],
         "properties": {
           "object": {
-            "const": "list"
+            "const": "benchmark.rankings"
+          },
+          "task": {
+            "type": "string",
+            "enum": [
+              "general",
+              "coding",
+              "agentic"
+            ]
+          },
+          "max_age_seconds": {
+            "type": "integer"
+          },
+          "snapshots": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
           },
           "data": {
             "type": "array",
             "items": {
-              "type": "object"
+              "$ref": "#/components/schemas/RankingEntry"
             }
           }
         }

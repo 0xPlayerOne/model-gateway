@@ -11,10 +11,10 @@ use tracing_subscriber::prelude::*;
 
 use model_gateway::benchmarks::{BenchmarkImport, parse_artificial_analysis};
 use model_gateway::cli_proxy::{
-    API_KEY_SECRET as CLI_PROXY_API_KEY_SECRET, BASE_URL as CLI_PROXY_BASE_URL, CliProxyPaths,
-    OAuthProvider, PROVIDER_KEY as CLI_PROXY_PROVIDER_KEY, VERSION as CLI_PROXY_VERSION,
-    generate_api_key, initialize as initialize_cli_proxy, install as install_cli_proxy,
-    login as login_cli_proxy, serve as serve_cli_proxy,
+    API_KEY_SECRET as CLI_PROXY_API_KEY_SECRET, CliProxyPaths, OAuthProvider,
+    PROVIDER_KEY as CLI_PROXY_PROVIDER_KEY, VERSION as CLI_PROXY_VERSION,
+    base_url as cli_proxy_base_url, generate_api_key, initialize as initialize_cli_proxy,
+    install as install_cli_proxy, login as login_cli_proxy, serve as serve_cli_proxy,
 };
 use model_gateway::config::{
     BillingMode, Config, ConfigError, Exposure, ModelConfig, ProviderProfileId, QuotaBoundary,
@@ -305,9 +305,10 @@ fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
             }
             initialize_cli_proxy(&paths, &api_key, force)?;
             let mut config = Config::load(&config_path, &resolver)?;
+            let cli_proxy_base_url = cli_proxy_base_url()?;
 
             let mut provider = ProviderProfileId::CliProxyApi.config(
-                CLI_PROXY_BASE_URL.to_owned(),
+                cli_proxy_base_url,
                 Some(CLI_PROXY_API_KEY_SECRET.to_owned()),
             );
             provider.billing_mode = BillingMode::Subscription;
@@ -383,6 +384,12 @@ fn cli_proxy(command: CliProxyCommand) -> Result<(), Box<dyn Error>> {
                 .get("data")
                 .and_then(Value::as_array)
                 .ok_or("CLIProxyAPI returned an invalid /models response: expected a data array")?;
+            if models.is_empty() {
+                return Err(
+                    "CLIProxyAPI is reachable but returned no models; complete OAuth login with `model-gateway cli-proxy login codex` or `model-gateway cli-proxy login claude`"
+                        .into(),
+                );
+            }
             println!(
                 "CLIProxyAPI v{CLI_PROXY_VERSION}: ready, {} models",
                 models.len()
@@ -989,14 +996,25 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
 }
 
 fn healthcheck(endpoint: &str) -> Result<(), Box<dyn Error>> {
-    let url = format!("{}/health/ready", endpoint.trim_end_matches('/'));
-    let response = reqwest::blocking::Client::builder()
+    let base = endpoint.trim_end_matches('/');
+    let url = format!("{base}/health/ready");
+    let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
-        .build()?
-        .get(url)
-        .send()?;
+        .build()?;
+    let response = client.get(url).send()?;
     if !response.status().is_success() {
-        return Err("gateway health check failed".into());
+        let status = response.status();
+        let ready_body = response.text().unwrap_or_default();
+        let diagnostics = client
+            .get(format!("{base}/health/diagnostics"))
+            .send()
+            .ok()
+            .and_then(|response| response.text().ok())
+            .filter(|body| !body.trim().is_empty());
+        let detail = diagnostics
+            .or_else(|| (!ready_body.trim().is_empty()).then_some(ready_body))
+            .unwrap_or_else(|| "no diagnostic response body".to_owned());
+        return Err(format!("gateway health check failed ({status}): {detail}").into());
     }
     Ok(())
 }

@@ -40,7 +40,7 @@ Known included-subscription profiles use `source: "subscription"` for effective 
 
 CLIProxyAPI is integrated as a separate loopback process, not embedded into the Rust gateway and not used to replace existing provider endpoints. This keeps its OAuth tokens, account rotation, provider translations, retries, and rapid release cadence behind one optional HTTP boundary.
 
-`model-gateway cli-proxy setup` installs exact version `v7.2.103` with platform-specific SHA-256 verification on macOS and Linux. It generates a private config under `~/.config/model-gateway/cli-proxy`, stores the frontend key through the gateway secret resolver, and adds `[providers.cli-proxy]` with `billing_mode = "subscription"`.
+`model-gateway cli-proxy setup` installs exact version `v7.2.103` with platform-specific SHA-256 verification on macOS and Linux. It generates a private config under `~/.config/model-gateway/cli-proxy`, stores the frontend key through the gateway secret resolver, and adds `[providers.cli-proxy]` with `billing_mode = "subscription"`. Set `MODEL_GATEWAY_CLI_PROXY_PORT` before setup to choose a different listener port; the launchers read the generated config and fail clearly if a later environment override disagrees with it.
 
 Use `./scripts/start-server.sh` to start the gateway and, when configured, the CLIProxyAPI sidecar together. Logs are written to `~/.config/model-gateway/cli-proxy/server.log`; pass `--follow` or `-f` to keep the gateway in the foreground. `./scripts/restart-server.sh` restarts both services. Use the dedicated `start-cli-proxy.sh` and `restart-cli-proxy.sh` scripts when managing only the sidecar. The lower-level `model-gateway cli-proxy serve` command remains a foreground runner.
 
