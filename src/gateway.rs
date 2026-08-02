@@ -1034,31 +1034,31 @@ async fn list_providers(
     Query(query): Query<ProvidersQuery>,
 ) -> Response {
     let mut model_counts = BTreeMap::new();
-    let account_limits = state.routing.account_limits().unwrap_or_default();
-    if let Ok(offerings) = state
-        .routing
-        .all_candidates(state.config.server.catalog_max_age_seconds)
-    {
-        for offering in offerings {
-            let is_free = state
-                .config
-                .providers
-                .get(&offering.provider)
-                .is_some_and(|provider| {
-                    let access_kind = effective_access_kind(provider, &offering);
-                    access_kind.is_free()
-                        && account_allows_free_access(
-                            access_kind,
-                            account_limits.get(&offering.provider),
-                        )
-                });
-            let counts = model_counts
-                .entry(offering.provider)
-                .or_insert((0usize, 0usize));
-            counts.0 += 1;
-            if is_free {
-                counts.1 += 1;
-            }
+    let max_age = state.config.server.catalog_max_age_seconds;
+    let (account_limits, offerings) = routing_operation(state.routing.clone(), move |routing| {
+        Ok((routing.account_limits()?, routing.all_candidates(max_age)?))
+    })
+    .await
+    .unwrap_or_default();
+    for offering in offerings {
+        let is_free = state
+            .config
+            .providers
+            .get(&offering.provider)
+            .is_some_and(|provider| {
+                let access_kind = effective_access_kind(provider, &offering);
+                access_kind.is_free()
+                    && account_allows_free_access(
+                        access_kind,
+                        account_limits.get(&offering.provider),
+                    )
+            });
+        let counts = model_counts
+            .entry(offering.provider)
+            .or_insert((0usize, 0usize));
+        counts.0 += 1;
+        if is_free {
+            counts.1 += 1;
         }
     }
 
@@ -1155,7 +1155,36 @@ pub async fn run_server(
     // configured provider. Names and sources only, never secret values. A
     // healthy gateway can still lack provider catalogs; this line makes the
     // distinction explicit.
-    let readiness = provider_readiness(&state);
+    let readiness_state = state.clone();
+    let readiness_max_age = state.config.server.catalog_max_age_seconds;
+    let readiness = routing_operation(state.routing.clone(), move |routing| {
+        let fresh = routing
+            .all_candidates(readiness_max_age)
+            .ok()
+            .map(|offerings| {
+                offerings
+                    .into_iter()
+                    .map(|offering| offering.provider)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let present = routing
+            .catalog_summary()
+            .ok()
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|(provider, _, _)| provider)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        Ok(provider_readiness_from_catalog(
+            &readiness_state,
+            &fresh,
+            &present,
+        ))
+    })
+    .await
+    .unwrap_or_default();
     for provider in &readiness {
         tracing::info!(
             provider = %provider.id,
@@ -1166,12 +1195,15 @@ pub async fn run_server(
             "provider readiness"
         );
     }
-    let benchmark_active = state
-        .routing
-        .active_benchmark_snapshot(benchmark_max_age)
-        .ok()
-        .flatten()
-        .is_some();
+    let benchmark_active = routing_operation(state.routing.clone(), move |routing| {
+        Ok(routing
+            .active_benchmark_snapshot(benchmark_max_age)
+            .ok()
+            .flatten()
+            .is_some())
+    })
+    .await
+    .unwrap_or(false);
     tracing::info!(
         secret_store = %secrets.mode(),
         providers_configured = readiness.len(),
@@ -1252,7 +1284,7 @@ async fn health_live() -> impl IntoResponse {
 /// local-only and partially configured gateways can still start; use
 /// `/health/diagnostics` for per-provider readiness detail.
 async fn health_ready(State(state): State<AppState>) -> impl IntoResponse {
-    match state.routing.catalog_summary() {
+    match routing_operation(state.routing.clone(), |routing| routing.catalog_summary()).await {
         Ok(_) => (StatusCode::OK, Json(json!({"status": "ready"}))).into_response(),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1279,6 +1311,7 @@ struct ProviderReadiness {
     available: bool,
 }
 
+#[cfg(test)]
 fn provider_readiness(state: &AppState) -> Vec<ProviderReadiness> {
     let max_age = state.config.server.catalog_max_age_seconds;
     let fresh = state
@@ -1302,6 +1335,14 @@ fn provider_readiness(state: &AppState) -> Vec<ProviderReadiness> {
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
+    provider_readiness_from_catalog(state, &fresh, &present)
+}
+
+fn provider_readiness_from_catalog(
+    state: &AppState,
+    fresh: &BTreeSet<String>,
+    present: &BTreeSet<String>,
+) -> Vec<ProviderReadiness> {
     state
         .config
         .providers
@@ -1337,7 +1378,40 @@ fn provider_readiness(state: &AppState) -> Vec<ProviderReadiness> {
 /// reports `ready` even when no provider catalog is fresh; the provider-level
 /// detail names exactly what is missing.
 async fn health_diagnostics(State(state): State<AppState>) -> Response {
-    let providers = provider_readiness(&state);
+    let max_age = state.config.server.catalog_max_age_seconds;
+    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
+    let readiness = routing_operation(state.routing.clone(), move |routing| {
+        let fresh = routing
+            .all_candidates(max_age)
+            .ok()
+            .map(|offerings| {
+                offerings
+                    .into_iter()
+                    .map(|offering| offering.provider)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let present = routing
+            .catalog_summary()?
+            .into_iter()
+            .map(|(provider, _, _)| provider)
+            .collect::<BTreeSet<_>>();
+        let benchmark_active = routing
+            .active_benchmark_snapshot(benchmark_max_age)
+            .ok()
+            .flatten()
+            .is_some();
+        let benchmark_snapshots = routing.benchmark_status().ok().map_or(0, |rows| rows.len());
+        Ok((fresh, present, benchmark_active, benchmark_snapshots))
+    })
+    .await;
+    let (fresh, present, benchmark_active, benchmark_snapshots, database_ready) = match readiness {
+        Ok((fresh, present, benchmark_active, benchmark_snapshots)) => {
+            (fresh, present, benchmark_active, benchmark_snapshots, true)
+        }
+        Err(_) => (BTreeSet::new(), BTreeSet::new(), false, 0, false),
+    };
+    let providers = provider_readiness_from_catalog(&state, &fresh, &present);
     let with_credentials = providers
         .iter()
         .filter(|provider| provider.credential == "present")
@@ -1355,18 +1429,6 @@ async fn health_diagnostics(State(state): State<AppState>) -> Response {
     } else {
         "partial"
     };
-    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
-    let benchmark_active = state
-        .routing
-        .active_benchmark_snapshot(benchmark_max_age)
-        .ok()
-        .flatten()
-        .is_some();
-    let benchmark_snapshots = state
-        .routing
-        .benchmark_status()
-        .ok()
-        .map_or(0, |rows| rows.len());
     let benchmark_status = if benchmark_active {
         "available"
     } else if benchmark_snapshots > 0 {
@@ -1374,8 +1436,8 @@ async fn health_diagnostics(State(state): State<AppState>) -> Response {
     } else {
         "unavailable"
     };
-    match state.routing.catalog_summary() {
-        Ok(_) => (
+    if database_ready {
+        (
             StatusCode::OK,
             Json(json!({
                 "status": "ready",
@@ -1397,8 +1459,9 @@ async fn health_diagnostics(State(state): State<AppState>) -> Response {
                 "providers": providers,
             })),
         )
-            .into_response(),
-        Err(_) => (
+            .into_response()
+    } else {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "status": "not_ready",
@@ -1408,7 +1471,7 @@ async fn health_diagnostics(State(state): State<AppState>) -> Response {
                 "providers": providers,
             })),
         )
-            .into_response(),
+            .into_response()
     }
 }
 
@@ -1622,11 +1685,15 @@ async fn list_rankings(
         }
     };
     let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
-    let models = match state
-        .routing
-        .benchmark_models(state.config.server.benchmark_max_age_seconds)
+    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
+    let (models, snapshots) = match routing_operation(state.routing.clone(), move |routing| {
+        let models = routing.benchmark_models(benchmark_max_age)?;
+        let snapshots = routing.benchmark_status().unwrap_or_default();
+        Ok((models, snapshots))
+    })
+    .await
     {
-        Ok(models) => models,
+        Ok(data) => data,
         Err(_) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1641,10 +1708,7 @@ async fn list_rankings(
                 .into_response();
         }
     };
-    let snapshots = state
-        .routing
-        .benchmark_status()
-        .unwrap_or_default()
+    let snapshots = snapshots
         .into_iter()
         .map(|(source, fetched_at, models, attribution, revision)| {
             json!({
@@ -1935,6 +1999,7 @@ async fn load_paid_candidates(
     )
     .map_err(|_| ())?;
 
+    let prices = load_effective_prices(state, &offerings).await;
     let mut benchmark_map = BTreeMap::new();
     for benchmark in benchmarks {
         benchmark_map
@@ -1942,7 +2007,7 @@ async fn load_paid_candidates(
             .or_insert_with(Vec::new)
             .push(benchmark);
     }
-    let mappings = identity_mapping_indexes(&state.routing);
+    let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     Ok(collect_paid_candidates(
         &offerings,
         &benchmark_map,
@@ -1951,8 +2016,7 @@ async fn load_paid_candidates(
             runtimes: &state.providers,
             cfg: &state.config.server,
             provider_filter,
-            routing: &state.routing,
-            pricing_max_age_seconds: state.config.server.pricing_max_age_seconds,
+            prices: &prices,
             mappings: &mappings,
         },
     ))
@@ -1984,7 +2048,7 @@ async fn load_free_candidates(
             .or_insert_with(Vec::new)
             .push(benchmark);
     }
-    let mappings = identity_mapping_indexes(&state.routing);
+    let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let candidates = collect_free_candidates(
         &offerings,
         &benchmark_map,
@@ -2010,6 +2074,7 @@ struct CatalogSnapshotCacheKey {
 
 struct CachedCatalogSnapshot {
     snapshot: Arc<CatalogSnapshot>,
+    revision: i64,
     expires_at: Instant,
 }
 
@@ -2525,10 +2590,14 @@ async fn load_catalog_snapshot(
         task,
         include_variants,
     };
+    let revision = routing_operation(state.routing.clone(), |routing| routing.catalog_revision())
+        .await
+        .map_err(|_| ())?;
     let now = Instant::now();
     {
         let mut cache = state.catalog_snapshot_cache.lock().await;
         if let Some(cached) = cache.get(&cache_key)
+            && cached.revision == revision
             && cached.expires_at > now
         {
             return Ok(cached.snapshot.clone());
@@ -2607,6 +2676,7 @@ async fn load_catalog_snapshot(
         cache_key,
         CachedCatalogSnapshot {
             snapshot: snapshot.clone(),
+            revision,
             expires_at: Instant::now() + CATALOG_SNAPSHOT_CACHE_TTL,
         },
     );
@@ -2679,6 +2749,7 @@ struct ModelCandidate {
 type ApprovedMappingIndex = BTreeMap<(String, String), String>;
 type EntityReferenceIndex = BTreeMap<(String, String), String>;
 
+#[derive(Default)]
 struct IdentityMappingIndexes {
     approved: ApprovedMappingIndex,
     references: EntityReferenceIndex,
@@ -2742,6 +2813,12 @@ fn identity_mapping_indexes(routing: &RoutingStore) -> IdentityMappingIndexes {
     }
 }
 
+async fn identity_mapping_indexes_operation(routing: Arc<RoutingStore>) -> IdentityMappingIndexes {
+    routing_operation(routing, |routing| Ok(identity_mapping_indexes(&routing)))
+        .await
+        .unwrap_or_default()
+}
+
 fn canonical_match(
     provider: &ProviderConfig,
     provider_name: &str,
@@ -2797,8 +2874,7 @@ struct PaidCandidateContext<'a> {
     runtimes: &'a BTreeMap<String, ProviderRuntime>,
     cfg: &'a ServerConfig,
     provider_filter: Option<&'a str>,
-    routing: &'a RoutingStore,
-    pricing_max_age_seconds: u64,
+    prices: &'a BTreeMap<(String, String), EffectivePrice>,
     mappings: &'a IdentityMappingIndexes,
 }
 
@@ -2809,6 +2885,70 @@ struct FreeCandidateContext<'a> {
     provider_filter: Option<&'a str>,
     mappings: &'a IdentityMappingIndexes,
     account_limits: &'a BTreeMap<String, AccountLimitSnapshot>,
+}
+
+type EffectivePriceIndex = BTreeMap<(String, String), EffectivePrice>;
+
+async fn lookup_effective_price(
+    state: &AppState,
+    provider: String,
+    model: String,
+    profile_key: Option<String>,
+    canonical_model: Option<String>,
+) -> Option<EffectivePrice> {
+    let pricing_max_age_seconds = state.config.server.pricing_max_age_seconds;
+    routing_operation(state.routing.clone(), move |routing| {
+        routing.effective_price(
+            &provider,
+            profile_key.as_deref(),
+            &model,
+            canonical_model.as_deref(),
+            pricing_max_age_seconds,
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn load_effective_prices(
+    state: &AppState,
+    offerings: &[CatalogOffering],
+) -> EffectivePriceIndex {
+    let requests = offerings
+        .iter()
+        .filter_map(|offering| {
+            let provider = state.config.providers.get(&offering.provider)?;
+            Some((
+                offering.provider.clone(),
+                offering.model.clone(),
+                identity_provider_key(provider).map(ToOwned::to_owned),
+                provider.model_mappings.get(&offering.model).cloned(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let pricing_max_age_seconds = state.config.server.pricing_max_age_seconds;
+    routing_operation(state.routing.clone(), move |routing| {
+        let mut prices = BTreeMap::new();
+        for (provider, model, profile_key, canonical_model) in requests {
+            if let Some(price) = routing
+                .effective_price(
+                    &provider,
+                    profile_key.as_deref(),
+                    &model,
+                    canonical_model.as_deref(),
+                    pricing_max_age_seconds,
+                )
+                .ok()
+                .flatten()
+            {
+                prices.insert((provider, model), price);
+            }
+        }
+        Ok(prices)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[derive(Clone, Copy)]
@@ -3006,7 +3146,6 @@ fn collect_paid_candidates(
         if is_model_denied(&offering.model, &offering.provider, context.cfg) {
             continue;
         }
-        let pricing_mapping = provider.model_mappings.get(&offering.model);
         let canonical = canonical_match(
             provider,
             &offering.provider,
@@ -3014,20 +3153,9 @@ fn collect_paid_candidates(
             context.mappings,
         );
         let price = context
-            .routing
-            .effective_price(
-                &offering.provider,
-                provider.pricing_profile.as_deref().or_else(|| {
-                    provider
-                        .profile
-                        .and_then(|profile| profile.models_dev_key())
-                }),
-                &offering.model,
-                pricing_mapping.map(String::as_str),
-                context.pricing_max_age_seconds,
-            )
-            .ok()
-            .flatten();
+            .prices
+            .get(&(offering.provider.clone(), offering.model.clone()))
+            .cloned();
         let matching =
             find_exact_matching_benchmarks(benchmark_by_model, &canonical.benchmark_model);
         if matching.is_empty() {
@@ -3105,7 +3233,8 @@ async fn list_auto_models(
             .or_default()
             .push(benchmark.clone());
     }
-    let mappings = identity_mapping_indexes(&state.routing);
+    let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
+    let prices = load_effective_prices(&state, &paid_offerings).await;
 
     let free_candidates = collect_free_candidates(
         &free_offerings,
@@ -3127,8 +3256,7 @@ async fn list_auto_models(
             runtimes: &state.providers,
             cfg,
             provider_filter: None,
-            routing: &state.routing,
-            pricing_max_age_seconds: cfg.pricing_max_age_seconds,
+            prices: &prices,
             mappings: &mappings,
         },
     );
@@ -4518,11 +4646,11 @@ async fn resolve_targets(
             .await;
     }
     if let Some(config) = state.config.models.get(model) {
-        return Ok(config
-            .targets
-            .iter()
-            .map(|target| selected_target(state, target))
-            .collect());
+        let mut targets = Vec::with_capacity(config.targets.len());
+        for target in &config.targets {
+            targets.push(selected_target(state, target).await);
+        }
+        return Ok(targets);
     }
     if let Some((provider_name, upstream_model)) = model.split_once('/') {
         let provider = state.config.providers.get(provider_name);
@@ -4534,13 +4662,16 @@ async fn resolve_targets(
                 )
         });
         if is_allowed {
-            return Ok(vec![selected_target(
-                state,
-                &TargetConfig {
-                    provider: provider_name.to_owned(),
-                    model: upstream_model.to_owned(),
-                },
-            )]);
+            return Ok(vec![
+                selected_target(
+                    state,
+                    &TargetConfig {
+                        provider: provider_name.to_owned(),
+                        model: upstream_model.to_owned(),
+                    },
+                )
+                .await,
+            ]);
         }
     }
     Err((
@@ -4550,7 +4681,7 @@ async fn resolve_targets(
     ))
 }
 
-fn selected_target(state: &AppState, target: &TargetConfig) -> SelectedTarget {
+async fn selected_target(state: &AppState, target: &TargetConfig) -> SelectedTarget {
     let provider_display = state
         .config
         .providers
@@ -4558,30 +4689,19 @@ fn selected_target(state: &AppState, target: &TargetConfig) -> SelectedTarget {
         .and_then(|provider| provider.profile)
         .map(|profile| profile.definition().display_name.to_owned())
         .unwrap_or_else(|| target.provider.clone());
-    let price = state
-        .config
-        .providers
-        .get(&target.provider)
-        .and_then(|provider| {
-            state
-                .routing
-                .effective_price(
-                    &target.provider,
-                    provider.pricing_profile.as_deref().or_else(|| {
-                        provider
-                            .profile
-                            .and_then(|profile| profile.models_dev_key())
-                    }),
-                    &target.model,
-                    provider
-                        .model_mappings
-                        .get(&target.model)
-                        .map(String::as_str),
-                    state.config.server.pricing_max_age_seconds,
-                )
-                .ok()
-                .flatten()
-        });
+    let price = match state.config.providers.get(&target.provider) {
+        Some(provider) => {
+            lookup_effective_price(
+                state,
+                target.provider.clone(),
+                target.model.clone(),
+                identity_provider_key(provider).map(ToOwned::to_owned),
+                provider.model_mappings.get(&target.model).cloned(),
+            )
+            .await
+        }
+        None => None,
+    };
     SelectedTarget {
         runtime_provider: target.provider.clone(),
         provider: target.provider.clone(),
@@ -4641,7 +4761,7 @@ async fn resolve_auto_free_targets(
             .or_insert_with(Vec::new)
             .push(b.clone());
     }
-    let mappings = identity_mapping_indexes(&state.routing);
+    let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let classification = classify(request);
     let requirements = RequestRequirements::from_request(request);
     let candidates = offerings
@@ -4958,7 +5078,8 @@ async fn resolve_benchmark_targets(
             .or_default()
             .push(benchmark);
     }
-    let mappings = identity_mapping_indexes(&state.routing);
+    let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
+    let prices = load_effective_prices(state, &offerings).await;
     let mut candidates = Vec::new();
     for offering in offerings {
         let Some(provider) = state.config.providers.get(&offering.provider) else {
@@ -4979,7 +5100,6 @@ async fn resolve_benchmark_targets(
         {
             continue;
         }
-        let pricing_mapping = provider.model_mappings.get(&offering.model);
         let canonical = canonical_match(provider, &offering.provider, &offering.model, &mappings);
         let model_benchmarks = benchmarks_for_effort(
             find_exact_matching_benchmarks(&benchmark_by_model, &canonical.benchmark_model),
@@ -5007,21 +5127,9 @@ async fn resolve_benchmark_targets(
         if is_model_denied(&offering.model, &offering.provider, &state.config.server) {
             continue;
         }
-        let effective_price = state
-            .routing
-            .effective_price(
-                &offering.provider,
-                provider.pricing_profile.as_deref().or_else(|| {
-                    provider
-                        .profile
-                        .and_then(|profile| profile.models_dev_key())
-                }),
-                &offering.model,
-                pricing_mapping.map(String::as_str),
-                state.config.server.pricing_max_age_seconds,
-            )
-            .ok()
-            .flatten();
+        let effective_price = prices
+            .get(&(offering.provider.clone(), offering.model.clone()))
+            .cloned();
         for benchmark in model_benchmarks {
             let Some(raw_quality) = composite_quality(benchmark) else {
                 continue;
@@ -6411,31 +6519,50 @@ async fn auto_refresh_benchmarks(
     let refresh_interval = Duration::from_secs(refresh_interval_seconds.clamp(60, 86_400));
 
     loop {
-        let routing = match RoutingStore::open(state_path.as_deref()) {
-            Ok(r) => r,
-            Err(e) => {
+        let open_path = state_path.clone();
+        let routing = match tokio::task::spawn_blocking(move || {
+            RoutingStore::open(open_path.as_deref()).map(Arc::new)
+        })
+        .await
+        {
+            Ok(Ok(routing)) => routing,
+            Ok(Err(e)) => {
                 tracing::warn!("Benchmark auto-refresh: cannot open routing store: {e}");
+                tokio::time::sleep(Duration::from_secs(3_600)).await;
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!("Benchmark auto-refresh: routing open task failed: {e}");
                 tokio::time::sleep(Duration::from_secs(3_600)).await;
                 continue;
             }
         };
 
-        let needs_refresh = routing
-            .active_benchmark_snapshot(benchmark_max_age_seconds)
-            .ok()
-            .flatten()
-            .is_none();
+        let needs_refresh = routing_operation(routing.clone(), move |routing| {
+            Ok(routing
+                .active_benchmark_snapshot(benchmark_max_age_seconds)
+                .ok()
+                .flatten()
+                .is_none())
+        })
+        .await
+        .unwrap_or(false);
 
         if needs_refresh && let Some(ref key) = aa_api_key {
-            match fetch_aa_benchmarks(&routing, key).await {
+            match fetch_aa_benchmarks(routing.clone(), key).await {
                 Ok(count) => {
                     tracing::info!("Auto-refreshed {count} benchmark models");
                 }
                 Err(e) => {
-                    let state = routing
-                        .active_benchmark_snapshot(benchmark_max_age_seconds)
-                        .ok()
-                        .flatten();
+                    let state = routing_operation(routing.clone(), move |routing| {
+                        Ok(routing
+                            .active_benchmark_snapshot(benchmark_max_age_seconds)
+                            .ok()
+                            .flatten())
+                    })
+                    .await
+                    .ok()
+                    .flatten();
                     tracing::warn!(
                         has_last_known_good = state.is_some(),
                         "Benchmark auto-refresh failed (will retry): {e}"
@@ -6448,7 +6575,7 @@ async fn auto_refresh_benchmarks(
     }
 }
 
-async fn fetch_aa_benchmarks(routing: &RoutingStore, api_key: &str) -> Result<usize, String> {
+async fn fetch_aa_benchmarks(routing: Arc<RoutingStore>, api_key: &str) -> Result<usize, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
@@ -6493,9 +6620,13 @@ async fn fetch_aa_benchmarks(routing: &RoutingStore, api_key: &str) -> Result<us
     .normalize()?;
 
     let count = import.models.len();
-    routing
-        .replace_benchmarks(&import.source, &import.attribution, &import.models)
-        .map_err(|e| e.to_string())?;
+    routing_operation(routing, move |routing| {
+        routing
+            .replace_benchmarks(&import.source, &import.attribution, &import.models)
+            .map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(count)
 }
 
@@ -6570,17 +6701,18 @@ async fn refresh_provider_catalog(state: &AppState, name: &str) -> Result<usize,
             output_price_per_million: model.output_price_per_million,
         })
         .collect::<Vec<_>>();
-    state
-        .routing
-        .replace_catalog(name, &records)
-        .map_err(|error| error.to_string())?;
-    if let Some(account_limit) = account_limit {
-        state
-            .routing
-            .record_account_limit(name, &account_limit)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(records.len())
+    let count = records.len();
+    let provider = name.to_owned();
+    routing_operation(state.routing.clone(), move |routing| {
+        routing.replace_catalog(&provider, &records)?;
+        if let Some(account_limit) = account_limit {
+            routing.record_account_limit(&provider, &account_limit)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(count)
 }
 
 /// Periodically re-ingests models.dev pricing. models.dev revises a
@@ -6591,19 +6723,25 @@ async fn auto_refresh_pricing(state: Arc<AppState>, refresh_interval_seconds: u6
     let interval = Duration::from_secs(refresh_interval_seconds.clamp(60, 86_400));
     loop {
         match tokio::task::spawn_blocking(fetch_models_dev).await {
-            Ok(Ok(observations)) => match state.routing.replace_pricing(
-                "models.dev",
-                PriceSourceKind::ModelsDev,
-                "Models.dev (https://models.dev/)",
-                &observations,
-            ) {
-                Ok(snapshot) => {
-                    tracing::info!("Auto-refreshed models.dev pricing snapshot {snapshot}");
+            Ok(Ok(observations)) => {
+                let result = routing_operation(state.routing.clone(), move |routing| {
+                    routing.replace_pricing(
+                        "models.dev",
+                        PriceSourceKind::ModelsDev,
+                        "Models.dev (https://models.dev/)",
+                        &observations,
+                    )
+                })
+                .await;
+                match result {
+                    Ok(snapshot) => {
+                        tracing::info!("Auto-refreshed models.dev pricing snapshot {snapshot}");
+                    }
+                    Err(error) => {
+                        tracing::warn!("Pricing auto-refresh store failed: {error}");
+                    }
                 }
-                Err(error) => {
-                    tracing::warn!("Pricing auto-refresh store failed: {error}");
-                }
-            },
+            }
             Ok(Err(error)) => {
                 tracing::warn!("Pricing auto-refresh fetch failed: {error}");
             }
