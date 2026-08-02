@@ -43,8 +43,13 @@
       "section": "Maintenance"
     }
   ],
-  "release-type": "rust",
-  "extra-files": [
-    "docs/openapi.json"
-  ]
+  "include-component-in-tag": false,
+  "packages": {
+    ".": {
+      "release-type": "rust",
+      "extra-files": [
+        "docs/openapi.json"
+      ]
+    }
+  }
 }
