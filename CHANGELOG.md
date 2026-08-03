@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.4](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.3...v0.14.4) (2026-08-03)
+
+
+### Maintenance
+
+* **ci:** align Code Foundry release policy ([#142](https://github.com/0xPlayerOne/model-gateway/issues/142)) ([b74ae0e](https://github.com/0xPlayerOne/model-gateway/commit/b74ae0e8fe1ded4f01e49cb14aa5cb25e02c90b0))
+
 ## [0.14.3](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.2...v0.14.3) (2026-08-03)
 
 
