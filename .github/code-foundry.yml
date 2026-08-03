@@ -4,7 +4,7 @@ languages: rust
 features: all
 package_manager: none
 runtime_repository: 0xPlayerOne/code-foundry
-runtime_ref: v0.34.4
+runtime_ref: v0.34.13
 runner: ubuntu-latest
 unit_runner: ubuntu-latest
 ci_runner: ubuntu-latest
@@ -38,4 +38,4 @@ custom_workflows: preserve
 codeql_rust_shards: '["all"]'
 codeql_rust_threads: 1
 codeql_rust_max_parallel: 1
-release_merge_strategy: squash
+release_merge_strategy: rebase

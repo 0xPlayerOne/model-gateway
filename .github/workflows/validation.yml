@@ -37,7 +37,7 @@ jobs:
         with:
           persist-credentials: false
           repository: 0xPlayerOne/code-foundry
-          ref: v0.34.4
+          ref: v0.34.13
           path: .github/.code-foundry
           sparse-checkout: |
             src/lib
@@ -64,11 +64,11 @@ jobs:
       contents: read
       packages: read
       security-events: write
-    uses: 0xPlayerOne/code-foundry/.github/workflows/validation.yml@v0.34.4
+    uses: 0xPlayerOne/code-foundry/.github/workflows/validation.yml@v0.34.13
     with:
       mode: ${{ needs.mode.outputs.mode }}
       runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: v0.34.4
+      runtime-ref: v0.34.13
       ci-runner: ubuntu-latest
       test-runner: ubuntu-latest
       unit-runner: ubuntu-latest
