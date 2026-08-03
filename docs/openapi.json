@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Model Gateway Catalog API",
-    "version": "0.14.2",
+    "version": "0.14.3",
     "description": "Discovery and metadata resources for models available through Model Gateway."
   },
   "paths": {
@@ -834,7 +834,7 @@
               "integer",
               "null"
             ],
-            "maximum": 9223372036854775807,
+            "maximum": 9223372036854776000,
             "description": "Measured average output size for the benchmark task."
           },
           "pricing_eligible": {
@@ -983,7 +983,7 @@
               "integer",
               "null"
             ],
-            "maximum": 9223372036854775807,
+            "maximum": 9223372036854776000,
             "description": "Measured average output size for the benchmark task."
           },
           "reasoning_effort": {
@@ -1220,7 +1220,7 @@
               "integer",
               "null"
             ],
-            "maximum": 9223372036854775807,
+            "maximum": 9223372036854776000,
             "description": "Measured average output size for the benchmark task."
           }
         }

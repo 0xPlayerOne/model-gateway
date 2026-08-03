@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.3](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.2...v0.14.3) (2026-08-03)
+
+
+### Maintenance
+
+* **staging:** align branch with main ([2670ace](https://github.com/0xPlayerOne/model-gateway/commit/2670aced0e21186c9b864c7339dbd1839f2d8ed2))
+
 ## [0.14.2](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.1...v0.14.2) (2026-08-02)
 
 
