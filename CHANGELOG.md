@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.14.5](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.4...v0.14.5) (2026-08-07)
+
+
+### Bug Fixes
+
+* drop staging trigger from opencode-security ([f4bd60b](https://github.com/0xPlayerOne/model-gateway/commit/f4bd60bd07bc80f227201d5073929dd98680b617))
+
+
+### Maintenance
+
+* **code-foundry:** flip to direct main workflow, pin runtime v0.36.0 ([ee41082](https://github.com/0xPlayerOne/model-gateway/commit/ee41082b986ab69aad139d84a0f74f5d73f09b3e))
+
 ## [0.14.4](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.3...v0.14.4) (2026-08-03)
 
 
