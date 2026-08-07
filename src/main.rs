@@ -1552,7 +1552,7 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        apply_pending_secrets, rollback_secrets, Cli, config_diff, parse_manual_price_imports,
+        Cli, apply_pending_secrets, config_diff, parse_manual_price_imports, rollback_secrets,
     };
 
     #[test]
@@ -1675,19 +1675,19 @@ mod tests {
         unsafe { std::env::set_var("MODEL_GATEWAY_SECRET_DIR", dir.path()) };
         let resolver = SecretResolver::default();
 
-        resolver
-            .set_preferred("KEY1", "value1")
-            .expect("set key1");
-        resolver
-            .set_preferred("KEY2", "value2")
-            .expect("set key2");
+        resolver.set_preferred("KEY1", "value1").expect("set key1");
+        resolver.set_preferred("KEY2", "value2").expect("set key2");
 
         let mut previous = BTreeMap::new();
         previous.insert("KEY1".to_owned(), Some("restored-value".to_owned()));
         previous.insert("KEY2".to_owned(), None);
 
-        rollback_secrets(&resolver, &previous, &["KEY1".to_owned(), "KEY2".to_owned()])
-            .expect("rollback");
+        rollback_secrets(
+            &resolver,
+            &previous,
+            &["KEY1".to_owned(), "KEY2".to_owned()],
+        )
+        .expect("rollback");
 
         assert_eq!(
             resolver.get("KEY1").expect("get key1"),
