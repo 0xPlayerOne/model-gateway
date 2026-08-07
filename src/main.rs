@@ -1621,8 +1621,7 @@ mod tests {
     #[test]
     fn apply_pending_secrets_persists_new_secrets_and_saves_config() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let resolver =
-            SecretResolver::from_mode(Some("file"), Some(dir.path().to_path_buf()));
+        let resolver = SecretResolver::from_mode(Some("file"), Some(dir.path().to_path_buf()));
         let config_path = dir.path().join("config.toml");
         let mut config = Config::default();
         config.server.local_model_cache_seconds = 60;
@@ -1644,8 +1643,7 @@ mod tests {
     #[test]
     fn apply_pending_secrets_rolls_back_on_validation_failure() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let resolver =
-            SecretResolver::from_mode(Some("file"), Some(dir.path().to_path_buf()));
+        let resolver = SecretResolver::from_mode(Some("file"), Some(dir.path().to_path_buf()));
         let config_path = dir.path().join("config.toml");
 
         resolver
@@ -1670,15 +1668,10 @@ mod tests {
     #[test]
     fn rollback_secrets_restores_previous_values_and_removes_missing() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let resolver =
-            SecretResolver::from_mode(Some("file"), Some(dir.path().to_path_buf()));
+        let resolver = SecretResolver::from_mode(Some("file"), Some(dir.path().to_path_buf()));
 
-        resolver
-            .set_preferred("KEY1", "value1")
-            .expect("set key1");
-        resolver
-            .set_preferred("KEY2", "value2")
-            .expect("set key2");
+        resolver.set_preferred("KEY1", "value1").expect("set key1");
+        resolver.set_preferred("KEY2", "value2").expect("set key2");
 
         let mut previous = BTreeMap::new();
         previous.insert("KEY1".to_owned(), Some("restored-value".to_owned()));
