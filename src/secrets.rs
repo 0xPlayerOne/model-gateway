@@ -231,7 +231,7 @@ impl SecretResolver {
     /// launchd, cron, containers) never prompts or blocks on the OS keychain;
     /// `keychain` remains an explicit opt-in for intentional interactive use.
     /// Modes are exclusive: `environment` never mounts `MODEL_GATEWAY_SECRET_DIR`.
-    fn from_mode(mode: Option<&str>, secret_dir: Option<PathBuf>) -> Self {
+    pub fn from_mode(mode: Option<&str>, secret_dir: Option<PathBuf>) -> Self {
         let configured_file_root = secret_dir.unwrap_or_else(default_file_store_root);
         let (files, keychain, initialization_error, mode) = match mode {
             None | Some("file") => (

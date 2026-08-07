@@ -1544,11 +1544,16 @@ fn credentials(command: CredentialCommand) -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use model_gateway::config::{Config, ModelConfig, TargetConfig};
+    use model_gateway::secrets::SecretResolver;
 
     use clap::Parser;
 
-    use super::{Cli, config_diff, parse_manual_price_imports};
+    use super::{
+        apply_pending_secrets, rollback_secrets, Cli, config_diff, parse_manual_price_imports,
+    };
 
     #[test]
     fn config_diff_contains_no_secret_values() {
@@ -1611,5 +1616,85 @@ mod tests {
             Cli::try_parse_from(["model-gateway", "matching", "reconcile", "--json", "--nope"])
                 .expect_err("unknown flags should fail parsing");
         assert!(error.to_string().contains("unexpected argument '--nope'"));
+    }
+
+    #[test]
+    fn apply_pending_secrets_persists_new_secrets_and_saves_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resolver =
+            SecretResolver::from_mode(Some("file"), Some(dir.path().to_path_buf()));
+        let config_path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        config.server.local_model_cache_seconds = 60;
+        config.save_atomic(&config_path).expect("save config");
+
+        let mut pending = BTreeMap::new();
+        pending.insert("NEW_KEY".to_owned(), "new-value".to_owned());
+
+        apply_pending_secrets(&resolver, &config_path, &config, pending)
+            .expect("apply pending secrets");
+
+        assert_eq!(
+            resolver.get("NEW_KEY").expect("get new key"),
+            Some("new-value".to_owned())
+        );
+        assert!(config_path.exists(), "config should be saved");
+    }
+
+    #[test]
+    fn apply_pending_secrets_rolls_back_on_validation_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resolver =
+            SecretResolver::from_mode(Some("file"), Some(dir.path().to_path_buf()));
+        let config_path = dir.path().join("config.toml");
+
+        resolver
+            .set_preferred("EXISTING_KEY", "original-value")
+            .expect("set initial secret");
+
+        let mut config = Config::default();
+        config.server.local_model_cache_seconds = 0; // invalid
+
+        let mut pending = BTreeMap::new();
+        pending.insert("EXISTING_KEY".to_owned(), "changed-value".to_owned());
+
+        let result = apply_pending_secrets(&resolver, &config_path, &config, pending);
+        assert!(result.is_err());
+
+        assert_eq!(
+            resolver.get("EXISTING_KEY").expect("get after rollback"),
+            Some("original-value".to_owned())
+        );
+    }
+
+    #[test]
+    fn rollback_secrets_restores_previous_values_and_removes_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resolver =
+            SecretResolver::from_mode(Some("file"), Some(dir.path().to_path_buf()));
+
+        resolver
+            .set_preferred("KEY1", "value1")
+            .expect("set key1");
+        resolver
+            .set_preferred("KEY2", "value2")
+            .expect("set key2");
+
+        let mut previous = BTreeMap::new();
+        previous.insert("KEY1".to_owned(), Some("restored-value".to_owned()));
+        previous.insert("KEY2".to_owned(), None);
+
+        rollback_secrets(
+            &resolver,
+            &previous,
+            &["KEY1".to_owned(), "KEY2".to_owned()],
+        )
+        .expect("rollback");
+
+        assert_eq!(
+            resolver.get("KEY1").expect("get key1"),
+            Some("restored-value".to_owned())
+        );
+        assert_eq!(resolver.get("KEY2").expect("get key2"), None);
     }
 }
