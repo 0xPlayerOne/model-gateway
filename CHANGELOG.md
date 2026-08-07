@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.8](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.7...v0.14.8) (2026-08-07)
+
+
+### Maintenance
+
+* **code-foundry:** pin runtime v0.36.1 ([65811ea](https://github.com/0xPlayerOne/model-gateway/commit/65811eae1a753030371a00ce2681a3c34253e248))
+
 ## [0.14.7](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.6...v0.14.7) (2026-08-07)
 
 
