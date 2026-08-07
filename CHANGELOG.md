@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.7](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.6...v0.14.7) (2026-08-07)
+
+
+### Maintenance
+
+* **code-foundry:** remove restored staging release-pr caller (direct topology targets main) ([0839a73](https://github.com/0xPlayerOne/model-gateway/commit/0839a7353d160e5d04cab6b91a31d31ace8bbdd6))
+
 ## [0.14.6](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.5...v0.14.6) (2026-08-07)
 
 
