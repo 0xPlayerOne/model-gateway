@@ -4,7 +4,7 @@ languages: rust
 features: all
 package_manager: none
 runtime_repository: 0xPlayerOne/code-foundry
-runtime_ref: v0.34.13
+runtime_ref: v0.36.0
 runner: ubuntu-latest
 unit_runner: ubuntu-latest
 ci_runner: ubuntu-latest
@@ -21,7 +21,7 @@ turbo_remote: auto
 release_type: rust
 npm_publish: false
 license: agpl-3.0-or-later
-git_workflow: staging-release
+git_workflow: direct
 merge_strategy: rebase
 codeql: auto
 dependency_review: auto
