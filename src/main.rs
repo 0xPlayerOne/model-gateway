@@ -1552,7 +1552,7 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        apply_pending_secrets, rollback_secrets, Cli, config_diff, parse_manual_price_imports,
+        Cli, apply_pending_secrets, config_diff, parse_manual_price_imports, rollback_secrets,
     };
 
     #[test]
