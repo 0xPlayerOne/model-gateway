@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.14.6](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.5...v0.14.6) (2026-08-07)
+
+
+### Bug Fixes
+
+* apply rustfmt formatting to src/main.rs ([f30f2fa](https://github.com/0xPlayerOne/model-gateway/commit/f30f2fa28c9f68a31140262fa2c875360d36d730))
+* **ci:** apply rustfmt to test code after race-condition fix ([dde3532](https://github.com/0xPlayerOne/model-gateway/commit/dde35323fcff3cbdeb9efce26940a1ae2739944e))
+* **ci:** restore release-pr.yml workflow for staging promotion ([2ce4689](https://github.com/0xPlayerOne/model-gateway/commit/2ce46898bf844a4b6d8c637985a086583285333c))
+* **ci:** trigger validation workflow on staging PRs ([fb392d4](https://github.com/0xPlayerOne/model-gateway/commit/fb392d4d70fef95641a2c0827e01a727709f8da6))
+* **test:** eliminate race condition in secret apply/rollback tests ([3763148](https://github.com/0xPlayerOne/model-gateway/commit/376314858b93efdc9577f0c504043ff56f9bca5d))
+
+
+### Tests
+
+* **main:** cover secret apply/rollback paths in CLI ([d66a369](https://github.com/0xPlayerOne/model-gateway/commit/d66a36913bcb06cb6c68a16dd267abf84f2ecdf5))
+
+
+### Maintenance
+
+* **deps:** weekly update ([361a866](https://github.com/0xPlayerOne/model-gateway/commit/361a866a394ba17557b5f09e8a551bc51b83bb0e))
+
 ## [0.14.5](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.4...v0.14.5) (2026-08-07)
 
 
