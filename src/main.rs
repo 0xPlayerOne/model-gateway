@@ -37,6 +37,23 @@ use model_gateway::routing::{
 use model_gateway::secrets::SecretResolver;
 use serde_json::Value;
 
+struct CliContext {
+    resolver: SecretResolver,
+    config: Config,
+    store: RoutingStore,
+}
+
+fn load_cli_context() -> Result<CliContext, Box<dyn Error>> {
+    let resolver = SecretResolver::default();
+    let config = Config::load(Config::default_path(), &resolver)?;
+    let store = RoutingStore::open(config.server.state_path.as_deref())?;
+    Ok(CliContext {
+        resolver,
+        config,
+        store,
+    })
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "model-gateway",
@@ -404,12 +421,11 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
     const ATTRIBUTION: &str = "Artificial Analysis (https://artificialanalysis.ai/)";
     const ENDPOINT: &str = "https://artificialanalysis.ai/api/v2/language/models/free";
 
-    let resolver = SecretResolver::default();
-    let config = Config::load(Config::default_path(), &resolver)?;
-    let store = RoutingStore::open(config.server.state_path.as_deref())?;
+    let ctx = load_cli_context()?;
     match command {
         BenchmarkCommand::Refresh => {
-            let api_key = resolver
+            let api_key = ctx
+                .resolver
                 .get("ARTIFICIAL_ANALYSIS_API_KEY")?
                 .ok_or("ARTIFICIAL_ANALYSIS_API_KEY is unavailable")?;
             let client = reqwest::blocking::Client::builder()
@@ -443,8 +459,11 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
                 models: all_models,
             }
             .normalize()?;
-            let snapshot =
-                store.replace_benchmarks(&import.source, &import.attribution, &import.models)?;
+            let snapshot = ctx.store.replace_benchmarks(
+                &import.source,
+                &import.attribution,
+                &import.models,
+            )?;
             println!(
                 "Refreshed {}: {} models, snapshot={snapshot}",
                 import.source,
@@ -455,8 +474,11 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
         BenchmarkCommand::Import { file } => {
             let import: BenchmarkImport = serde_json::from_slice(&std::fs::read(file)?)?;
             let import = import.normalize()?;
-            let snapshot =
-                store.replace_benchmarks(&import.source, &import.attribution, &import.models)?;
+            let snapshot = ctx.store.replace_benchmarks(
+                &import.source,
+                &import.attribution,
+                &import.models,
+            )?;
             println!(
                 "Imported {}: {} models, snapshot={snapshot}",
                 import.source,
@@ -465,7 +487,7 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
             println!("Attribution: {}", import.attribution);
         }
         BenchmarkCommand::Status => {
-            let status = store.benchmark_status()?;
+            let status = ctx.store.benchmark_status()?;
             if status.is_empty() {
                 println!("No active benchmark snapshots");
             }
@@ -477,7 +499,7 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
             }
         }
         BenchmarkCommand::Delete { source } => {
-            store.remove_benchmark_source(&source)?;
+            ctx.store.remove_benchmark_source(&source)?;
             println!("Deleted benchmark snapshot '{source}'");
         }
     }
@@ -485,13 +507,11 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
 }
 
 fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
-    let resolver = SecretResolver::default();
-    let config = Config::load(Config::default_path(), &resolver)?;
-    let store = RoutingStore::open(config.server.state_path.as_deref())?;
+    let ctx = load_cli_context()?;
     match command {
         PricingCommand::Refresh => {
             let observations = fetch_models_dev()?;
-            let snapshot = store.replace_pricing(
+            let snapshot = ctx.store.replace_pricing(
                 "models.dev",
                 PriceSourceKind::ModelsDev,
                 "Models.dev (https://models.dev/)",
@@ -512,7 +532,7 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
             let fetched_at = i64::try_from(fetched_at)?;
             let contents = std::fs::read_to_string(&file)?;
             let observations = parse_manual_price_imports(&contents, &file, fetched_at)?;
-            let snapshot = store.replace_pricing(
+            let snapshot = ctx.store.replace_pricing(
                 "manual-overrides",
                 PriceSourceKind::Manual,
                 "Explicit provider-scoped pricing overrides",
@@ -524,7 +544,7 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
             );
         }
         PricingCommand::Status => {
-            let status = store.pricing_status()?;
+            let status = ctx.store.pricing_status()?;
             if status.is_empty() {
                 println!("No active pricing snapshots");
             }
@@ -535,13 +555,12 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
             }
         }
         PricingCommand::Coverage { provider, json } => {
-            if provider
-                .as_ref()
-                .is_some_and(|name| !config.providers.contains_key(name))
+            if let Some(name) = provider.as_ref()
+                && !ctx.config.providers.contains_key(name)
             {
-                return Err(format!("unknown provider '{}'", provider.unwrap()).into());
+                return Err(format!("unknown provider '{name}'").into());
             }
-            let report = report_pricing_coverage(&config, &store, provider.as_deref())?;
+            let report = report_pricing_coverage(&ctx.config, &ctx.store, provider.as_deref())?;
             let mut summary = BTreeMap::<&str, usize>::new();
             for entry in &report {
                 *summary.entry(entry.status.as_str()).or_default() += 1;
@@ -572,7 +591,8 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
             }
         }
         PricingCommand::Explain { provider, model } => {
-            let provider_config = config
+            let provider_config = ctx
+                .config
                 .providers
                 .get(&provider)
                 .ok_or_else(|| format!("unknown provider '{provider}'"))?;
@@ -585,12 +605,12 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
                 .model_mappings
                 .get(&model)
                 .map(String::as_str);
-            let price = store.effective_price(
+            let price = ctx.store.effective_price(
                 &provider,
                 profile_key,
                 &model,
                 canonical,
-                config.server.pricing_max_age_seconds,
+                ctx.config.server.pricing_max_age_seconds,
             )?;
             println!(
                 "{}",
@@ -638,13 +658,11 @@ fn parse_manual_price_imports(
 }
 
 fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
-    let resolver = SecretResolver::default();
-    let config = Config::load(Config::default_path(), &resolver)?;
-    let store = RoutingStore::open(config.server.state_path.as_deref())?;
+    let ctx = load_cli_context()?;
     match command {
         MatchingCommand::Refresh => {
             for import in fetch_identity_sources()? {
-                let snapshot = store.replace_identity_source(&import)?;
+                let snapshot = ctx.store.replace_identity_source(&import)?;
                 println!(
                     "Refreshed {}: {} entities, {} aliases, snapshot={snapshot}",
                     import.source,
@@ -654,7 +672,7 @@ fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
             }
         }
         MatchingCommand::Status => {
-            let status = store.identity_status()?;
+            let status = ctx.store.identity_status()?;
             if status.is_empty() {
                 println!("No active identity snapshots");
             }
@@ -669,13 +687,12 @@ fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
             json,
             check,
         } => {
-            if provider
-                .as_ref()
-                .is_some_and(|name| !config.providers.contains_key(name))
+            if let Some(name) = provider.as_ref()
+                && !ctx.config.providers.contains_key(name)
             {
-                return Err(format!("unknown provider '{}'", provider.unwrap()).into());
+                return Err(format!("unknown provider '{name}'").into());
             }
-            let report = reconcile_model_matches(&config, &store, provider.as_deref())?;
+            let report = reconcile_model_matches(&ctx.config, &ctx.store, provider.as_deref())?;
             let drift = report.iter().any(|entry| {
                 entry.status == ModelMatchKind::Ambiguous
                     || (entry.status == ModelMatchKind::Unmatched
@@ -723,7 +740,8 @@ fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
             catalog_model,
             benchmark_model,
         } => {
-            let provider_config = config
+            let provider_config = ctx
+                .config
                 .providers
                 .get(&provider)
                 .ok_or_else(|| format!("unknown provider '{provider}'"))?;
@@ -733,8 +751,9 @@ fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
                 )
                 .into());
             }
-            let offering_exists = store
-                .all_candidates(config.server.catalog_max_age_seconds)?
+            let offering_exists = ctx
+                .store
+                .all_candidates(ctx.config.server.catalog_max_age_seconds)?
                 .into_iter()
                 .any(|offering| offering.provider == provider && offering.model == catalog_model);
             if !offering_exists {
@@ -743,37 +762,41 @@ fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
                 )
                 .into());
             }
-            let benchmark_model = store
-                .benchmark_models(config.server.benchmark_max_age_seconds)?
+            let benchmark_model = ctx
+                .store
+                .benchmark_models(ctx.config.server.benchmark_max_age_seconds)?
                 .into_iter()
                 .find(|benchmark| is_exact_model_identity(&benchmark.id, &benchmark_model))
                 .map(|benchmark| benchmark.id)
                 .ok_or_else(|| {
                     format!("active benchmark model '{benchmark_model}' does not exist")
                 })?;
-            store.approve_model_mapping(&provider, &catalog_model, &benchmark_model)?;
+            ctx.store
+                .approve_model_mapping(&provider, &catalog_model, &benchmark_model)?;
             println!("Approved {provider}/{catalog_model} -> {benchmark_model}");
         }
         MatchingCommand::ApproveEntity {
             entity_id,
             benchmark_model,
         } => {
-            let entity_exists = store
+            let entity_exists = ctx
+                .store
                 .active_identity_aliases()?
                 .into_iter()
                 .any(|alias| alias.entity_id == entity_id);
             if !entity_exists {
                 return Err(format!("active identity entity '{entity_id}' does not exist").into());
             }
-            let benchmark_model = store
-                .benchmark_models(config.server.benchmark_max_age_seconds)?
+            let benchmark_model = ctx
+                .store
+                .benchmark_models(ctx.config.server.benchmark_max_age_seconds)?
                 .into_iter()
                 .find(|benchmark| is_exact_model_identity(&benchmark.id, &benchmark_model))
                 .map(|benchmark| benchmark.id)
                 .ok_or_else(|| {
                     format!("active benchmark model '{benchmark_model}' does not exist")
                 })?;
-            store.approve_benchmark_identity_link(
+            ctx.store.approve_benchmark_identity_link(
                 &entity_id,
                 &benchmark_model,
                 "operator-approved canonical entity",
@@ -785,7 +808,7 @@ fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
             provider_model_id,
             entity_id,
         } => {
-            let aliases = store.active_identity_aliases()?;
+            let aliases = ctx.store.active_identity_aliases()?;
             let source_alias = aliases
                 .iter()
                 .find(|alias| {
@@ -801,7 +824,7 @@ fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
             if !aliases.iter().any(|alias| alias.entity_id == entity_id) {
                 return Err(format!("active identity entity '{entity_id}' does not exist").into());
             }
-            store.approve_entity_alias(
+            ctx.store.approve_entity_alias(
                 &provider_key,
                 &source_alias.provider_model_id,
                 &entity_id,
@@ -816,7 +839,7 @@ fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
             provider,
             catalog_model,
         } => {
-            if store.remove_model_mapping(&provider, &catalog_model)? {
+            if ctx.store.remove_model_mapping(&provider, &catalog_model)? {
                 println!("Removed approved mapping for {provider}/{catalog_model}");
             } else {
                 println!("No approved mapping for {provider}/{catalog_model}");
@@ -826,7 +849,10 @@ fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
             entity_id,
             benchmark_model,
         } => {
-            if store.remove_benchmark_identity_link(&entity_id, &benchmark_model)? {
+            if ctx
+                .store
+                .remove_benchmark_identity_link(&entity_id, &benchmark_model)?
+            {
                 println!("Removed entity mapping {entity_id} -> {benchmark_model}");
             } else {
                 println!("No entity mapping {entity_id} -> {benchmark_model}");
@@ -836,7 +862,10 @@ fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
             provider_key,
             provider_model_id,
         } => {
-            if store.remove_entity_alias(&provider_key, &provider_model_id)? {
+            if ctx
+                .store
+                .remove_entity_alias(&provider_key, &provider_model_id)?
+            {
                 println!("Unlinked {provider_key}/{provider_model_id}");
             } else {
                 println!("No approved alias {provider_key}/{provider_model_id}");
@@ -846,7 +875,7 @@ fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
             provider,
             catalog_model,
         } => {
-            let report = reconcile_model_matches(&config, &store, Some(&provider))?;
+            let report = reconcile_model_matches(&ctx.config, &ctx.store, Some(&provider))?;
             let entry = report
                 .into_iter()
                 .find(|entry| entry.catalog_model == catalog_model)
@@ -892,14 +921,12 @@ fn refresh_all() -> Result<(), Box<dyn Error>> {
 }
 
 fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
-    let resolver = SecretResolver::default();
-    let config = Config::load(Config::default_path(), &resolver)?;
-    let store = RoutingStore::open(config.server.state_path.as_deref())?;
+    let ctx = load_cli_context()?;
     match command {
         CatalogCommand::Refresh { provider } => {
             let mut refreshed = 0usize;
             let mut failures = Vec::new();
-            for (name, provider_config) in &config.providers {
+            for (name, provider_config) in &ctx.config.providers {
                 if provider.as_deref().is_some_and(|selected| selected != name) {
                     continue;
                 }
@@ -910,7 +937,7 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
                     continue;
                 }
                 let api_key = match provider_config.api_key_secret.as_deref() {
-                    Some(secret) => match resolver.get(secret)? {
+                    Some(secret) => match ctx.resolver.get(secret)? {
                         Some(api_key) => Some(api_key),
                         None => {
                             println!("Skipped {name}: credential is unavailable");
@@ -944,9 +971,9 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
                         }
                     })
                     .collect::<Vec<_>>();
-                store.replace_catalog(name, &models)?;
+                ctx.store.replace_catalog(name, &models)?;
                 if let Some(account) = fetch_account_limit(provider_config, api_key.as_deref())? {
-                    store.record_account_limit(name, &account)?;
+                    ctx.store.record_account_limit(name, &account)?;
                     println!(
                         "{name}: account limit remaining={:?}, usage={:?}",
                         account.remaining, account.usage
@@ -968,14 +995,14 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
             }
         }
         CatalogCommand::Status => {
-            let summary = store.catalog_summary()?;
+            let summary = ctx.store.catalog_summary()?;
             if summary.is_empty() {
                 println!("No cached provider catalogs");
             }
             for (provider, models, refreshed_at) in summary {
                 println!("{provider}: {models} models, refreshed_at={refreshed_at}");
             }
-            for (name, provider) in &config.providers {
+            for (name, provider) in &ctx.config.providers {
                 if let Some(reference) = provider.profile.and_then(provider_limit_reference) {
                     println!(
                         "{name}: quota_status={}, source={}",
@@ -984,7 +1011,7 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
                 }
             }
             for (provider, fetched_at, limit, usage, remaining, free_tier) in
-                store.account_limit_status()?
+                ctx.store.account_limit_status()?
             {
                 println!(
                     "{provider}: account_limit fetched_at={fetched_at}, limit={limit:?}, usage={usage:?}, remaining={remaining:?}, free_tier={free_tier:?}"
