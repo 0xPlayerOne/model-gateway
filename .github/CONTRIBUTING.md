@@ -41,10 +41,10 @@ docs/*  test/*  refactor/*         │
                                    └── protected release branch
 ```
 
-| Branch                                                         | Purpose                  | Contribution rule                                                         |
-| -------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------- |
-| `main`                                                         | Protected release branch | Merge through pull requests only. No direct pushes.                        |
-| `feat/*`, `fix/*`, `chore/*`, `refactor/*`, `docs/*`, `test/*` | Focused work             | Branch from `main`; keep changes small and reviewable.                   |
+| Branch                                                         | Purpose                  | Contribution rule                                      |
+| -------------------------------------------------------------- | ------------------------ | ------------------------------------------------------ |
+| `main`                                                         | Protected release branch | Merge through pull requests only. No direct pushes.    |
+| `feat/*`, `fix/*`, `chore/*`, `refactor/*`, `docs/*`, `test/*` | Focused work             | Branch from `main`; keep changes small and reviewable. |
 
 The Git workflow is `direct`: topic branches **squash** directly into `main`, and the Release Please version PR **rebases** into `main` (`release_merge_strategy: rebase`). Release automation never defaults to a merge method and never merges with `--admin`; `code-foundry doctor` and `code-foundry sync` fail closed on any other release merge strategy. Feature branches never touch `staging`; repositories with a preview/staging environment opt into `git_workflow: staging-release` explicitly.
 
@@ -152,13 +152,12 @@ Keep pull requests focused and reviewable. Include screenshots or recordings for
 ## Workflow and check behavior
 
 | Event | Expected automation |
-| --- | --- |
+|------------------------------------------------------------------------------------------------------------------------------------------------|
 | Pull request targeting `main` | Audit validation: CI, full tests, Security, and CodeQL, ending in `Validation / Gate` |
 | Exact Release Please pull request targeting `main` | Release-policy validation only, ending in `Validation / Gate` |
 | Scheduled or manual validation | Full audit tier |
 | Push to a working branch | Draft PR workflow |
 | Push to `main` | Release workflow; canonical validation already ran on the merged PR |
-
 The single validation caller keys concurrency by event and pull-request head. A newer update to the same pull request cancels its superseded validation run; scheduled and manual audits remain independent. The mode-aware orchestrator fans out only the jobs required by that event and always concludes with the stable aggregate gate.
 
 Required checks are enforced by branch protection rulesets/branch protection. Do not duplicate their checklists in the pull request description; document validation commands and results instead.
@@ -172,10 +171,9 @@ Security checks can be skipped when repository visibility or the GitHub plan doe
 ## Review and merge protocol
 
 | Change | Target | Merge method | Merge gate |
-| ----------------- | --------- | ------------------------------------------------------- | --------------------------------------------------------- |
-| Working branch    | `main`    | Squash                                                  | All applicable required checks pass                       |
-| Release Please version PR | `main` | Rebase (`release_merge_strategy`, fails closed) | Validation gate and release policy pass                  |
-
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Working branch | `main` | Squash | All applicable required checks pass |
+| Release Please version PR | `main` | Rebase (`release_merge_strategy`, fails closed) | Validation gate and release policy pass |
 Reviewers focus on correctness, security, maintainability, test coverage, operational impact, and compatibility. Authors remain responsible for responding to feedback and verifying the final commit.
 
 ## Security and emergencies
