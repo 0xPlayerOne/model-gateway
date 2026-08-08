@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.11](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.10...v0.14.11) (2026-08-08)
+
+
+### Maintenance
+
+* **cli:** extract shared provider-filter validation ([#164](https://github.com/0xPlayerOne/model-gateway/issues/164)) ([be3f192](https://github.com/0xPlayerOne/model-gateway/commit/be3f19225ee2799ff3f56013c50b507d721280c0))
+
 ## [0.14.10](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.9...v0.14.10) (2026-08-08)
 
 
