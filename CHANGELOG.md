@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.10](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.9...v0.14.10) (2026-08-08)
+
+
+### Maintenance
+
+* **code-foundry:** sync protected docs to v0.37.1 ([80ed3ec](https://github.com/0xPlayerOne/model-gateway/commit/80ed3ecfb62d79626cf488dcee9f0a248ba6d5da))
+
 ## [0.14.9](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.8...v0.14.9) (2026-08-07)
 
 
