@@ -1159,3 +1159,40 @@ api_key_secret = "CLI_PROXY_API_KEY"
     assert!(String::from_utf8_lossy(&output.stderr).contains("returned no models"));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("ready"));
 }
+
+#[test]
+fn provider_scoped_commands_reject_unknown_provider_filter() {
+    let directory = tempfile::tempdir().expect("config directory");
+    let config_path = directory.path().join("config.toml");
+    let state_path = directory.path().join("routing.sqlite3");
+    std::fs::write(
+        &config_path,
+        r#"
+[providers.fixture]
+adapter = "openai_chat"
+base_url = "http://localhost:8000/v1"
+"#,
+    )
+    .expect("write config");
+    let environment = |command: &mut Command| {
+        command
+            .env("MODEL_GATEWAY_CONFIG", &config_path)
+            .env("MODEL_GATEWAY_STATE_PATH", &state_path)
+            .env("MODEL_GATEWAY_SECRET_STORE", "environment");
+    };
+
+    for args in [
+        vec!["pricing", "coverage", "--provider", "missing"],
+        vec!["matching", "reconcile", "--provider", "missing"],
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+        command.args(&args);
+        environment(&mut command);
+        let output = command.output().expect("run provider-scoped command");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unknown provider 'missing'"),
+            "expected unknown-provider error for {args:?}"
+        );
+    }
+}
