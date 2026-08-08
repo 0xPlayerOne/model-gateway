@@ -484,6 +484,17 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Validate that an optional `--provider` filter refers to a configured
+/// provider, matching the error message used by every provider-scoped command.
+fn validate_provider_filter(provider: Option<&str>, config: &Config) -> Result<(), Box<dyn Error>> {
+    match provider {
+        Some(name) if !config.providers.contains_key(name) => {
+            Err(format!("unknown provider '{name}'").into())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
     let resolver = SecretResolver::default();
     let config = Config::load(Config::default_path(), &resolver)?;
@@ -535,12 +546,7 @@ fn pricing(command: PricingCommand) -> Result<(), Box<dyn Error>> {
             }
         }
         PricingCommand::Coverage { provider, json } => {
-            if provider
-                .as_ref()
-                .is_some_and(|name| !config.providers.contains_key(name))
-            {
-                return Err(format!("unknown provider '{}'", provider.unwrap()).into());
-            }
+            validate_provider_filter(provider.as_deref(), &config)?;
             let report = report_pricing_coverage(&config, &store, provider.as_deref())?;
             let mut summary = BTreeMap::<&str, usize>::new();
             for entry in &report {
@@ -669,12 +675,7 @@ fn matching(command: MatchingCommand) -> Result<(), Box<dyn Error>> {
             json,
             check,
         } => {
-            if provider
-                .as_ref()
-                .is_some_and(|name| !config.providers.contains_key(name))
-            {
-                return Err(format!("unknown provider '{}'", provider.unwrap()).into());
-            }
+            validate_provider_filter(provider.as_deref(), &config)?;
             let report = reconcile_model_matches(&config, &store, provider.as_deref())?;
             let drift = report.iter().any(|entry| {
                 entry.status == ModelMatchKind::Ambiguous
