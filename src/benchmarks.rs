@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Digest;
 
+use crate::pricing::fmt_number;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RawBenchmarkMetric {
@@ -676,13 +678,6 @@ pub fn fingerprint_benchmark_models(models: &[BenchmarkModel]) -> String {
 
 fn fmt_score(value: Option<f64>) -> String {
     fmt_number(value)
-}
-
-fn fmt_number(value: Option<f64>) -> String {
-    match value {
-        Some(value) => format!("{value}"),
-        None => String::new(),
-    }
 }
 
 #[cfg(test)]

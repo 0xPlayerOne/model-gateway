@@ -207,7 +207,7 @@ pub fn fingerprint_price_observations(observations: &[PriceObservation]) -> Stri
         .collect()
 }
 
-fn fmt_number(value: Option<f64>) -> String {
+pub(crate) fn fmt_number(value: Option<f64>) -> String {
     match value {
         Some(value) => format!("{value}"),
         None => String::new(),

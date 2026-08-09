@@ -63,7 +63,7 @@ fn current_time_nanos() -> u128 {
         .map_or(0, |duration| duration.as_nanos())
 }
 
-fn set_unix_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+pub(crate) fn set_unix_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
