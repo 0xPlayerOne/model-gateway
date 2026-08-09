@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.12](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.11...v0.14.12) (2026-08-09)
+
+
+### Maintenance
+
+* dedupe set_unix_mode and fmt_number helpers ([#166](https://github.com/0xPlayerOne/model-gateway/issues/166)) ([be3556f](https://github.com/0xPlayerOne/model-gateway/commit/be3556f3ff0149c7e6c03bed0e65b20759afa746))
+
 ## [0.14.11](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.10...v0.14.11) (2026-08-08)
 
 
