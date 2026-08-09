@@ -17,6 +17,7 @@ use crate::pricing::{
     EffectivePrice, PriceObservation, PriceScope, PriceSourceKind, normalize_price_id,
 };
 use crate::providers::{AccountLimit, is_specialty_model};
+use crate::storage::set_unix_mode;
 
 #[derive(Debug, Error)]
 pub enum RoutingError {
@@ -2864,17 +2865,6 @@ fn is_stale_generation(model: &str, version_map: &BTreeMap<String, u64>) -> bool
         return cat_version < aa_max_version;
     }
     false
-}
-
-fn set_unix_mode(path: &Path, mode: u32) -> Result<(), std::io::Error> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-    }
-    #[cfg(not(unix))]
-    let _ = (path, mode);
-    Ok(())
 }
 
 #[cfg(test)]

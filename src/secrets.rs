@@ -49,7 +49,7 @@ impl FileSecretStore {
 
     fn ensure_root(&self) -> Result<(), SecretError> {
         fs::create_dir_all(&self.root)?;
-        set_unix_mode(&self.root, 0o700)?;
+        crate::storage::set_unix_mode(&self.root, 0o700)?;
         Ok(())
     }
 }
@@ -376,17 +376,6 @@ pub fn validate_secret_name(name: &str) -> Result<(), SecretError> {
     {
         return Err(SecretError::InvalidName(name.to_owned()));
     }
-    Ok(())
-}
-
-fn set_unix_mode(path: &Path, mode: u32) -> Result<(), SecretError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-    }
-    #[cfg(not(unix))]
-    let _ = (path, mode);
     Ok(())
 }
 

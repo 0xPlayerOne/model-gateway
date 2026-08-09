@@ -1392,7 +1392,6 @@ dependencies = [
  "async-stream",
  "axum",
  "bytes",
- "cc",
  "clap",
  "dialoguer",
  "futures-util",
