@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.13](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.12...v0.14.13) (2026-08-10)
+
+
+### Bug Fixes
+
+* **ci:** make release container image build finish within timeout ([#168](https://github.com/0xPlayerOne/model-gateway/issues/168)) ([35a4f3d](https://github.com/0xPlayerOne/model-gateway/commit/35a4f3daa9bf153cbf4e40bd4943f491d631d462))
+
 ## [0.14.12](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.11...v0.14.12) (2026-08-09)
 
 
