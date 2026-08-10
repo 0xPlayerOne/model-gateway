@@ -2,9 +2,22 @@ FROM rust:1.97.1-bookworm AS builder
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+
+# Compile the full dependency tree against stub sources first so this layer
+# is cached and reused across releases. The real sources are copied below,
+# so only the model-gateway crate itself recompiles per release.
+RUN mkdir -p src && \
+    printf 'fn main() {}\n' > src/main.rs && \
+    printf '' > src/lib.rs && \
+    cargo build --release --locked || true
+
 COPY src ./src
 COPY docs ./docs
-RUN cargo build --release --locked
+
+# Force recompile of the real crate sources; dependencies are reused from
+# the cached dependency layer above.
+RUN touch src/main.rs src/lib.rs && \
+    cargo build --release --locked
 
 FROM debian:bookworm-slim
 

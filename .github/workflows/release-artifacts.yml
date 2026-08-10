@@ -108,7 +108,12 @@ jobs:
     name: Container image
     needs: validate-release
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The multi-arch Rust build compiles the full workspace for amd64 and
+    # arm64 (QEMU); with the dependency-caching Dockerfile plus the GHA
+    # buildx cache the steady-state build is fast, but the first cold build
+    # needs a generous ceiling (previously cancelled at 30 minutes with no
+    # image published).
+    timeout-minutes: 120
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -134,6 +139,8 @@ jobs:
           image_name="ghcr.io/${GITHUB_REPOSITORY,,}:$RELEASE_TAG"
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             --tag "$image_name" \
             --push \
             .
