@@ -1547,13 +1547,14 @@ fn credentials(command: CredentialCommand) -> Result<(), Box<dyn Error>> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use model_gateway::config::{Config, ModelConfig, TargetConfig};
+    use model_gateway::config::{Config, ModelConfig, ProviderConfig, TargetConfig};
     use model_gateway::secrets::SecretResolver;
 
     use clap::Parser;
 
     use super::{
         Cli, apply_pending_secrets, config_diff, parse_manual_price_imports, rollback_secrets,
+        validate_provider_filter,
     };
 
     #[test]
@@ -1690,5 +1691,93 @@ mod tests {
             Some("restored-value".to_owned())
         );
         assert_eq!(resolver.get("KEY2").expect("get key2"), None);
+    }
+
+    #[test]
+    fn validate_provider_filter_accepts_missing_and_configured_providers() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "openrouter".to_owned(),
+            ProviderConfig {
+                base_url: "https://openrouter.example.test/v1".to_owned(),
+                ..ProviderConfig::default()
+            },
+        );
+
+        assert!(validate_provider_filter(None, &config).is_ok());
+        assert!(validate_provider_filter(Some("openrouter"), &config).is_ok());
+    }
+
+    #[test]
+    fn validate_provider_filter_rejects_unknown_providers_with_shared_message() {
+        let config = Config::default();
+        let error = validate_provider_filter(Some("no-such-provider"), &config)
+            .expect_err("unknown provider must fail");
+        assert_eq!(error.to_string(), "unknown provider 'no-such-provider'");
+    }
+
+    #[test]
+    fn manual_price_import_parser_returns_empty_for_blank_input() {
+        let observations =
+            parse_manual_price_imports("\n  \n\t\n", std::path::Path::new("prices.jsonl"), 7)
+                .expect("blank input parses to empty");
+        assert!(observations.is_empty());
+    }
+
+    #[test]
+    fn manual_price_import_parser_preserves_optional_fields_and_trims_model() {
+        let input = r#"{"provider":"openrouter","model":"  gpt-5.6-luna  ","input_price_per_million":1.25,"output_price_per_million":4.5,"cache_read_price_per_million":0.5,"cache_write_price_per_million":1.0,"reasoning_price_per_million":2.0,"valid_from":100,"valid_until":200,"attribution":"fixture"}"#;
+        let observations =
+            parse_manual_price_imports(input, std::path::Path::new("prices.jsonl"), 42)
+                .expect("pricing overrides");
+        assert_eq!(observations.len(), 1);
+        let observation = &observations[0];
+        assert_eq!(observation.provider_key.as_deref(), Some("openrouter"));
+        assert_eq!(observation.model_id, "gpt-5.6-luna");
+        assert_eq!(observation.rates.input_price_per_million, Some(1.25));
+        assert_eq!(observation.rates.cache_read_price_per_million, Some(0.5));
+        assert_eq!(observation.rates.cache_write_price_per_million, Some(1.0));
+        assert_eq!(observation.rates.reasoning_price_per_million, Some(2.0));
+        assert_eq!(observation.valid_from, Some(100));
+        assert_eq!(observation.valid_until, Some(200));
+        assert_eq!(observation.attribution.as_deref(), Some("fixture"));
+        assert_eq!(observation.fetched_at, Some(42));
+    }
+
+    #[test]
+    fn config_diff_reports_added_and_removed_lines_with_a_baseline() {
+        let mut before = Config::default();
+        before.models.insert(
+            "removed-alias".to_owned(),
+            ModelConfig {
+                targets: vec![TargetConfig {
+                    provider: "openrouter".to_owned(),
+                    model: "upstream-removed".to_owned(),
+                }],
+            },
+        );
+        let mut after = Config::default();
+        after.models.insert(
+            "added-alias".to_owned(),
+            ModelConfig {
+                targets: vec![TargetConfig {
+                    provider: "openrouter".to_owned(),
+                    model: "upstream-added".to_owned(),
+                }],
+            },
+        );
+
+        let diff = config_diff(Some(&before), &after).expect("diff");
+        assert!(diff.contains("- [[models.removed-alias.targets]]"));
+        assert!(diff.contains("- model = \"upstream-removed\""));
+        assert!(diff.contains("+ [[models.added-alias.targets]]"));
+        assert!(diff.contains("+ model = \"upstream-added\""));
+    }
+
+    #[test]
+    fn config_diff_reports_no_changes_for_identical_configs() {
+        let config = Config::default();
+        let diff = config_diff(Some(&config), &config).expect("diff");
+        assert!(diff.contains("(no configuration changes)"));
     }
 }
