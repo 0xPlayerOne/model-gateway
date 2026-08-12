@@ -1100,10 +1100,7 @@ fn validate_server(server: &ServerConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_provider(
-    name: &str,
-    provider: &ProviderConfig,
-) -> Result<(), ConfigError> {
+fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<(), ConfigError> {
     validate_identifier(name, "provider name")?;
     let url = Url::parse(&provider.base_url)
         .map_err(|error| ConfigError::Invalid(format!("provider '{name}' URL: {error}")))?;
