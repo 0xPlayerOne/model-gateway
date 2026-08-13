@@ -16,7 +16,7 @@ use crate::identity::IdentityImport;
 use crate::pricing::{
     EffectivePrice, PriceObservation, PriceScope, PriceSourceKind, normalize_price_id,
 };
-use crate::providers::{AccountLimit, is_specialty_model};
+use crate::providers::{AccountLimit, CatalogModel, is_specialty_model};
 use crate::storage::set_unix_mode;
 
 #[derive(Debug, Error)]
@@ -135,6 +135,21 @@ pub struct CatalogRecord {
     pub supports_structured_output: Option<bool>,
     pub input_price_per_million: Option<f64>,
     pub output_price_per_million: Option<f64>,
+}
+
+impl CatalogRecord {
+    pub fn from_provider_model(provider: &ProviderConfig, model: &CatalogModel) -> Self {
+        Self {
+            access_kind: classify_access(provider, &model.id, model.zero_priced),
+            model: model.id.clone(),
+            context_length: model.context_length,
+            supports_tools: model.supports_tools,
+            supports_vision: model.supports_vision,
+            supports_structured_output: model.supports_structured_output,
+            input_price_per_million: model.input_price_per_million,
+            output_price_per_million: model.output_price_per_million,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
