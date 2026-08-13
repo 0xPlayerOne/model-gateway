@@ -505,15 +505,15 @@ impl Config {
         Ok(())
     }
 
-    pub fn validate(&self, secrets: &SecretResolver) -> Result<(), ConfigError> {
-        self.validate_inner(Some(secrets))
+    pub fn validate(&self, _secrets: &SecretResolver) -> Result<(), ConfigError> {
+        self.validate_inner()
     }
 
     pub fn validate_structure(&self) -> Result<(), ConfigError> {
-        self.validate_inner(None)
+        self.validate_inner()
     }
 
-    fn validate_inner(&self, secrets: Option<&SecretResolver>) -> Result<(), ConfigError> {
+    fn validate_inner(&self) -> Result<(), ConfigError> {
         validate_server(&self.server)?;
         validate_provider(
             "local",
@@ -525,7 +525,6 @@ impl Config {
                     .starts_with("http://host.docker.internal"),
                 ..ProviderConfig::default()
             },
-            None,
         )?;
         if self.server.local_model_cache_seconds == 0 {
             return Err(ConfigError::Invalid(
@@ -569,7 +568,7 @@ impl Config {
                     "provider '{name}' collides with another provider's environment override name"
                 )));
             }
-            validate_provider(name, provider, secrets)?;
+            validate_provider(name, provider)?;
         }
         for (alias, model) in &self.models {
             validate_identifier(alias, "model alias")?;
@@ -1101,11 +1100,7 @@ fn validate_server(server: &ServerConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_provider(
-    name: &str,
-    provider: &ProviderConfig,
-    secrets: Option<&SecretResolver>,
-) -> Result<(), ConfigError> {
+fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<(), ConfigError> {
     validate_identifier(name, "provider name")?;
     let url = Url::parse(&provider.base_url)
         .map_err(|error| ConfigError::Invalid(format!("provider '{name}' URL: {error}")))?;
@@ -1233,7 +1228,6 @@ fn validate_provider(
     }
     if let Some(secret) = &provider.api_key_secret {
         validate_secret_name(secret)?;
-        let _ = secrets;
     }
     Ok(())
 }
@@ -1281,17 +1275,12 @@ fn is_safe_extra_header(header: &str) -> bool {
         && !lower.contains("token")
         && !matches!(
             lower.as_str(),
-            "authorization"
-                | "proxy-authorization"
-                | "host"
+            "host"
                 | "content-length"
                 | "transfer-encoding"
                 | "connection"
                 | "cookie"
                 | "set-cookie"
-                | "x-api-key"
-                | "api-key"
-                | "x-auth-token"
         )
         && header
             .bytes()
