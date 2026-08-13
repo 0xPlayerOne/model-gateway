@@ -1339,12 +1339,7 @@ fn apply_pending_secrets(
     for (name, value) in &pending {
         if let Err(error) = resolver.set_preferred(name, value) {
             let rollback_error = rollback_secrets(resolver, &previous, &applied).err();
-            return Err(combined_update_error(
-                "credential update",
-                &error,
-                rollback_error,
-            )
-            .into());
+            return Err(combined_update_error("credential update", &error, rollback_error).into());
         }
         applied.push(name.clone());
     }
@@ -1354,12 +1349,7 @@ fn apply_pending_secrets(
         .and_then(|_| config.save_atomic(config_path))
     {
         let rollback_error = rollback_secrets(resolver, &previous, &applied).err();
-        return Err(combined_update_error(
-            "configuration update",
-            &error,
-            rollback_error,
-        )
-        .into());
+        return Err(combined_update_error("configuration update", &error, rollback_error).into());
     }
     Ok(())
 }
