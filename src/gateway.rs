@@ -6694,16 +6694,7 @@ async fn refresh_provider_catalog(state: &AppState, name: &str) -> Result<usize,
     .map_err(|error| format!("catalog refresh task failed: {error}"))??;
     let records = models
         .into_iter()
-        .map(|model| CatalogRecord {
-            access_kind: classify_access(&runtime.config, &model.id, model.zero_priced),
-            model: model.id,
-            context_length: model.context_length,
-            supports_tools: model.supports_tools,
-            supports_vision: model.supports_vision,
-            supports_structured_output: model.supports_structured_output,
-            input_price_per_million: model.input_price_per_million,
-            output_price_per_million: model.output_price_per_million,
-        })
+        .map(|model| CatalogRecord::from_provider_model(&runtime.config, &model))
         .collect::<Vec<_>>();
     let count = records.len();
     let provider = name.to_owned();

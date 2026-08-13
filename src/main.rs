@@ -31,9 +31,7 @@ use model_gateway::pricing::{
 use model_gateway::providers::{
     BuiltinProvider, ConnectionCheck, fetch_account_limit, fetch_catalog,
 };
-use model_gateway::routing::{
-    CatalogRecord, RoutingStore, classify_access, provider_limit_reference,
-};
+use model_gateway::routing::{CatalogRecord, RoutingStore, provider_limit_reference};
 use model_gateway::secrets::SecretResolver;
 use serde_json::Value;
 
@@ -930,20 +928,7 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
                 };
                 let models = models
                     .into_iter()
-                    .map(|model| {
-                        let access_kind =
-                            classify_access(provider_config, &model.id, model.zero_priced);
-                        CatalogRecord {
-                            model: model.id,
-                            access_kind,
-                            context_length: model.context_length,
-                            supports_tools: model.supports_tools,
-                            supports_vision: model.supports_vision,
-                            supports_structured_output: model.supports_structured_output,
-                            input_price_per_million: model.input_price_per_million,
-                            output_price_per_million: model.output_price_per_million,
-                        }
-                    })
+                    .map(|model| CatalogRecord::from_provider_model(provider_config, &model))
                     .collect::<Vec<_>>();
                 store.replace_catalog(name, &models)?;
                 if let Some(account) = fetch_account_limit(provider_config, api_key.as_deref())? {
@@ -1354,13 +1339,12 @@ fn apply_pending_secrets(
     for (name, value) in &pending {
         if let Err(error) = resolver.set_preferred(name, value) {
             let rollback_error = rollback_secrets(resolver, &previous, &applied).err();
-            return Err(match rollback_error {
-                Some(rollback) => {
-                    format!("credential update failed; rollback also failed: {error}; {rollback}")
-                        .into()
-                }
-                None => error.into(),
-            });
+            return Err(combined_update_error(
+                "credential update",
+                &error,
+                rollback_error,
+            )
+            .into());
         }
         applied.push(name.clone());
     }
@@ -1370,15 +1354,27 @@ fn apply_pending_secrets(
         .and_then(|_| config.save_atomic(config_path))
     {
         let rollback_error = rollback_secrets(resolver, &previous, &applied).err();
-        return Err(match rollback_error {
-            Some(rollback) => format!(
-                "configuration update failed; credential rollback also failed: {error}; {rollback}"
-            )
-            .into(),
-            None => error.into(),
-        });
+        return Err(combined_update_error(
+            "configuration update",
+            &error,
+            rollback_error,
+        )
+        .into());
     }
     Ok(())
+}
+
+fn combined_update_error(
+    context: impl std::fmt::Display,
+    primary: impl std::fmt::Display,
+    rollback: Option<impl std::fmt::Display>,
+) -> String {
+    match rollback {
+        Some(rollback) => {
+            format!("{context} failed; rollback also failed: {primary}; {rollback}")
+        }
+        None => format!("{context} failed: {primary}"),
+    }
 }
 
 fn rollback_secrets(
@@ -1446,20 +1442,7 @@ fn config_check(online: bool) -> Result<(), Box<dyn Error>> {
                         Ok(models) => {
                             let records = models
                                 .into_iter()
-                                .map(|model| CatalogRecord {
-                                    access_kind: classify_access(
-                                        provider,
-                                        &model.id,
-                                        model.zero_priced,
-                                    ),
-                                    model: model.id,
-                                    context_length: model.context_length,
-                                    supports_tools: model.supports_tools,
-                                    supports_vision: model.supports_vision,
-                                    supports_structured_output: model.supports_structured_output,
-                                    input_price_per_million: model.input_price_per_million,
-                                    output_price_per_million: model.output_price_per_million,
-                                })
+                                .map(|model| CatalogRecord::from_provider_model(provider, &model))
                                 .collect::<Vec<_>>();
                             store.replace_catalog(name, &records)?;
                             if let Some(account) = fetch_account_limit(provider, key.as_deref())? {
