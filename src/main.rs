@@ -1345,7 +1345,7 @@ fn apply_pending_secrets(
     }
 
     if let Err(error) = config
-        .validate(resolver)
+        .validate()
         .and_then(|_| config.save_atomic(config_path))
     {
         let rollback_error = rollback_secrets(resolver, &previous, &applied).err();
