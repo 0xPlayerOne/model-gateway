@@ -120,7 +120,7 @@ pub fn build_app_state(
             ),
         ));
     }
-    config.validate(secrets)?;
+    config.validate()?;
     let mut providers = BTreeMap::new();
     for (name, provider) in &config.providers {
         let client = Client::builder()
