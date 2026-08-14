@@ -478,7 +478,7 @@ impl Config {
         }
         discover_environment_providers(&mut config, secrets)?;
         apply_provider_environment_overrides(&mut config)?;
-        config.validate(secrets)?;
+        config.validate()?;
         Ok(config)
     }
 
@@ -505,7 +505,7 @@ impl Config {
         Ok(())
     }
 
-    pub fn validate(&self, _secrets: &SecretResolver) -> Result<(), ConfigError> {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         self.validate_inner()
     }
 
@@ -1421,7 +1421,6 @@ mod tests {
         QuotaLimit, ServerConfig, TargetConfig, apply_server_environment_overrides,
         validate_server,
     };
-    use crate::secrets::SecretResolver;
     use std::collections::BTreeMap;
 
     fn provider(base_url: &str) -> ProviderConfig {
@@ -1994,7 +1993,7 @@ mod tests {
                 }],
             },
         );
-        assert!(config.validate(&SecretResolver::default()).is_err());
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -2002,9 +2001,7 @@ mod tests {
         let mut config = valid_config("http://localhost:11434/v1");
         let model = config.models.remove("local-model").expect("fixture model");
         config.models.insert("local".to_owned(), model);
-        let error = config
-            .validate(&SecretResolver::default())
-            .expect_err("reserved local alias");
+        let error = config.validate().expect_err("reserved local alias");
         assert!(error.to_string().contains("reserved"));
     }
 
@@ -2021,7 +2018,7 @@ mod tests {
             "provider/name".to_owned(),
             provider("http://localhost:11434/v1"),
         );
-        assert!(config.validate(&SecretResolver::default()).is_err());
+        assert!(config.validate().is_err());
 
         let mut config = valid_config("http://localhost:11434/v1");
         config.models.insert(
@@ -2033,7 +2030,7 @@ mod tests {
                 }],
             },
         );
-        assert!(config.validate(&SecretResolver::default()).is_err());
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -2046,7 +2043,7 @@ mod tests {
                 .expect("provider")
                 .extra_headers
                 .insert(header.to_owned(), "metadata".to_owned());
-            assert!(config.validate(&SecretResolver::default()).is_err());
+            assert!(config.validate().is_err());
         }
     }
 
@@ -2146,7 +2143,7 @@ mod tests {
             .get_mut("local")
             .expect("provider")
             .allow_insecure_http = true;
-        assert!(config.validate(&SecretResolver::default()).is_err());
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -2164,7 +2161,7 @@ mod tests {
                 .expect("provider")
                 .allow_insecure_http = true;
             config
-                .validate(&SecretResolver::default())
+                .validate()
                 .unwrap_or_else(|error| panic!("{url} should be allowed: {error}"));
         }
     }
@@ -2176,11 +2173,7 @@ mod tests {
             "https://example.com/v1?api_key=secret",
             "https://example.com/v1#secret",
         ] {
-            assert!(
-                valid_config(url)
-                    .validate(&SecretResolver::default())
-                    .is_err()
-            );
+            assert!(valid_config(url).validate().is_err());
         }
 
         let mut config = valid_config("https://example.com/v1");
@@ -2190,7 +2183,7 @@ mod tests {
             .expect("provider")
             .extra_headers
             .insert("x-api-key".to_owned(), "secret".to_owned());
-        assert!(config.validate(&SecretResolver::default()).is_err());
+        assert!(config.validate().is_err());
     }
 
     #[test]
