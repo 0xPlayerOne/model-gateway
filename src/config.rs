@@ -509,10 +509,6 @@ impl Config {
         self.validate_inner()
     }
 
-    pub fn validate_structure(&self) -> Result<(), ConfigError> {
-        self.validate_inner()
-    }
-
     fn validate_inner(&self) -> Result<(), ConfigError> {
         validate_server(&self.server)?;
         validate_provider(
@@ -622,10 +618,6 @@ impl Config {
             return PathBuf::from(path);
         }
         home_dir().join("config.toml")
-    }
-
-    pub fn home_dir() -> PathBuf {
-        home_dir()
     }
 }
 
@@ -1494,7 +1486,7 @@ mod tests {
             models: BTreeMap::new(),
         };
         config
-            .validate_structure()
+            .validate()
             .expect("built-in local route should not require aliases");
     }
 
@@ -1506,13 +1498,13 @@ mod tests {
             models: BTreeMap::new(),
         };
         config.server.data_refresh_interval_seconds = 59;
-        assert!(config.validate_structure().is_err());
+        assert!(config.validate().is_err());
         config.server.data_refresh_interval_seconds = 60;
-        config.validate_structure().expect("minimum interval");
+        config.validate().expect("minimum interval");
         config.server.data_refresh_interval_seconds = 86_400;
-        config.validate_structure().expect("maximum interval");
+        config.validate().expect("maximum interval");
         config.server.data_refresh_interval_seconds = 86_401;
-        assert!(config.validate_structure().is_err());
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -1560,21 +1552,19 @@ mod tests {
             window_seconds: 86_400,
             boundary: QuotaBoundary::Rolling,
         }];
-        config.validate_structure().expect("valid quota override");
+        config.validate().expect("valid quota override");
         config.providers.get_mut("local").expect("provider").quotas[0].limit = 0;
-        assert!(config.validate_structure().is_err());
+        assert!(config.validate().is_err());
         config.providers.get_mut("local").expect("provider").quotas[0].limit = 50;
         config.providers.get_mut("local").expect("provider").quotas[0].kind =
             QuotaKind::CostMicrousd;
-        assert!(config.validate_structure().is_err());
+        assert!(config.validate().is_err());
         config
             .providers
             .get_mut("local")
             .expect("provider")
             .billing_mode = BillingMode::Paid;
-        config
-            .validate_structure()
-            .expect("paid provider cost quota");
+        config.validate().expect("paid provider cost quota");
     }
 
     #[test]
@@ -1587,7 +1577,7 @@ mod tests {
         for model in config.models.values_mut() {
             model.targets[0].provider = "a-b".to_owned();
         }
-        assert!(config.validate_structure().is_err());
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -2069,7 +2059,7 @@ mod tests {
         let config: Config = toml::from_str(include_str!("../gateway.core.example.toml"))
             .expect("CORE provider example must parse");
         config
-            .validate_structure()
+            .validate()
             .expect("CORE provider example must validate");
         assert_eq!(config.providers.len(), 5);
         assert_eq!(config.models.len(), 5);
@@ -2085,9 +2075,7 @@ mod tests {
     fn primary_example_includes_valid_efficiency_policy() {
         let config: Config = toml::from_str(include_str!("../gateway.example.toml"))
             .expect("primary example must parse");
-        config
-            .validate_structure()
-            .expect("primary example must validate");
+        config.validate().expect("primary example must validate");
         let openrouter = &config.providers["openrouter"];
         assert_eq!(openrouter.billing_mode, BillingMode::Paid);
         assert_eq!(
@@ -2108,7 +2096,7 @@ mod tests {
         let config: Config = toml::from_str(include_str!("../gateway.secondary.example.toml"))
             .expect("secondary provider example must parse");
         config
-            .validate_structure()
+            .validate()
             .expect("secondary provider example must validate");
         assert_eq!(config.providers.len(), 5);
         assert_eq!(config.models.len(), 5);
@@ -2124,7 +2112,7 @@ mod tests {
         let config: Config = toml::from_str(include_str!("../gateway.optional.example.toml"))
             .expect("optional provider example must parse");
         config
-            .validate_structure()
+            .validate()
             .expect("optional provider example must validate");
         assert_eq!(config.providers.len(), 7);
         assert_eq!(config.models.len(), 6);
