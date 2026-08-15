@@ -1087,7 +1087,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
                     .into());
                 }
                 config.providers.remove(&name);
-                config.validate_structure()?;
+                config.validate()?;
                 apply_pending_secrets(&resolver, &config_path, &config, pending_secrets)?;
                 println!("Removed provider '{name}'");
                 return Ok(());
@@ -1099,7 +1099,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
                 if config.models.remove(&alias).is_none() {
                     return Err(format!("model alias '{alias}' does not exist").into());
                 }
-                config.validate_structure()?;
+                config.validate()?;
                 apply_pending_secrets(&resolver, &config_path, &config, pending_secrets)?;
                 println!("Removed model alias '{alias}'");
                 return Ok(());
@@ -1287,7 +1287,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    config.validate_structure()?;
+    config.validate()?;
     println!("Proposed non-secret configuration diff:");
     println!("{}", config_diff(original.as_ref(), &config)?);
     if !Confirm::new()
