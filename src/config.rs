@@ -1564,9 +1564,7 @@ mod tests {
             .get_mut("local")
             .expect("provider")
             .billing_mode = BillingMode::Paid;
-        config
-            .validate()
-            .expect("paid provider cost quota");
+        config.validate().expect("paid provider cost quota");
     }
 
     #[test]
@@ -2077,9 +2075,7 @@ mod tests {
     fn primary_example_includes_valid_efficiency_policy() {
         let config: Config = toml::from_str(include_str!("../gateway.example.toml"))
             .expect("primary example must parse");
-        config
-            .validate()
-            .expect("primary example must validate");
+        config.validate().expect("primary example must validate");
         let openrouter = &config.providers["openrouter"];
         assert_eq!(openrouter.billing_mode, BillingMode::Paid);
         assert_eq!(
