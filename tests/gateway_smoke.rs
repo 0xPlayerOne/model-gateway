@@ -5144,7 +5144,7 @@ async fn reserved_alias_auto_balanced_is_rejected() {
             }],
         },
     );
-    let result = config.validate_structure();
+    let result = config.validate();
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
