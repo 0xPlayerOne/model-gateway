@@ -201,9 +201,14 @@ pub fn build_app_state(
         },
     );
     let routing = Arc::new(RoutingStore::open(config.server.state_path.as_deref())?);
+    let mut configured_offerings = Vec::new();
     for (provider_name, provider) in &config.providers {
         for model in &provider.free_models {
-            routing.upsert_offering(provider_name, model, AccessKind::ZeroPrice)?;
+            configured_offerings.push((
+                provider_name.as_str(),
+                model.as_str(),
+                AccessKind::ZeroPrice,
+            ));
         }
     }
     for model in config.models.values() {
@@ -211,11 +216,16 @@ pub fn build_app_state(
             if let Some(provider) = config.providers.get(&target.provider) {
                 let access_kind = classify_access(provider, &target.model, false);
                 if access_kind.is_free() {
-                    routing.upsert_offering(&target.provider, &target.model, access_kind)?;
+                    configured_offerings.push((
+                        target.provider.as_str(),
+                        target.model.as_str(),
+                        access_kind,
+                    ));
                 }
             }
         }
     }
+    routing.upsert_offerings(&configured_offerings)?;
     let state = AppState {
         global_permits: Arc::new(Semaphore::new(config.server.max_in_flight)),
         config: Arc::new(config),
