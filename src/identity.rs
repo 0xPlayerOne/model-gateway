@@ -81,6 +81,42 @@ fn creator_from_id(id: &str) -> Option<String> {
         .filter(|creator| !creator.is_empty())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn push_alias(
+    aliases: &mut Vec<IdentityAliasRecord>,
+    source: impl Into<String>,
+    provider_key: impl Into<String>,
+    provider_model_id: impl Into<String>,
+    entity_id: String,
+    confidence: IdentityConfidence,
+    provenance_url: impl Into<String>,
+    observed_at: i64,
+) {
+    aliases.push(IdentityAliasRecord {
+        source: source.into(),
+        provider_key: provider_key.into(),
+        provider_model_id: provider_model_id.into(),
+        entity_id,
+        confidence,
+        provenance_url: provenance_url.into(),
+        observed_at,
+    });
+}
+
+fn finish_import(
+    source: impl Into<String>,
+    attribution: impl Into<String>,
+    entities: BTreeMap<String, IdentityEntityRecord>,
+    aliases: Vec<IdentityAliasRecord>,
+) -> IdentityImport {
+    IdentityImport {
+        source: source.into(),
+        attribution: attribution.into(),
+        entities: entities.into_values().collect(),
+        aliases,
+    }
+}
+
 pub fn parse_models_dev_identities(
     body: &Value,
     observed_at: i64,
@@ -121,27 +157,28 @@ pub fn parse_models_dev_identities(
                         .map(ToOwned::to_owned),
                     hugging_face_id: hf_reference.clone(),
                 });
-            aliases.push(IdentityAliasRecord {
-                source: "models.dev".to_owned(),
-                provider_key: provider_key.clone(),
-                provider_model_id: model_id.to_owned(),
+            push_alias(
+                &mut aliases,
+                "models.dev",
+                provider_key,
+                model_id,
                 entity_id,
-                confidence: if hf_reference.is_some() {
+                if hf_reference.is_some() {
                     IdentityConfidence::CanonicalReference
                 } else {
                     IdentityConfidence::SourceExact
                 },
-                provenance_url: "https://models.dev/".to_owned(),
+                "https://models.dev/",
                 observed_at,
-            });
+            );
         }
     }
-    Ok(IdentityImport {
-        source: "models.dev".to_owned(),
-        attribution: "Models.dev (https://models.dev/)".to_owned(),
-        entities: entities.into_values().collect(),
+    Ok(finish_import(
+        "models.dev",
+        "Models.dev (https://models.dev/)",
+        entities,
         aliases,
-    })
+    ))
 }
 
 pub fn parse_openrouter_identities(
@@ -192,26 +229,27 @@ pub fn parse_openrouter_identities(
                 release_date: None,
                 hugging_face_id: hugging_face_id.clone(),
             });
-        aliases.push(IdentityAliasRecord {
-            source: "openrouter".to_owned(),
-            provider_key: "openrouter".to_owned(),
-            provider_model_id: model_id.to_owned(),
+        push_alias(
+            &mut aliases,
+            "openrouter",
+            "openrouter",
+            model_id,
             entity_id,
-            confidence: if hugging_face_id.is_some() {
+            if hugging_face_id.is_some() {
                 IdentityConfidence::CanonicalReference
             } else {
                 IdentityConfidence::SourceExact
             },
-            provenance_url: "https://openrouter.ai/api/v1/models".to_owned(),
+            "https://openrouter.ai/api/v1/models",
             observed_at,
-        });
+        );
     }
-    Ok(IdentityImport {
-        source: "openrouter".to_owned(),
-        attribution: "OpenRouter public models API".to_owned(),
-        entities: entities.into_values().collect(),
+    Ok(finish_import(
+        "openrouter",
+        "OpenRouter public models API",
+        entities,
         aliases,
-    })
+    ))
 }
 
 pub fn parse_models_dev_canonical_identities(
@@ -257,22 +295,23 @@ pub fn parse_models_dev_canonical_identities(
                     .map(ToOwned::to_owned),
                 hugging_face_id: hugging_face_id.clone(),
             });
-        aliases.push(IdentityAliasRecord {
-            source: "models.dev-canonical".to_owned(),
-            provider_key: "canonical".to_owned(),
-            provider_model_id: model_id.to_owned(),
+        push_alias(
+            &mut aliases,
+            "models.dev-canonical",
+            "canonical",
+            model_id,
             entity_id,
-            confidence: IdentityConfidence::CanonicalReference,
-            provenance_url: "https://models.dev/models.json".to_owned(),
+            IdentityConfidence::CanonicalReference,
+            "https://models.dev/models.json",
             observed_at,
-        });
+        );
     }
-    Ok(IdentityImport {
-        source: "models.dev-canonical".to_owned(),
-        attribution: "Models.dev canonical model registry".to_owned(),
-        entities: entities.into_values().collect(),
+    Ok(finish_import(
+        "models.dev-canonical",
+        "Models.dev canonical model registry",
+        entities,
         aliases,
-    })
+    ))
 }
 
 fn http_client() -> Result<Client, String> {
