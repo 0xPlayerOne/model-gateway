@@ -39,9 +39,9 @@ use crate::providers::ConnectionCheck;
 use crate::providers::prepare_request;
 use crate::providers::{fetch_account_limit, fetch_catalog};
 use crate::routing::{
-    AccessKind, AccountLimitSnapshot, CatalogOffering, CatalogRecord, IdentityAliasEvidence,
-    ReservationOutcome, ReservationRelease, ReservationToken, RoutingError, RoutingStore,
-    classify_access, quota_reference,
+    AccessKind, AccountLimitSnapshot, CatalogOffering, CatalogRecord, EffectivePriceRequest,
+    IdentityAliasEvidence, ReservationOutcome, ReservationRelease, ReservationToken, RoutingError,
+    RoutingStore, classify_access, quota_reference,
 };
 use crate::secrets::{SecretError, SecretResolver};
 
@@ -2930,33 +2930,17 @@ async fn load_effective_prices(
         .iter()
         .filter_map(|offering| {
             let provider = state.config.providers.get(&offering.provider)?;
-            Some((
-                offering.provider.clone(),
-                offering.model.clone(),
-                identity_provider_key(provider).map(ToOwned::to_owned),
-                provider.model_mappings.get(&offering.model).cloned(),
-            ))
+            Some(EffectivePriceRequest {
+                runtime_provider: offering.provider.clone(),
+                profile_key: identity_provider_key(provider).map(ToOwned::to_owned),
+                model: offering.model.clone(),
+                canonical_model: provider.model_mappings.get(&offering.model).cloned(),
+            })
         })
         .collect::<Vec<_>>();
     let pricing_max_age_seconds = state.config.server.pricing_max_age_seconds;
     routing_operation(state.routing.clone(), move |routing| {
-        let mut prices = BTreeMap::new();
-        for (provider, model, profile_key, canonical_model) in requests {
-            if let Some(price) = routing
-                .effective_price(
-                    &provider,
-                    profile_key.as_deref(),
-                    &model,
-                    canonical_model.as_deref(),
-                    pricing_max_age_seconds,
-                )
-                .ok()
-                .flatten()
-            {
-                prices.insert((provider, model), price);
-            }
-        }
-        Ok(prices)
+        routing.effective_prices(&requests, pricing_max_age_seconds)
     })
     .await
     .unwrap_or_default()

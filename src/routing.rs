@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -1099,111 +1099,28 @@ impl RoutingStore {
             )
             .optional()?;
 
-        let mut observations = Vec::new();
-        let mut statement = connection.prepare(
-            "SELECT s.source, s.source_kind, o.scope, o.provider_key, o.model_id,
-                    o.input_price, o.output_price, o.cache_read_price, o.cache_write_price,
-                    o.reasoning_price, o.input_audio_price, o.output_audio_price, o.request_price,
-                    o.as_of, o.valid_from, o.valid_until, s.fetched_at
-             FROM price_observations o
-             JOIN pricing_snapshots s ON s.id = o.snapshot_id
-             WHERE s.active = 1 AND (s.source_kind = 'manual' OR s.fetched_at >= ?1)
-               AND lower(o.model_id) = ?2
-               AND (o.valid_from IS NULL OR o.valid_from <= ?3)
-               AND (o.valid_until IS NULL OR o.valid_until > ?3)",
-        )?;
-        let rows =
-            statement.query_map(params![cutoff, model_id, now], price_observation_from_row)?;
-        for row in rows {
-            observations.push(row?);
-        }
-
-        let mut target_candidates = observations
-            .into_iter()
-            .filter(|observation| {
-                (observation.scope == PriceScope::RuntimeProvider
-                    && observation
-                        .provider_key
-                        .as_deref()
-                        .is_some_and(|key| key.eq_ignore_ascii_case(runtime_provider)))
-                    || (observation.scope == PriceScope::ProviderProfile
-                        && profile_key.is_some_and(|key| {
-                            observation
-                                .provider_key
-                                .as_deref()
-                                .is_some_and(|value| value.eq_ignore_ascii_case(key))
-                        }))
-            })
-            .collect::<Vec<_>>();
-
-        if let Some((Some(input), Some(output), refreshed_at)) = catalog {
-            target_candidates.push(PriceObservation {
-                source: format!("catalog:{runtime_provider}"),
-                source_kind: PriceSourceKind::ProviderCatalog,
-                scope: PriceScope::RuntimeProvider,
-                provider_key: Some(runtime_provider.to_owned()),
-                model_id: model.to_owned(),
-                rates: crate::pricing::PriceRates {
-                    input_price_per_million: Some(input),
-                    output_price_per_million: Some(output),
-                    ..crate::pricing::PriceRates::default()
-                },
-                fetched_at: Some(refreshed_at),
-                as_of: None,
-                valid_from: None,
-                valid_until: None,
-                attribution: None,
-            });
-        }
-
-        target_candidates.retain(|observation| observation.rates.is_complete());
-        target_candidates.sort_by(|left, right| {
-            let left_target = u8::from(left.scope != PriceScope::RuntimeProvider);
-            let right_target = u8::from(right.scope != PriceScope::RuntimeProvider);
-            left_target
-                .cmp(&right_target)
-                .then_with(|| {
-                    left.source_kind
-                        .fallback_priority()
-                        .cmp(&right.source_kind.fallback_priority())
-                })
-                .then_with(|| right.fetched_at.cmp(&left.fetched_at))
-                .then_with(|| left.source.cmp(&right.source))
-        });
-        if let Some(observation) = target_candidates.first() {
-            return Ok(EffectivePrice::from_observation(observation, false));
-        }
-
-        let Some(canonical_model) = canonical_model else {
-            return Ok(None);
-        };
-        let Some((canonical_provider, canonical_id)) = canonical_model.split_once('/') else {
-            return Ok(None);
-        };
-        let canonical_id = normalize_price_id(canonical_id);
-        let mut canonical_candidates = statement
-            .query_map(
-                params![cutoff, canonical_id, now],
-                price_observation_from_row,
-            )?
+        let mut statement = connection.prepare(PRICE_OBSERVATION_FOR_MODEL_SQL)?;
+        let target_observations = statement
+            .query_map(params![cutoff, model_id, now], price_observation_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        canonical_candidates.retain(|observation| {
-            observation.rates.is_complete()
-                && observation
-                    .provider_key
-                    .as_deref()
-                    .is_some_and(|key| key.eq_ignore_ascii_case(canonical_provider))
-        });
-        canonical_candidates.sort_by(|left, right| {
-            left.source_kind
-                .fallback_priority()
-                .cmp(&right.source_kind.fallback_priority())
-                .then_with(|| right.fetched_at.cmp(&left.fetched_at))
-                .then_with(|| left.source.cmp(&right.source))
-        });
-        Ok(canonical_candidates
-            .first()
-            .and_then(|observation| EffectivePrice::from_observation(observation, true)))
+        let canonical_observations = match canonical_model.and_then(|value| value.split_once('/')) {
+            Some((_, canonical_id)) => statement
+                .query_map(
+                    params![cutoff, normalize_price_id(canonical_id), now],
+                    price_observation_from_row,
+                )?
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
+        Ok(select_effective_price(
+            runtime_provider,
+            profile_key,
+            model,
+            canonical_model,
+            catalog,
+            target_observations,
+            canonical_observations,
+        ))
     }
 
     pub fn has_incomplete_price_observation(
@@ -2161,6 +2078,277 @@ impl RoutingStore {
             ],
         )?;
         Ok(())
+    }
+}
+
+/// A single (provider, model) price lookup for
+/// [`RoutingStore::effective_prices`].
+#[derive(Debug, Clone)]
+pub struct EffectivePriceRequest {
+    pub runtime_provider: String,
+    pub profile_key: Option<String>,
+    pub model: String,
+    pub canonical_model: Option<String>,
+}
+
+/// Price observation columns shared by the single and batched effective-price
+/// lookups. The model predicate is a positional `?2` placeholder; the batched
+/// variant expands it to an `IN (...)` clause over the same column list.
+const PRICE_OBSERVATION_FOR_MODEL_SQL: &str = "\
+SELECT s.source, s.source_kind, o.scope, o.provider_key, o.model_id, \
+       o.input_price, o.output_price, o.cache_read_price, o.cache_write_price, \
+       o.reasoning_price, o.input_audio_price, o.output_audio_price, o.request_price, \
+       o.as_of, o.valid_from, o.valid_until, s.fetched_at \
+FROM price_observations o \
+JOIN pricing_snapshots s ON s.id = o.snapshot_id \
+WHERE s.active = 1 AND (s.source_kind = 'manual' OR s.fetched_at >= ?1) \
+  AND lower(o.model_id) = ?2 \
+  AND (o.valid_from IS NULL OR o.valid_from <= ?3) \
+  AND (o.valid_until IS NULL OR o.valid_until > ?3)";
+
+/// Shared selection logic behind [`RoutingStore::effective_price`] and
+/// [`RoutingStore::effective_prices`]. Callers supply the catalog row and the
+/// fresh price observations for the requested model (plus its canonical
+/// fallback, when configured); ordering, scope filtering, and fallback
+/// decisions all happen here so the single and batched paths can never
+/// diverge.
+#[allow(clippy::too_many_arguments)]
+fn select_effective_price(
+    runtime_provider: &str,
+    profile_key: Option<&str>,
+    model: &str,
+    canonical_model: Option<&str>,
+    catalog: Option<(Option<f64>, Option<f64>, i64)>,
+    target_observations: Vec<PriceObservation>,
+    canonical_observations: Vec<PriceObservation>,
+) -> Option<EffectivePrice> {
+    let mut target_candidates = target_observations
+        .into_iter()
+        .filter(|observation| {
+            (observation.scope == PriceScope::RuntimeProvider
+                && observation
+                    .provider_key
+                    .as_deref()
+                    .is_some_and(|key| key.eq_ignore_ascii_case(runtime_provider)))
+                || (observation.scope == PriceScope::ProviderProfile
+                    && profile_key.is_some_and(|key| {
+                        observation
+                            .provider_key
+                            .as_deref()
+                            .is_some_and(|value| value.eq_ignore_ascii_case(key))
+                    }))
+        })
+        .collect::<Vec<_>>();
+
+    if let Some((Some(input), Some(output), refreshed_at)) = catalog {
+        target_candidates.push(PriceObservation {
+            source: format!("catalog:{runtime_provider}"),
+            source_kind: PriceSourceKind::ProviderCatalog,
+            scope: PriceScope::RuntimeProvider,
+            provider_key: Some(runtime_provider.to_owned()),
+            model_id: model.to_owned(),
+            rates: crate::pricing::PriceRates {
+                input_price_per_million: Some(input),
+                output_price_per_million: Some(output),
+                ..crate::pricing::PriceRates::default()
+            },
+            fetched_at: Some(refreshed_at),
+            as_of: None,
+            valid_from: None,
+            valid_until: None,
+            attribution: None,
+        });
+    }
+
+    target_candidates.retain(|observation| observation.rates.is_complete());
+    target_candidates.sort_by(|left, right| {
+        let left_target = u8::from(left.scope != PriceScope::RuntimeProvider);
+        let right_target = u8::from(right.scope != PriceScope::RuntimeProvider);
+        left_target
+            .cmp(&right_target)
+            .then_with(|| {
+                left.source_kind
+                    .fallback_priority()
+                    .cmp(&right.source_kind.fallback_priority())
+            })
+            .then_with(|| right.fetched_at.cmp(&left.fetched_at))
+            .then_with(|| left.source.cmp(&right.source))
+    });
+    if let Some(observation) = target_candidates.first() {
+        return EffectivePrice::from_observation(observation, false);
+    }
+
+    let canonical_model = canonical_model?;
+    let (canonical_provider, _) = canonical_model.split_once('/')?;
+    let mut canonical_candidates = canonical_observations;
+    canonical_candidates.retain(|observation| {
+        observation.rates.is_complete()
+            && observation
+                .provider_key
+                .as_deref()
+                .is_some_and(|key| key.eq_ignore_ascii_case(canonical_provider))
+    });
+    canonical_candidates.sort_by(|left, right| {
+        left.source_kind
+            .fallback_priority()
+            .cmp(&right.source_kind.fallback_priority())
+            .then_with(|| right.fetched_at.cmp(&left.fetched_at))
+            .then_with(|| left.source.cmp(&right.source))
+    });
+    canonical_candidates
+        .first()
+        .and_then(|observation| EffectivePrice::from_observation(observation, true))
+}
+
+impl RoutingStore {
+    /// Resolve effective prices for many (provider, model) pairs with a
+    /// bounded number of SQL statements instead of the per-model queries
+    /// [`RoutingStore::effective_price`] issues. Selection semantics are
+    /// identical: each request is resolved through [`select_effective_price`]
+    /// using the same catalog rows and price observations the single lookup
+    /// would fetch, so results are equivalent for any mix of catalog,
+    /// profile, manual, and canonical fallback prices.
+    pub fn effective_prices(
+        &self,
+        requests: &[EffectivePriceRequest],
+        max_age_seconds: u64,
+    ) -> Result<BTreeMap<(String, String), EffectivePrice>, RoutingError> {
+        let mut prices = BTreeMap::new();
+        if requests.is_empty() {
+            return Ok(prices);
+        }
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let now = epoch_seconds();
+        let cutoff = now.saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX));
+
+        let mut catalog_pairs = BTreeSet::new();
+        let mut observation_ids = BTreeSet::new();
+        let mut canonical_ids: Vec<Option<String>> = Vec::with_capacity(requests.len());
+        for request in requests {
+            let model_id = normalize_price_id(&request.model);
+            catalog_pairs.insert((request.runtime_provider.clone(), model_id.clone()));
+            observation_ids.insert(model_id);
+            let canonical_id = request
+                .canonical_model
+                .as_deref()
+                .and_then(|value| value.split_once('/'))
+                .map(|(_, id)| normalize_price_id(id));
+            if let Some(canonical_id) = &canonical_id {
+                observation_ids.insert(canonical_id.clone());
+            }
+            canonical_ids.push(canonical_id);
+        }
+
+        // One statement covers every request's catalog row. Duplicate
+        // (provider, normalized model) pairs are deduplicated, and the first
+        // row wins per pair, mirroring the single lookup's `query_row`.
+        let pair_clause = catalog_pairs
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let offset = 2 + 2 * index;
+                format!("(provider = ?{offset} AND lower(model) = ?{})", offset + 1)
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let mut catalog_by_key = BTreeMap::new();
+        {
+            let sql = format!(
+                "SELECT provider, lower(model), input_price_per_million, \
+                        output_price_per_million, refreshed_at \
+                 FROM catalog_models WHERE refreshed_at >= ?1 AND ({pair_clause})"
+            );
+            let mut params: Vec<rusqlite::types::Value> =
+                Vec::with_capacity(1 + catalog_pairs.len() * 2);
+            params.push(rusqlite::types::Value::Integer(cutoff));
+            for (provider, model_id) in &catalog_pairs {
+                params.push(rusqlite::types::Value::Text(provider.clone()));
+                params.push(rusqlite::types::Value::Text(model_id.clone()));
+            }
+            let mut statement = connection.prepare(&sql)?;
+            let mut rows = statement.query(params_from_iter(params))?;
+            while let Some(row) = rows.next()? {
+                let key = (row.get::<_, String>(0)?, row.get::<_, String>(1)?);
+                catalog_by_key.entry(key).or_insert((
+                    row.get::<_, Option<f64>>(2)?,
+                    row.get::<_, Option<f64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ));
+            }
+        }
+
+        // One statement fetches every requested model's observations,
+        // including canonical fallbacks, grouped by normalized model id.
+        let id_count = observation_ids.len();
+        let placeholders = (2..=id_count + 1)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut observations_by_id: BTreeMap<String, Vec<PriceObservation>> = BTreeMap::new();
+        {
+            let sql = format!(
+                "SELECT s.source, s.source_kind, o.scope, o.provider_key, o.model_id, \
+                        o.input_price, o.output_price, o.cache_read_price, o.cache_write_price, \
+                        o.reasoning_price, o.input_audio_price, o.output_audio_price, \
+                        o.request_price, o.as_of, o.valid_from, o.valid_until, s.fetched_at \
+                 FROM price_observations o \
+                 JOIN pricing_snapshots s ON s.id = o.snapshot_id \
+                 WHERE s.active = 1 AND (s.source_kind = 'manual' OR s.fetched_at >= ?1) \
+                   AND lower(o.model_id) IN ({placeholders}) \
+                   AND (o.valid_from IS NULL OR o.valid_from <= ?{}) \
+                   AND (o.valid_until IS NULL OR o.valid_until > ?{})",
+                id_count + 2,
+                id_count + 2,
+            );
+            let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(id_count + 3);
+            params.push(rusqlite::types::Value::Integer(cutoff));
+            params.extend(
+                observation_ids
+                    .iter()
+                    .map(|id| rusqlite::types::Value::Text(id.clone())),
+            );
+            params.push(rusqlite::types::Value::Integer(now));
+            let mut statement = connection.prepare(&sql)?;
+            let mut rows = statement.query(params_from_iter(params))?;
+            while let Some(row) = rows.next()? {
+                let observation = price_observation_from_row(row)?;
+                observations_by_id
+                    .entry(normalize_price_id(&observation.model_id))
+                    .or_default()
+                    .push(observation);
+            }
+        }
+
+        for (index, request) in requests.iter().enumerate() {
+            let model_id = normalize_price_id(&request.model);
+            let catalog = catalog_by_key
+                .get(&(request.runtime_provider.clone(), model_id.clone()))
+                .copied();
+            let target_observations = observations_by_id
+                .get(&model_id)
+                .cloned()
+                .unwrap_or_default();
+            let canonical_observations = canonical_ids[index]
+                .as_deref()
+                .and_then(|id| observations_by_id.get(id))
+                .cloned()
+                .unwrap_or_default();
+            if let Some(price) = select_effective_price(
+                &request.runtime_provider,
+                request.profile_key.as_deref(),
+                &request.model,
+                request.canonical_model.as_deref(),
+                catalog,
+                target_observations,
+                canonical_observations,
+            ) {
+                prices.insert(
+                    (request.runtime_provider.clone(), request.model.clone()),
+                    price,
+                );
+            }
+        }
+        Ok(prices)
     }
 }
 
@@ -3792,6 +3980,269 @@ mod tests {
             .expect("resolve")
             .expect("active pricing preserved");
         assert_eq!(price.output_price_per_million, 2.0);
+    }
+
+    #[test]
+    fn batched_effective_prices_match_single_lookups() {
+        let store = RoutingStore::open(None).expect("store");
+        let now = super::epoch_seconds();
+        // Complete catalog rows for two runtime models.
+        store
+            .replace_catalog(
+                "runtime",
+                &[
+                    CatalogRecord {
+                        model: "target-a".to_owned(),
+                        access_kind: AccessKind::Paid,
+                        context_length: None,
+                        supports_tools: None,
+                        supports_vision: None,
+                        supports_structured_output: None,
+                        input_price_per_million: Some(0.0),
+                        output_price_per_million: Some(0.0),
+                    },
+                    CatalogRecord {
+                        model: "target-b".to_owned(),
+                        access_kind: AccessKind::Paid,
+                        context_length: None,
+                        supports_tools: None,
+                        supports_vision: None,
+                        supports_structured_output: None,
+                        input_price_per_million: Some(5.0),
+                        output_price_per_million: Some(9.0),
+                    },
+                ],
+            )
+            .expect("catalog");
+        // A manual runtime observation beats the catalog price for target-a.
+        store
+            .replace_pricing(
+                "manual",
+                PriceSourceKind::Manual,
+                "fixture",
+                &[PriceObservation {
+                    source: "manual".to_owned(),
+                    source_kind: PriceSourceKind::Manual,
+                    scope: PriceScope::RuntimeProvider,
+                    provider_key: Some("runtime".to_owned()),
+                    model_id: "target-a".to_owned(),
+                    rates: PriceRates {
+                        input_price_per_million: Some(2.0),
+                        output_price_per_million: Some(4.0),
+                        ..PriceRates::default()
+                    },
+                    fetched_at: Some(now),
+                    as_of: None,
+                    valid_from: None,
+                    valid_until: None,
+                    attribution: None,
+                }],
+            )
+            .expect("manual pricing");
+        // A profile fallback for a model with no catalog row.
+        store
+            .replace_pricing(
+                "models.dev",
+                PriceSourceKind::ModelsDev,
+                "fixture",
+                &[profile_price("profile", "target-c", 7.0, 11.0)],
+            )
+            .expect("profile pricing");
+        // A canonical fallback for an alias with no target price.
+        store
+            .replace_pricing(
+                "manual-canonical",
+                PriceSourceKind::Manual,
+                "fixture",
+                &[PriceObservation {
+                    source: "manual-canonical".to_owned(),
+                    source_kind: PriceSourceKind::Manual,
+                    scope: PriceScope::Canonical,
+                    provider_key: Some("canonical".to_owned()),
+                    model_id: "model".to_owned(),
+                    rates: PriceRates {
+                        input_price_per_million: Some(3.0),
+                        output_price_per_million: Some(6.0),
+                        ..PriceRates::default()
+                    },
+                    fetched_at: Some(now),
+                    as_of: None,
+                    valid_from: None,
+                    valid_until: None,
+                    attribution: None,
+                }],
+            )
+            .expect("canonical pricing");
+
+        let requests = vec![
+            super::EffectivePriceRequest {
+                runtime_provider: "runtime".to_owned(),
+                profile_key: Some("profile".to_owned()),
+                model: "target-a".to_owned(),
+                canonical_model: None,
+            },
+            super::EffectivePriceRequest {
+                runtime_provider: "runtime".to_owned(),
+                profile_key: Some("profile".to_owned()),
+                model: "target-b".to_owned(),
+                canonical_model: None,
+            },
+            super::EffectivePriceRequest {
+                runtime_provider: "other".to_owned(),
+                profile_key: Some("profile".to_owned()),
+                model: "target-c".to_owned(),
+                canonical_model: None,
+            },
+            super::EffectivePriceRequest {
+                runtime_provider: "runtime".to_owned(),
+                profile_key: None,
+                model: "alias".to_owned(),
+                canonical_model: Some("canonical/model".to_owned()),
+            },
+            super::EffectivePriceRequest {
+                runtime_provider: "runtime".to_owned(),
+                profile_key: None,
+                model: "missing".to_owned(),
+                canonical_model: None,
+            },
+        ];
+        let batched = store.effective_prices(&requests, 60).expect("batched");
+        assert_eq!(batched.len(), 4, "four of five requests resolve");
+        for request in &requests {
+            let single = store
+                .effective_price(
+                    &request.runtime_provider,
+                    request.profile_key.as_deref(),
+                    &request.model,
+                    request.canonical_model.as_deref(),
+                    60,
+                )
+                .expect("single lookup");
+            let batched_entry =
+                batched.get(&(request.runtime_provider.clone(), request.model.clone()));
+            match (&single, batched_entry) {
+                (None, None) => {}
+                (Some(expected), Some(actual)) => {
+                    assert_eq!(
+                        actual.input_price_per_million,
+                        expected.input_price_per_million
+                    );
+                    assert_eq!(
+                        actual.output_price_per_million,
+                        expected.output_price_per_million
+                    );
+                    assert_eq!(actual.source, expected.source);
+                    assert_eq!(actual.estimated, expected.estimated);
+                }
+                (expected, actual) => panic!(
+                    "mismatch for {}:{} single={expected:?} batched={actual:?}",
+                    request.runtime_provider, request.model
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn batched_effective_prices_share_canonical_observation_rows() {
+        // One request's canonical fallback doubles as another request's target
+        // model; the batched resolver must not consume shared rows and must
+        // match the single-lookup outcome for both requests.
+        let store = RoutingStore::open(None).expect("store");
+        let now = super::epoch_seconds();
+        store
+            .replace_pricing(
+                "manual",
+                PriceSourceKind::Manual,
+                "fixture",
+                &[
+                    PriceObservation {
+                        source: "manual".to_owned(),
+                        source_kind: PriceSourceKind::Manual,
+                        scope: PriceScope::Canonical,
+                        provider_key: Some("shared".to_owned()),
+                        model_id: "shared-model".to_owned(),
+                        rates: PriceRates {
+                            input_price_per_million: Some(1.5),
+                            output_price_per_million: Some(2.5),
+                            ..PriceRates::default()
+                        },
+                        fetched_at: Some(now),
+                        as_of: None,
+                        valid_from: None,
+                        valid_until: None,
+                        attribution: None,
+                    },
+                    PriceObservation {
+                        source: "manual".to_owned(),
+                        source_kind: PriceSourceKind::Manual,
+                        scope: PriceScope::RuntimeProvider,
+                        provider_key: Some("shared".to_owned()),
+                        model_id: "shared-model".to_owned(),
+                        rates: PriceRates {
+                            input_price_per_million: Some(8.0),
+                            output_price_per_million: Some(12.0),
+                            ..PriceRates::default()
+                        },
+                        fetched_at: Some(now),
+                        as_of: None,
+                        valid_from: None,
+                        valid_until: None,
+                        attribution: None,
+                    },
+                ],
+            )
+            .expect("pricing");
+        let requests = vec![
+            super::EffectivePriceRequest {
+                runtime_provider: "runtime".to_owned(),
+                profile_key: None,
+                model: "alias".to_owned(),
+                canonical_model: Some("shared/shared-model".to_owned()),
+            },
+            super::EffectivePriceRequest {
+                runtime_provider: "shared".to_owned(),
+                profile_key: None,
+                model: "shared-model".to_owned(),
+                canonical_model: None,
+            },
+        ];
+        let batched = store.effective_prices(&requests, 60).expect("batched");
+        assert_eq!(batched.len(), 2);
+        let first = batched
+            .get(&("runtime".to_owned(), "alias".to_owned()))
+            .expect("alias resolves via canonical fallback");
+        assert_eq!(first.input_price_per_million, 1.5);
+        assert!(first.estimated);
+        let second = batched
+            .get(&("shared".to_owned(), "shared-model".to_owned()))
+            .expect("shared model resolves as its own runtime target");
+        assert_eq!(second.input_price_per_million, 8.0);
+        assert!(!second.estimated);
+        for request in &requests {
+            let single = store
+                .effective_price(
+                    &request.runtime_provider,
+                    request.profile_key.as_deref(),
+                    &request.model,
+                    request.canonical_model.as_deref(),
+                    60,
+                )
+                .expect("single lookup");
+            let batched_entry =
+                batched.get(&(request.runtime_provider.clone(), request.model.clone()));
+            let expected = single.as_ref().expect("single resolves");
+            let actual = batched_entry.expect("batched resolves");
+            assert_eq!(
+                actual.input_price_per_million,
+                expected.input_price_per_million
+            );
+            assert_eq!(
+                actual.output_price_per_million,
+                expected.output_price_per_million
+            );
+            assert_eq!(actual.source, expected.source);
+            assert_eq!(actual.estimated, expected.estimated);
+        }
     }
 
     #[test]
