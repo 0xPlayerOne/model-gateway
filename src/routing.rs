@@ -2091,6 +2091,10 @@ pub struct EffectivePriceRequest {
     pub canonical_model: Option<String>,
 }
 
+/// A minimal price-observation row shape used by the batched incomplete
+/// observation check: scope, provider key, and input/output rates.
+type IncompleteObservationRow = (String, Option<String>, Option<f64>, Option<f64>);
+
 /// Price observation columns shared by the single and batched effective-price
 /// lookups. The model predicate is a positional `?2` placeholder; the batched
 /// variant expands it to an `IN (...)` clause over the same column list.
@@ -2349,6 +2353,126 @@ impl RoutingStore {
             }
         }
         Ok(prices)
+    }
+
+    /// Report which (provider, model) requests have at least one applicable
+    /// price observation missing input or output rates. Mirrors
+    /// [`RoutingStore::has_incomplete_price_observation`] for many requests
+    /// with a bounded number of SQL statements instead of a per-request
+    /// query, using the same scope/provider matching per request.
+    pub fn incomplete_price_observations(
+        &self,
+        requests: &[EffectivePriceRequest],
+        max_age_seconds: u64,
+    ) -> Result<BTreeSet<(String, String)>, RoutingError> {
+        let mut incomplete = BTreeSet::new();
+        if requests.is_empty() {
+            return Ok(incomplete);
+        }
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let now = epoch_seconds();
+        let cutoff = now.saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX));
+
+        // Collect every model id (targets plus canonical fallbacks) so one
+        // statement serves the whole batch.
+        let mut observation_ids = BTreeSet::new();
+        let mut canonical_ids: Vec<Option<String>> = Vec::with_capacity(requests.len());
+        for request in requests {
+            observation_ids.insert(normalize_price_id(&request.model));
+            let canonical_id = request
+                .canonical_model
+                .as_deref()
+                .and_then(|value| value.split_once('/'))
+                .map(|(_, id)| normalize_price_id(id));
+            if let Some(canonical_id) = &canonical_id {
+                observation_ids.insert(canonical_id.clone());
+            }
+            canonical_ids.push(canonical_id);
+        }
+
+        // One statement fetches every requested model's observation rows;
+        // scope/provider filtering happens in memory per request below.
+        let id_count = observation_ids.len();
+        let placeholders = (2..=id_count + 1)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut rows_by_id: BTreeMap<String, Vec<IncompleteObservationRow>> = BTreeMap::new();
+        {
+            let sql = format!(
+                "SELECT o.model_id, o.scope, o.provider_key, o.input_price, o.output_price \
+                 FROM price_observations o \
+                 JOIN pricing_snapshots s ON s.id = o.snapshot_id \
+                 WHERE s.active = 1 AND (s.source_kind = 'manual' OR s.fetched_at >= ?1) \
+                   AND lower(o.model_id) IN ({placeholders}) \
+                   AND (o.valid_from IS NULL OR o.valid_from <= ?{}) \
+                   AND (o.valid_until IS NULL OR o.valid_until > ?{})",
+                id_count + 2,
+                id_count + 2,
+            );
+            let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(id_count + 3);
+            params.push(rusqlite::types::Value::Integer(cutoff));
+            params.extend(
+                observation_ids
+                    .iter()
+                    .map(|id| rusqlite::types::Value::Text(id.clone())),
+            );
+            params.push(rusqlite::types::Value::Integer(now));
+            let mut statement = connection.prepare(&sql)?;
+            let mut rows = statement.query(params_from_iter(params))?;
+            while let Some(row) = rows.next()? {
+                rows_by_id
+                    .entry(normalize_price_id(&row.get::<_, String>(0)?))
+                    .or_default()
+                    .push((
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                        row.get::<_, Option<f64>>(4)?,
+                    ));
+            }
+        }
+
+        for (index, request) in requests.iter().enumerate() {
+            let canonical_provider = request
+                .canonical_model
+                .as_deref()
+                .and_then(|value| value.split_once('/'))
+                .map(|(provider, _)| provider);
+            let model_has_incomplete = |model_id: &str| -> bool {
+                rows_by_id.get(model_id).is_some_and(|rows| {
+                    rows.iter().any(|(scope, provider_key, input, output)| {
+                        let applies = match scope.as_str() {
+                            "runtime_provider" => provider_key.as_deref().is_some_and(|key| {
+                                key.eq_ignore_ascii_case(&request.runtime_provider)
+                            }),
+                            "provider_profile" => {
+                                request.profile_key.as_deref().is_some_and(|profile| {
+                                    provider_key
+                                        .as_deref()
+                                        .is_some_and(|key| key.eq_ignore_ascii_case(profile))
+                                })
+                            }
+                            "canonical" => canonical_provider.is_some_and(|provider| {
+                                provider_key
+                                    .as_deref()
+                                    .is_some_and(|key| key.eq_ignore_ascii_case(provider))
+                            }),
+                            _ => false,
+                        };
+                        applies && (input.is_none() || output.is_none())
+                    })
+                })
+            };
+            let target_incomplete = model_has_incomplete(&normalize_price_id(&request.model));
+            let canonical_incomplete = canonical_ids[index]
+                .as_deref()
+                .is_some_and(model_has_incomplete);
+            if target_incomplete || canonical_incomplete {
+                incomplete.insert((request.runtime_provider.clone(), request.model.clone()));
+            }
+        }
+        Ok(incomplete)
     }
 }
 
@@ -4243,6 +4367,139 @@ mod tests {
             assert_eq!(actual.source, expected.source);
             assert_eq!(actual.estimated, expected.estimated);
         }
+    }
+
+    #[test]
+    fn batched_incomplete_observations_match_single_lookups() {
+        let store = RoutingStore::open(None).expect("store");
+        let now = super::epoch_seconds();
+        // An incomplete runtime observation (missing output price).
+        store
+            .replace_pricing(
+                "manual",
+                PriceSourceKind::Manual,
+                "fixture",
+                &[PriceObservation {
+                    source: "manual".to_owned(),
+                    source_kind: PriceSourceKind::Manual,
+                    scope: PriceScope::RuntimeProvider,
+                    provider_key: Some("runtime".to_owned()),
+                    model_id: "broken-a".to_owned(),
+                    rates: PriceRates {
+                        input_price_per_million: Some(1.0),
+                        output_price_per_million: None,
+                        ..PriceRates::default()
+                    },
+                    fetched_at: Some(now),
+                    as_of: None,
+                    valid_from: None,
+                    valid_until: None,
+                    attribution: None,
+                }],
+            )
+            .expect("incomplete runtime pricing");
+        // An incomplete canonical fallback for an alias.
+        store
+            .replace_pricing(
+                "manual-canonical",
+                PriceSourceKind::Manual,
+                "fixture",
+                &[PriceObservation {
+                    source: "manual-canonical".to_owned(),
+                    source_kind: PriceSourceKind::Manual,
+                    scope: PriceScope::Canonical,
+                    provider_key: Some("canonical".to_owned()),
+                    model_id: "canonical-model".to_owned(),
+                    rates: PriceRates {
+                        input_price_per_million: None,
+                        output_price_per_million: Some(6.0),
+                        ..PriceRates::default()
+                    },
+                    fetched_at: Some(now),
+                    as_of: None,
+                    valid_from: None,
+                    valid_until: None,
+                    attribution: None,
+                }],
+            )
+            .expect("incomplete canonical pricing");
+        // A complete observation that must NOT be reported.
+        store
+            .replace_pricing(
+                "manual-complete",
+                PriceSourceKind::Manual,
+                "fixture",
+                &[PriceObservation {
+                    source: "manual-complete".to_owned(),
+                    source_kind: PriceSourceKind::Manual,
+                    scope: PriceScope::RuntimeProvider,
+                    provider_key: Some("runtime".to_owned()),
+                    model_id: "healthy".to_owned(),
+                    rates: PriceRates {
+                        input_price_per_million: Some(2.0),
+                        output_price_per_million: Some(3.0),
+                        ..PriceRates::default()
+                    },
+                    fetched_at: Some(now),
+                    as_of: None,
+                    valid_from: None,
+                    valid_until: None,
+                    attribution: None,
+                }],
+            )
+            .expect("complete pricing");
+        let requests = vec![
+            super::EffectivePriceRequest {
+                runtime_provider: "runtime".to_owned(),
+                profile_key: None,
+                model: "broken-a".to_owned(),
+                canonical_model: None,
+            },
+            super::EffectivePriceRequest {
+                runtime_provider: "runtime".to_owned(),
+                profile_key: None,
+                model: "alias".to_owned(),
+                canonical_model: Some("canonical/canonical-model".to_owned()),
+            },
+            super::EffectivePriceRequest {
+                runtime_provider: "runtime".to_owned(),
+                profile_key: None,
+                model: "healthy".to_owned(),
+                canonical_model: None,
+            },
+            super::EffectivePriceRequest {
+                runtime_provider: "runtime".to_owned(),
+                profile_key: None,
+                model: "missing".to_owned(),
+                canonical_model: None,
+            },
+        ];
+        let batched = store
+            .incomplete_price_observations(&requests, 60)
+            .expect("batched");
+        for request in &requests {
+            let single = store
+                .has_incomplete_price_observation(
+                    &request.runtime_provider,
+                    request.profile_key.as_deref(),
+                    &request.model,
+                    request.canonical_model.as_deref(),
+                    60,
+                )
+                .expect("single lookup");
+            let key = (request.runtime_provider.clone(), request.model.clone());
+            let expected = single.then_some(key.clone());
+            let actual = batched.get(&key).cloned();
+            assert_eq!(
+                actual, expected,
+                "mismatch for {}:{}",
+                request.runtime_provider, request.model
+            );
+        }
+        assert!(batched.contains(&("runtime".to_owned(), "broken-a".to_owned())));
+        assert!(batched.contains(&("runtime".to_owned(), "alias".to_owned())));
+        assert!(!batched.contains(&("runtime".to_owned(), "healthy".to_owned())));
+        assert!(!batched.contains(&("runtime".to_owned(), "missing".to_owned())));
     }
 
     #[test]

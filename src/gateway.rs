@@ -338,45 +338,47 @@ pub fn report_pricing_coverage(
     routing: &RoutingStore,
     provider_filter: Option<&str>,
 ) -> Result<Vec<PricingCoverageReport>, RoutingError> {
-    let offerings = routing.all_candidates(config.server.catalog_max_age_seconds)?;
-    offerings
+    let max_age = config.server.pricing_max_age_seconds;
+    let offerings: Vec<CatalogOffering> = routing
+        .all_candidates(config.server.catalog_max_age_seconds)?
         .into_iter()
         .filter(|offering| {
             provider_filter.is_none_or(|provider| provider == offering.provider)
                 && !is_provider_auto_route(&offering.model)
         })
+        .collect();
+
+    // Resolve every offering's effective price and incomplete-observation
+    // status with a bounded number of SQL statements instead of a per-model
+    // query loop.
+    let requests: Vec<EffectivePriceRequest> = offerings
+        .iter()
         .map(|offering| {
             let provider_config = config.providers.get(&offering.provider);
-            let profile_key = provider_config.and_then(|provider| {
-                provider
-                    .pricing_profile
-                    .as_deref()
-                    .or_else(|| provider.profile.and_then(BuiltinProvider::models_dev_key))
-            });
-            let canonical = provider_config.and_then(|provider| {
-                provider
-                    .model_mappings
-                    .get(&offering.model)
-                    .map(String::as_str)
-            });
-            let effective = routing.effective_price(
-                &offering.provider,
-                profile_key,
-                &offering.model,
-                canonical,
-                config.server.pricing_max_age_seconds,
-            )?;
-            let incomplete_observation = if effective.is_none() {
-                routing.has_incomplete_price_observation(
-                    &offering.provider,
-                    profile_key,
-                    &offering.model,
-                    canonical,
-                    config.server.pricing_max_age_seconds,
-                )?
-            } else {
-                false
-            };
+            EffectivePriceRequest {
+                runtime_provider: offering.provider.clone(),
+                profile_key: provider_config.and_then(|provider| {
+                    provider
+                        .pricing_profile
+                        .as_deref()
+                        .or_else(|| provider.profile.and_then(BuiltinProvider::models_dev_key))
+                        .map(ToOwned::to_owned)
+                }),
+                model: offering.model.clone(),
+                canonical_model: provider_config
+                    .and_then(|provider| provider.model_mappings.get(&offering.model).cloned()),
+            }
+        })
+        .collect();
+    let prices = routing.effective_prices(&requests, max_age)?;
+    let incomplete = routing.incomplete_price_observations(&requests, max_age)?;
+
+    offerings
+        .into_iter()
+        .map(|offering| {
+            let key = (offering.provider.clone(), offering.model.clone());
+            let effective = prices.get(&key);
+            let incomplete_observation = effective.is_none() && incomplete.contains(&key);
             let direct_complete = offering.input_price_per_million.is_some()
                 && offering.output_price_per_million.is_some();
             let direct_incomplete = offering.input_price_per_million.is_some()
@@ -395,20 +397,16 @@ pub fn report_pricing_coverage(
                 catalog_input_price_per_million: offering.input_price_per_million,
                 catalog_output_price_per_million: offering.output_price_per_million,
                 effective_input_price_per_million: effective
-                    .as_ref()
                     .map(|price| price.input_price_per_million),
                 effective_output_price_per_million: effective
-                    .as_ref()
                     .map(|price| price.output_price_per_million),
                 effective_cache_read_price_per_million: effective
-                    .as_ref()
                     .and_then(|price| price.cache_read_price_per_million),
                 effective_cache_write_price_per_million: effective
-                    .as_ref()
                     .and_then(|price| price.cache_write_price_per_million),
-                effective_source: effective.as_ref().map(|price| price.source.clone()),
-                effective_scope: effective.as_ref().map(|price| price.scope),
-                estimated: effective.as_ref().map(|price| price.estimated),
+                effective_source: effective.map(|price| price.source.clone()),
+                effective_scope: effective.map(|price| price.scope),
+                estimated: effective.map(|price| price.estimated),
             })
         })
         .collect()
