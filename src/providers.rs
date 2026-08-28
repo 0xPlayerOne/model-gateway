@@ -539,10 +539,17 @@ fn split_tokens(normalized: &str) -> Vec<&str> {
         .collect()
 }
 
-pub fn is_embedding_model(model: &str) -> bool {
+/// Normalizes a model id and classifies it with the given predicate.
+/// Entry points for embedding/audio/image/video/robotics/safety/classifier/
+/// retrieval detection all share this normalize-and-split preamble.
+fn classify_model(model: &str, classify: impl Fn(&str, &[&str]) -> bool) -> bool {
     let normalized = model.to_ascii_lowercase();
     let tokens = split_tokens(&normalized);
-    is_embedding(&normalized, &tokens)
+    classify(&normalized, &tokens)
+}
+
+pub fn is_embedding_model(model: &str) -> bool {
+    classify_model(model, is_embedding)
 }
 
 fn is_embedding(normalized: &str, tokens: &[&str]) -> bool {
@@ -562,9 +569,7 @@ fn is_embedding(normalized: &str, tokens: &[&str]) -> bool {
 
 #[cfg(test)]
 fn is_audio_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    let tokens = split_tokens(&normalized);
-    is_audio(&normalized, &tokens)
+    classify_model(model, is_audio)
 }
 
 fn is_audio(normalized: &str, tokens: &[&str]) -> bool {
@@ -581,9 +586,7 @@ fn is_audio(normalized: &str, tokens: &[&str]) -> bool {
 
 #[cfg(test)]
 fn is_image_gen_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    let tokens = split_tokens(&normalized);
-    is_image_gen(&normalized, &tokens)
+    classify_model(model, is_image_gen)
 }
 
 fn is_image_gen(normalized: &str, tokens: &[&str]) -> bool {
@@ -604,9 +607,7 @@ fn is_image_gen(normalized: &str, tokens: &[&str]) -> bool {
 
 #[cfg(test)]
 fn is_video_gen_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    let tokens = split_tokens(&normalized);
-    is_video_gen(&normalized, &tokens)
+    classify_model(model, is_video_gen)
 }
 
 fn is_video_gen(normalized: &str, tokens: &[&str]) -> bool {
@@ -637,9 +638,7 @@ fn is_ocr(tokens: &[&str]) -> bool {
 /// moved past (e.g. llama2 → llama-3, gemma-2 → gemma-4, phi-3 → phi-4).
 #[cfg(test)]
 fn is_old_generation_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    let tokens = split_tokens(&normalized);
-    is_old_generation(&normalized, &tokens)
+    classify_model(model, is_old_generation)
 }
 
 fn is_old_generation(normalized: &str, tokens: &[&str]) -> bool {
@@ -693,8 +692,7 @@ fn is_old_generation(normalized: &str, tokens: &[&str]) -> bool {
 
 #[cfg(test)]
 fn is_robotics_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    is_robotics(&normalized)
+    classify_model(model, |normalized, _| is_robotics(normalized))
 }
 
 fn is_robotics(normalized: &str) -> bool {
@@ -703,9 +701,7 @@ fn is_robotics(normalized: &str) -> bool {
 
 #[cfg(test)]
 fn is_safety_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    let tokens = split_tokens(&normalized);
-    is_safety(&tokens)
+    classify_model(model, |_, tokens| is_safety(tokens))
 }
 
 fn is_safety(tokens: &[&str]) -> bool {
@@ -716,9 +712,7 @@ fn is_safety(tokens: &[&str]) -> bool {
 
 #[cfg(test)]
 fn is_classifier_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    let tokens = split_tokens(&normalized);
-    is_classifier(&tokens)
+    classify_model(model, |_, tokens| is_classifier(tokens))
 }
 
 fn is_classifier(tokens: &[&str]) -> bool {
@@ -729,9 +723,7 @@ fn is_classifier(tokens: &[&str]) -> bool {
 
 #[cfg(test)]
 fn is_retrieval_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    let tokens = split_tokens(&normalized);
-    is_retrieval(&tokens)
+    classify_model(model, |_, tokens| is_retrieval(tokens))
 }
 
 fn is_retrieval(tokens: &[&str]) -> bool {
@@ -741,20 +733,20 @@ fn is_retrieval(tokens: &[&str]) -> bool {
 }
 
 pub fn is_specialty_model(model: &str) -> bool {
-    let normalized = model.to_ascii_lowercase();
-    let tokens = split_tokens(&normalized);
-    is_embedding(&normalized, &tokens)
-        || is_audio(&normalized, &tokens)
-        || is_image_gen(&normalized, &tokens)
-        || is_video_gen(&normalized, &tokens)
-        || is_reranker(&tokens)
-        || is_moderation(&tokens)
-        || is_ocr(&tokens)
-        || is_safety(&tokens)
-        || is_classifier(&tokens)
-        || is_retrieval(&tokens)
-        || is_robotics(&normalized)
-        || is_old_generation(&normalized, &tokens)
+    classify_model(model, |normalized, tokens| {
+        is_embedding(normalized, tokens)
+            || is_audio(normalized, tokens)
+            || is_image_gen(normalized, tokens)
+            || is_video_gen(normalized, tokens)
+            || is_reranker(tokens)
+            || is_moderation(tokens)
+            || is_ocr(tokens)
+            || is_safety(tokens)
+            || is_classifier(tokens)
+            || is_retrieval(tokens)
+            || is_robotics(normalized)
+            || is_old_generation(normalized, tokens)
+    })
 }
 
 fn number_at(value: &serde_json::Value, key: &str) -> Option<f64> {
