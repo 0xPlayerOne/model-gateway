@@ -25,7 +25,8 @@ concurrency:
 jobs:
   mode:
     name: Mode
-    runs-on: ubuntu-slim
+    if: vars.CI_BILLING_PAUSED != 'true'
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -37,7 +38,7 @@ jobs:
         with:
           persist-credentials: false
           repository: 0xPlayerOne/code-foundry
-          ref: v0.37.1
+          ref: v0.39.0
           path: .github/.code-foundry
           sparse-checkout: |
             src/lib
@@ -57,6 +58,7 @@ jobs:
   validation:
     name: Validation
     needs: mode
+    if: vars.CI_BILLING_PAUSED != 'true'
     # Reusable workflows can only maintain or reduce the caller job's scopes.
     # The audit tier needs security-events: write for CodeQL uploads.
     permissions:
@@ -64,11 +66,11 @@ jobs:
       contents: read
       packages: read
       security-events: write
-    uses: 0xPlayerOne/code-foundry/.github/workflows/validation.yml@v0.37.1
+    uses: 0xPlayerOne/code-foundry/.github/workflows/validation.yml@v0.39.0
     with:
       mode: ${{ needs.mode.outputs.mode }}
       runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: v0.37.1
+      runtime-ref: v0.39.0
       ci-runner: ubuntu-latest
       test-runner: ubuntu-latest
       unit-runner: ubuntu-latest
