@@ -200,11 +200,7 @@ pub fn fingerprint_price_observations(observations: &[PriceObservation]) -> Stri
         digest.update(line.as_bytes());
         digest.update(b"\n");
     }
-    digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::storage::hex(&digest.finalize())
 }
 
 pub(crate) fn fmt_number(value: Option<f64>) -> String {

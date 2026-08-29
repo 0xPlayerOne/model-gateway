@@ -2001,13 +2001,7 @@ async fn load_paid_candidates(
     .map_err(|_| ())?;
 
     let prices = load_effective_prices(state, &offerings).await;
-    let mut benchmark_map = BTreeMap::new();
-    for benchmark in benchmarks {
-        benchmark_map
-            .entry(benchmark.id.clone())
-            .or_insert_with(Vec::new)
-            .push(benchmark);
-    }
+    let benchmark_map = group_benchmarks(benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     Ok(collect_paid_candidates(
         &offerings,
@@ -2042,13 +2036,7 @@ async fn load_free_candidates(
     )
     .map_err(|_| ())?;
 
-    let mut benchmark_map = BTreeMap::new();
-    for benchmark in benchmarks {
-        benchmark_map
-            .entry(benchmark.id.clone())
-            .or_insert_with(Vec::new)
-            .push(benchmark);
-    }
+    let benchmark_map = group_benchmarks(benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let candidates = collect_free_candidates(
         &offerings,
@@ -2159,11 +2147,7 @@ fn catalog_snapshot(
 }
 
 fn digest_hex(digest: impl AsRef<[u8]>) -> String {
-    digest
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::storage::hex(digest.as_ref())
 }
 
 fn catalog_access_name(access: CatalogAccess) -> &'static str {
@@ -2769,6 +2753,26 @@ fn identity_provider_key(provider: &ProviderConfig) -> Option<&str> {
             .profile
             .and_then(|profile| profile.models_dev_key())
     })
+}
+
+fn group_benchmarks(benchmarks: Vec<BenchmarkModel>) -> BTreeMap<String, Vec<BenchmarkModel>> {
+    let mut map = BTreeMap::new();
+    for benchmark in benchmarks {
+        map.entry(benchmark.id.clone())
+            .or_insert_with(Vec::new)
+            .push(benchmark);
+    }
+    map
+}
+
+fn group_benchmarks_ref(benchmarks: &[BenchmarkModel]) -> BTreeMap<String, Vec<BenchmarkModel>> {
+    let mut map = BTreeMap::new();
+    for benchmark in benchmarks {
+        map.entry(benchmark.id.clone())
+            .or_insert_with(Vec::new)
+            .push(benchmark.clone());
+    }
+    map
 }
 
 fn identity_mapping_indexes(routing: &RoutingStore) -> IdentityMappingIndexes {
@@ -4758,13 +4762,7 @@ async fn resolve_auto_free_targets(
         )
     })?;
     let (benchmark_snapshot_id, benchmark_as_of, _) = benchmark_snapshot.unwrap_or((0, 0, None));
-    let mut benchmark_map = BTreeMap::new();
-    for b in &benchmarks {
-        benchmark_map
-            .entry(b.id.clone())
-            .or_insert_with(Vec::new)
-            .push(b.clone());
-    }
+    let benchmark_map = group_benchmarks_ref(&benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let classification = classify(request);
     let requirements = RequestRequirements::from_request(request);

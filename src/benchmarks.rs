@@ -669,11 +669,7 @@ pub fn fingerprint_benchmark_models(models: &[BenchmarkModel]) -> String {
         digest.update(line.as_bytes());
         digest.update(b"\n");
     }
-    digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::storage::hex(&digest.finalize())
 }
 
 fn fmt_score(value: Option<f64>) -> String {

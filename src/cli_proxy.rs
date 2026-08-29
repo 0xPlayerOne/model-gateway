@@ -57,23 +57,18 @@ pub struct CliProxyPaths {
 
 impl CliProxyPaths {
     pub fn discover(config_path: &Path) -> Self {
-        let root = env::var_os("MODEL_GATEWAY_CLI_PROXY_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                config_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join("cli-proxy")
-            });
-        let binary = env::var_os("MODEL_GATEWAY_CLI_PROXY_BINARY")
-            .map(PathBuf::from)
+        let root = env_path("MODEL_GATEWAY_CLI_PROXY_HOME").unwrap_or_else(|| {
+            config_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("cli-proxy")
+        });
+        let binary = env_path("MODEL_GATEWAY_CLI_PROXY_BINARY")
             .unwrap_or_else(|| root.join("bin").join(VERSION).join("cli-proxy-api"));
-        let config = env::var_os("MODEL_GATEWAY_CLI_PROXY_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| root.join("config.yaml"));
-        let auth_dir = env::var_os("MODEL_GATEWAY_CLI_PROXY_AUTH_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| root.join("auth"));
+        let config =
+            env_path("MODEL_GATEWAY_CLI_PROXY_CONFIG").unwrap_or_else(|| root.join("config.yaml"));
+        let auth_dir =
+            env_path("MODEL_GATEWAY_CLI_PROXY_AUTH_DIR").unwrap_or_else(|| root.join("auth"));
         Self {
             root,
             binary,
@@ -81,6 +76,10 @@ impl CliProxyPaths {
             auth_dir,
         }
     }
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    env::var_os(name).map(PathBuf::from)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,13 +369,7 @@ fn release_asset() -> Result<ReleaseAsset, CliProxyError> {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    output
+    crate::storage::hex(bytes)
 }
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), CliProxyError> {
