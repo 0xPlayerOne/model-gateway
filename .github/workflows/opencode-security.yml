@@ -12,8 +12,9 @@ jobs:
   detect:
     name: OpenCode Security / Detect
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      startsWith(github.event.pull_request.head.ref, 'release-please--branches--main')
+      vars.CI_BILLING_PAUSED != 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+      startsWith(github.event.pull_request.head.ref, 'release-please--branches--main'))
     runs-on: ubuntu-slim
     outputs:
       enabled: ${{ steps.detect.outputs.enabled }}
@@ -27,42 +28,25 @@ jobs:
         id: detect
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
-          set -euo pipefail
           enabled=false
           token=false
-          metadata_only=false
-          if [ -f .github/workflows/opencode-security.yml ]; then enabled=true; fi
+          if grep -Eq '^opencode_security:\s*(true|auto)\s*$' .github/code-foundry.yml 2>/dev/null; then enabled=true; fi
           if [ -n "$OPENCODE_API_KEY" ]; then token=true; fi
-          # Release Please PRs normally contain only generated release
-          # metadata. Do not spend a model scan on those files; the source
-          # changes were already scanned on their staging PR.
-          if [ "$EVENT_NAME" = pull_request ] && [ -n "$BASE_SHA" ]; then
-            git fetch --no-tags --depth=1 origin "$BASE_SHA"
-            metadata_only=true
-            while IFS= read -r path; do
-              case "$path" in
-              CHANGELOG.md|Cargo.lock|Cargo.toml|.release-please-manifest.json|docs/openapi.json) ;;
-                *) metadata_only=false; break ;;
-              esac
-            done < <(git diff --name-only "$BASE_SHA" HEAD)
-            if [ "$metadata_only" = true ]; then enabled=false; fi
-          fi
-          echo "OpenCode security enabled=$enabled token=$token metadata_only=$metadata_only"
           echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
           echo "token=$token" >> "$GITHUB_OUTPUT"
 
   scan:
     name: OpenCode Security / Scan
     needs: detect
-    if: needs.detect.outputs.enabled == 'true' && needs.detect.outputs.token == 'true'
+    if: vars.CI_BILLING_PAUSED != 'true' && needs.detect.outputs.enabled == 'true' && needs.detect.outputs.token == 'true'
     uses: 0xPlayerOne/opencode-security/.github/workflows/opencode-security.yml@b3dce823322672b285fbe99b870ea984c01826cb # main
     with:
-      # source_ref selects the scanner revision; the scan target stays the model-gateway PR head checkout.
+      # This is the scanner checkout ref, not the consumer PR ref. The
+      # reusable workflow already checks out the consumer repository.
       source_ref: b3dce823322672b285fbe99b870ea984c01826cb
       runner: ubuntu-latest
+      model: opencode-go/muse-spark-1.2-contributor
       mode: standard
       fail_on_severity: high
       max_cost_usd: 1

@@ -18,7 +18,8 @@ permissions:
 jobs:
   draft-pr:
     name: Draft PR
-    uses: 0xPlayerOne/code-foundry/.github/workflows/draft-pr.yml@v0.37.1
+    if: vars.CI_BILLING_PAUSED != 'true'
+    uses: 0xPlayerOne/code-foundry/.github/workflows/draft-pr.yml@v0.39.0
     with:
       runner: ubuntu-slim
       base: main
