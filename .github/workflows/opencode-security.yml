@@ -40,7 +40,7 @@ jobs:
     name: OpenCode Security / Scan
     needs: detect
     if: vars.CI_BILLING_PAUSED != 'true' && needs.detect.outputs.enabled == 'true' && needs.detect.outputs.token == 'true'
-    uses: 0xPlayerOne/opencode-security/.github/workflows/opencode-security.yml@b3dce823322672b285fbe99b870ea984c01826cb # main
+    uses: 0xPlayerOne/opencode-security/.github/workflows/opencode-security.yml@137698ef3545204af8fad00fc8bd64d663c8122e # main
     with:
       # This is the scanner checkout ref, not the consumer PR ref. The
       # reusable workflow already checks out the consumer repository.
