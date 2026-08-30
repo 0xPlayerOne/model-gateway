@@ -1388,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "model-gateway"
-version = "0.14.17"
+version = "0.14.18"
 dependencies = [
  "async-stream",
  "axum",
