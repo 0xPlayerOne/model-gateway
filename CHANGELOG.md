@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.16](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.15...v0.14.16) (2026-08-30)
+
+
+### Maintenance
+
+* **deps:** bump the github-actions group with 2 updates ([#205](https://github.com/0xPlayerOne/model-gateway/issues/205)) ([85e351f](https://github.com/0xPlayerOne/model-gateway/commit/85e351f7fb8525491beeb178192e98411fe4a618))
+
 ## [0.14.15](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.14...v0.14.15) (2026-08-30)
 
 
