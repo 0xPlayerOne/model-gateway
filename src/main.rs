@@ -1363,7 +1363,7 @@ fn combined_update_error(
         Some(rollback) => {
             format!("{context} failed; rollback also failed: {primary}; {rollback}")
         }
-        None => format!("{context} failed: {primary}"),
+        None => primary.to_string(),
     }
 }
 
