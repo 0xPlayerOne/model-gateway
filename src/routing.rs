@@ -16,7 +16,7 @@ use crate::identity::IdentityImport;
 use crate::pricing::{
     EffectivePrice, PriceObservation, PriceScope, PriceSourceKind, normalize_price_id,
 };
-use crate::providers::{AccountLimit, is_specialty_model};
+use crate::providers::{AccountLimit, CatalogModel, is_specialty_model};
 use crate::storage::set_unix_mode;
 
 #[derive(Debug, Error)]
@@ -135,6 +135,21 @@ pub struct CatalogRecord {
     pub supports_structured_output: Option<bool>,
     pub input_price_per_million: Option<f64>,
     pub output_price_per_million: Option<f64>,
+}
+
+impl CatalogRecord {
+    pub fn from_provider_model(provider: &ProviderConfig, model: &CatalogModel) -> Self {
+        Self {
+            access_kind: classify_access(provider, &model.id, model.zero_priced),
+            model: model.id.clone(),
+            context_length: model.context_length,
+            supports_tools: model.supports_tools,
+            supports_vision: model.supports_vision,
+            supports_structured_output: model.supports_structured_output,
+            input_price_per_million: model.input_price_per_million,
+            output_price_per_million: model.output_price_per_million,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1337,26 +1352,49 @@ impl RoutingStore {
         model: &str,
         access_kind: AccessKind,
     ) -> Result<(), RoutingError> {
-        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
-        connection.execute(
-            "INSERT INTO catalog_models(provider, model, is_free, refreshed_at, access_kind)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(provider, model) DO UPDATE SET
-                 is_free = excluded.is_free,
-                 access_kind = excluded.access_kind,
-                 refreshed_at = excluded.refreshed_at",
-            params![
-                provider,
-                model,
-                i64::from(access_kind.is_free()),
-                epoch_seconds(),
-                access_kind.as_str()
-            ],
-        )?;
-        connection.execute(
-            "DELETE FROM routing_meta WHERE key = ?1",
-            [format!("catalog:fingerprint:{provider}")],
-        )?;
+        self.upsert_offerings(&[(provider, model, access_kind)])
+    }
+
+    pub(crate) fn upsert_offerings(
+        &self,
+        offerings: &[(&str, &str, AccessKind)],
+    ) -> Result<(), RoutingError> {
+        if offerings.is_empty() {
+            return Ok(());
+        }
+
+        let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let transaction = connection.transaction()?;
+        let refreshed_at = epoch_seconds();
+        for &(provider, model, access_kind) in offerings {
+            transaction.execute(
+                "INSERT INTO catalog_models(provider, model, is_free, refreshed_at, access_kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(provider, model) DO UPDATE SET
+                     is_free = excluded.is_free,
+                     access_kind = excluded.access_kind,
+                     refreshed_at = excluded.refreshed_at",
+                params![
+                    provider,
+                    model,
+                    i64::from(access_kind.is_free()),
+                    refreshed_at,
+                    access_kind.as_str()
+                ],
+            )?;
+        }
+
+        let mut providers = BTreeSet::new();
+        for &(provider, _, _) in offerings {
+            providers.insert(provider);
+        }
+        for provider in providers {
+            transaction.execute(
+                "DELETE FROM routing_meta WHERE key = ?1",
+                [format!("catalog:fingerprint:{provider}")],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -3060,6 +3098,38 @@ mod tests {
                 .expect("candidates")
                 .iter()
                 .all(|offering| offering.model != "manual-only")
+        );
+    }
+
+    #[test]
+    fn batched_offering_updates_preserve_last_write_and_provider_isolation() {
+        let store = RoutingStore::open(None).expect("store");
+        store
+            .upsert_offerings(&[
+                ("provider", "model-a", AccessKind::Paid),
+                ("provider", "model-b", AccessKind::ZeroPrice),
+                ("provider", "model-a", AccessKind::QuotaLimitedFreeTier),
+                ("other", "model-c", AccessKind::Paid),
+            ])
+            .expect("batched offerings");
+
+        let offerings = store
+            .all_candidates(86_400)
+            .expect("catalog offerings")
+            .into_iter()
+            .map(|offering| ((offering.provider, offering.model), offering.access_kind))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            offerings[&(String::from("provider"), String::from("model-a"))],
+            AccessKind::QuotaLimitedFreeTier
+        );
+        assert_eq!(
+            offerings[&(String::from("provider"), String::from("model-b"))],
+            AccessKind::ZeroPrice
+        );
+        assert_eq!(
+            offerings[&(String::from("other"), String::from("model-c"))],
+            AccessKind::Paid
         );
     }
 

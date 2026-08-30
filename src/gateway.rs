@@ -120,7 +120,7 @@ pub fn build_app_state(
             ),
         ));
     }
-    config.validate(secrets)?;
+    config.validate()?;
     let mut providers = BTreeMap::new();
     for (name, provider) in &config.providers {
         let client = Client::builder()
@@ -201,9 +201,14 @@ pub fn build_app_state(
         },
     );
     let routing = Arc::new(RoutingStore::open(config.server.state_path.as_deref())?);
+    let mut configured_offerings = Vec::new();
     for (provider_name, provider) in &config.providers {
         for model in &provider.free_models {
-            routing.upsert_offering(provider_name, model, AccessKind::ZeroPrice)?;
+            configured_offerings.push((
+                provider_name.as_str(),
+                model.as_str(),
+                AccessKind::ZeroPrice,
+            ));
         }
     }
     for model in config.models.values() {
@@ -211,11 +216,16 @@ pub fn build_app_state(
             if let Some(provider) = config.providers.get(&target.provider) {
                 let access_kind = classify_access(provider, &target.model, false);
                 if access_kind.is_free() {
-                    routing.upsert_offering(&target.provider, &target.model, access_kind)?;
+                    configured_offerings.push((
+                        target.provider.as_str(),
+                        target.model.as_str(),
+                        access_kind,
+                    ));
                 }
             }
         }
     }
+    routing.upsert_offerings(&configured_offerings)?;
     let state = AppState {
         global_permits: Arc::new(Semaphore::new(config.server.max_in_flight)),
         config: Arc::new(config),
@@ -6648,16 +6658,7 @@ async fn refresh_provider_catalog(state: &AppState, name: &str) -> Result<usize,
     .map_err(|error| format!("catalog refresh task failed: {error}"))??;
     let records = models
         .into_iter()
-        .map(|model| CatalogRecord {
-            access_kind: classify_access(&runtime.config, &model.id, model.zero_priced),
-            model: model.id,
-            context_length: model.context_length,
-            supports_tools: model.supports_tools,
-            supports_vision: model.supports_vision,
-            supports_structured_output: model.supports_structured_output,
-            input_price_per_million: model.input_price_per_million,
-            output_price_per_million: model.output_price_per_million,
-        })
+        .map(|model| CatalogRecord::from_provider_model(&runtime.config, &model))
         .collect::<Vec<_>>();
     let count = records.len();
     let provider = name.to_owned();

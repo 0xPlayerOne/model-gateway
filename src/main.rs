@@ -31,9 +31,7 @@ use model_gateway::pricing::{
 use model_gateway::providers::{
     BuiltinProvider, ConnectionCheck, fetch_account_limit, fetch_catalog,
 };
-use model_gateway::routing::{
-    CatalogRecord, RoutingStore, classify_access, provider_limit_reference,
-};
+use model_gateway::routing::{CatalogRecord, RoutingStore, provider_limit_reference};
 use model_gateway::secrets::SecretResolver;
 use serde_json::Value;
 
@@ -930,20 +928,7 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
                 };
                 let models = models
                     .into_iter()
-                    .map(|model| {
-                        let access_kind =
-                            classify_access(provider_config, &model.id, model.zero_priced);
-                        CatalogRecord {
-                            model: model.id,
-                            access_kind,
-                            context_length: model.context_length,
-                            supports_tools: model.supports_tools,
-                            supports_vision: model.supports_vision,
-                            supports_structured_output: model.supports_structured_output,
-                            input_price_per_million: model.input_price_per_million,
-                            output_price_per_million: model.output_price_per_million,
-                        }
-                    })
+                    .map(|model| CatalogRecord::from_provider_model(provider_config, &model))
                     .collect::<Vec<_>>();
                 store.replace_catalog(name, &models)?;
                 if let Some(account) = fetch_account_limit(provider_config, api_key.as_deref())? {
@@ -1102,7 +1087,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
                     .into());
                 }
                 config.providers.remove(&name);
-                config.validate_structure()?;
+                config.validate()?;
                 apply_pending_secrets(&resolver, &config_path, &config, pending_secrets)?;
                 println!("Removed provider '{name}'");
                 return Ok(());
@@ -1114,7 +1099,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
                 if config.models.remove(&alias).is_none() {
                     return Err(format!("model alias '{alias}' does not exist").into());
                 }
-                config.validate_structure()?;
+                config.validate()?;
                 apply_pending_secrets(&resolver, &config_path, &config, pending_secrets)?;
                 println!("Removed model alias '{alias}'");
                 return Ok(());
@@ -1302,7 +1287,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    config.validate_structure()?;
+    config.validate()?;
     println!("Proposed non-secret configuration diff:");
     println!("{}", config_diff(original.as_ref(), &config)?);
     if !Confirm::new()
@@ -1354,31 +1339,32 @@ fn apply_pending_secrets(
     for (name, value) in &pending {
         if let Err(error) = resolver.set_preferred(name, value) {
             let rollback_error = rollback_secrets(resolver, &previous, &applied).err();
-            return Err(match rollback_error {
-                Some(rollback) => {
-                    format!("credential update failed; rollback also failed: {error}; {rollback}")
-                        .into()
-                }
-                None => error.into(),
-            });
+            return Err(combined_update_error("credential update", &error, rollback_error).into());
         }
         applied.push(name.clone());
     }
 
     if let Err(error) = config
-        .validate(resolver)
+        .validate()
         .and_then(|_| config.save_atomic(config_path))
     {
         let rollback_error = rollback_secrets(resolver, &previous, &applied).err();
-        return Err(match rollback_error {
-            Some(rollback) => format!(
-                "configuration update failed; credential rollback also failed: {error}; {rollback}"
-            )
-            .into(),
-            None => error.into(),
-        });
+        return Err(combined_update_error("configuration update", &error, rollback_error).into());
     }
     Ok(())
+}
+
+fn combined_update_error(
+    context: impl std::fmt::Display,
+    primary: impl std::fmt::Display,
+    rollback: Option<impl std::fmt::Display>,
+) -> String {
+    match rollback {
+        Some(rollback) => {
+            format!("{context} failed; rollback also failed: {primary}; {rollback}")
+        }
+        None => primary.to_string(),
+    }
 }
 
 fn rollback_secrets(
@@ -1446,20 +1432,7 @@ fn config_check(online: bool) -> Result<(), Box<dyn Error>> {
                         Ok(models) => {
                             let records = models
                                 .into_iter()
-                                .map(|model| CatalogRecord {
-                                    access_kind: classify_access(
-                                        provider,
-                                        &model.id,
-                                        model.zero_priced,
-                                    ),
-                                    model: model.id,
-                                    context_length: model.context_length,
-                                    supports_tools: model.supports_tools,
-                                    supports_vision: model.supports_vision,
-                                    supports_structured_output: model.supports_structured_output,
-                                    input_price_per_million: model.input_price_per_million,
-                                    output_price_per_million: model.output_price_per_million,
-                                })
+                                .map(|model| CatalogRecord::from_provider_model(provider, &model))
                                 .collect::<Vec<_>>();
                             store.replace_catalog(name, &records)?;
                             if let Some(account) = fetch_account_limit(provider, key.as_deref())? {
@@ -1547,13 +1520,14 @@ fn credentials(command: CredentialCommand) -> Result<(), Box<dyn Error>> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use model_gateway::config::{Config, ModelConfig, TargetConfig};
+    use model_gateway::config::{Config, ModelConfig, ProviderConfig, TargetConfig};
     use model_gateway::secrets::SecretResolver;
 
     use clap::Parser;
 
     use super::{
         Cli, apply_pending_secrets, config_diff, parse_manual_price_imports, rollback_secrets,
+        validate_provider_filter,
     };
 
     #[test]
@@ -1690,5 +1664,93 @@ mod tests {
             Some("restored-value".to_owned())
         );
         assert_eq!(resolver.get("KEY2").expect("get key2"), None);
+    }
+
+    #[test]
+    fn validate_provider_filter_accepts_missing_and_configured_providers() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "openrouter".to_owned(),
+            ProviderConfig {
+                base_url: "https://openrouter.example.test/v1".to_owned(),
+                ..ProviderConfig::default()
+            },
+        );
+
+        assert!(validate_provider_filter(None, &config).is_ok());
+        assert!(validate_provider_filter(Some("openrouter"), &config).is_ok());
+    }
+
+    #[test]
+    fn validate_provider_filter_rejects_unknown_providers_with_shared_message() {
+        let config = Config::default();
+        let error = validate_provider_filter(Some("no-such-provider"), &config)
+            .expect_err("unknown provider must fail");
+        assert_eq!(error.to_string(), "unknown provider 'no-such-provider'");
+    }
+
+    #[test]
+    fn manual_price_import_parser_returns_empty_for_blank_input() {
+        let observations =
+            parse_manual_price_imports("\n  \n\t\n", std::path::Path::new("prices.jsonl"), 7)
+                .expect("blank input parses to empty");
+        assert!(observations.is_empty());
+    }
+
+    #[test]
+    fn manual_price_import_parser_preserves_optional_fields_and_trims_model() {
+        let input = r#"{"provider":"openrouter","model":"  gpt-5.6-luna  ","input_price_per_million":1.25,"output_price_per_million":4.5,"cache_read_price_per_million":0.5,"cache_write_price_per_million":1.0,"reasoning_price_per_million":2.0,"valid_from":100,"valid_until":200,"attribution":"fixture"}"#;
+        let observations =
+            parse_manual_price_imports(input, std::path::Path::new("prices.jsonl"), 42)
+                .expect("pricing overrides");
+        assert_eq!(observations.len(), 1);
+        let observation = &observations[0];
+        assert_eq!(observation.provider_key.as_deref(), Some("openrouter"));
+        assert_eq!(observation.model_id, "gpt-5.6-luna");
+        assert_eq!(observation.rates.input_price_per_million, Some(1.25));
+        assert_eq!(observation.rates.cache_read_price_per_million, Some(0.5));
+        assert_eq!(observation.rates.cache_write_price_per_million, Some(1.0));
+        assert_eq!(observation.rates.reasoning_price_per_million, Some(2.0));
+        assert_eq!(observation.valid_from, Some(100));
+        assert_eq!(observation.valid_until, Some(200));
+        assert_eq!(observation.attribution.as_deref(), Some("fixture"));
+        assert_eq!(observation.fetched_at, Some(42));
+    }
+
+    #[test]
+    fn config_diff_reports_added_and_removed_lines_with_a_baseline() {
+        let mut before = Config::default();
+        before.models.insert(
+            "removed-alias".to_owned(),
+            ModelConfig {
+                targets: vec![TargetConfig {
+                    provider: "openrouter".to_owned(),
+                    model: "upstream-removed".to_owned(),
+                }],
+            },
+        );
+        let mut after = Config::default();
+        after.models.insert(
+            "added-alias".to_owned(),
+            ModelConfig {
+                targets: vec![TargetConfig {
+                    provider: "openrouter".to_owned(),
+                    model: "upstream-added".to_owned(),
+                }],
+            },
+        );
+
+        let diff = config_diff(Some(&before), &after).expect("diff");
+        assert!(diff.contains("- [[models.removed-alias.targets]]"));
+        assert!(diff.contains("- model = \"upstream-removed\""));
+        assert!(diff.contains("+ [[models.added-alias.targets]]"));
+        assert!(diff.contains("+ model = \"upstream-added\""));
+    }
+
+    #[test]
+    fn config_diff_reports_no_changes_for_identical_configs() {
+        let config = Config::default();
+        let diff = config_diff(Some(&config), &config).expect("diff");
+        assert!(diff.contains("(no configuration changes)"));
     }
 }

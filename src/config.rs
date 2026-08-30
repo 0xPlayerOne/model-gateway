@@ -478,7 +478,7 @@ impl Config {
         }
         discover_environment_providers(&mut config, secrets)?;
         apply_provider_environment_overrides(&mut config)?;
-        config.validate(secrets)?;
+        config.validate()?;
         Ok(config)
     }
 
@@ -505,15 +505,11 @@ impl Config {
         Ok(())
     }
 
-    pub fn validate(&self, secrets: &SecretResolver) -> Result<(), ConfigError> {
-        self.validate_inner(Some(secrets))
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_inner()
     }
 
-    pub fn validate_structure(&self) -> Result<(), ConfigError> {
-        self.validate_inner(None)
-    }
-
-    fn validate_inner(&self, secrets: Option<&SecretResolver>) -> Result<(), ConfigError> {
+    fn validate_inner(&self) -> Result<(), ConfigError> {
         validate_server(&self.server)?;
         validate_provider(
             "local",
@@ -525,7 +521,6 @@ impl Config {
                     .starts_with("http://host.docker.internal"),
                 ..ProviderConfig::default()
             },
-            None,
         )?;
         if self.server.local_model_cache_seconds == 0 {
             return Err(ConfigError::Invalid(
@@ -569,7 +564,7 @@ impl Config {
                     "provider '{name}' collides with another provider's environment override name"
                 )));
             }
-            validate_provider(name, provider, secrets)?;
+            validate_provider(name, provider)?;
         }
         for (alias, model) in &self.models {
             validate_identifier(alias, "model alias")?;
@@ -623,10 +618,6 @@ impl Config {
             return PathBuf::from(path);
         }
         home_dir().join("config.toml")
-    }
-
-    pub fn home_dir() -> PathBuf {
-        home_dir()
     }
 }
 
@@ -1101,11 +1092,7 @@ fn validate_server(server: &ServerConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_provider(
-    name: &str,
-    provider: &ProviderConfig,
-    secrets: Option<&SecretResolver>,
-) -> Result<(), ConfigError> {
+fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<(), ConfigError> {
     validate_identifier(name, "provider name")?;
     let url = Url::parse(&provider.base_url)
         .map_err(|error| ConfigError::Invalid(format!("provider '{name}' URL: {error}")))?;
@@ -1233,7 +1220,6 @@ fn validate_provider(
     }
     if let Some(secret) = &provider.api_key_secret {
         validate_secret_name(secret)?;
-        let _ = secrets;
     }
     Ok(())
 }
@@ -1281,17 +1267,12 @@ fn is_safe_extra_header(header: &str) -> bool {
         && !lower.contains("token")
         && !matches!(
             lower.as_str(),
-            "authorization"
-                | "proxy-authorization"
-                | "host"
+            "host"
                 | "content-length"
                 | "transfer-encoding"
                 | "connection"
                 | "cookie"
                 | "set-cookie"
-                | "x-api-key"
-                | "api-key"
-                | "x-auth-token"
         )
         && header
             .bytes()
@@ -1432,7 +1413,6 @@ mod tests {
         QuotaLimit, ServerConfig, TargetConfig, apply_server_environment_overrides,
         validate_server,
     };
-    use crate::secrets::SecretResolver;
     use std::collections::BTreeMap;
 
     fn provider(base_url: &str) -> ProviderConfig {
@@ -1506,7 +1486,7 @@ mod tests {
             models: BTreeMap::new(),
         };
         config
-            .validate_structure()
+            .validate()
             .expect("built-in local route should not require aliases");
     }
 
@@ -1518,13 +1498,13 @@ mod tests {
             models: BTreeMap::new(),
         };
         config.server.data_refresh_interval_seconds = 59;
-        assert!(config.validate_structure().is_err());
+        assert!(config.validate().is_err());
         config.server.data_refresh_interval_seconds = 60;
-        config.validate_structure().expect("minimum interval");
+        config.validate().expect("minimum interval");
         config.server.data_refresh_interval_seconds = 86_400;
-        config.validate_structure().expect("maximum interval");
+        config.validate().expect("maximum interval");
         config.server.data_refresh_interval_seconds = 86_401;
-        assert!(config.validate_structure().is_err());
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -1572,21 +1552,19 @@ mod tests {
             window_seconds: 86_400,
             boundary: QuotaBoundary::Rolling,
         }];
-        config.validate_structure().expect("valid quota override");
+        config.validate().expect("valid quota override");
         config.providers.get_mut("local").expect("provider").quotas[0].limit = 0;
-        assert!(config.validate_structure().is_err());
+        assert!(config.validate().is_err());
         config.providers.get_mut("local").expect("provider").quotas[0].limit = 50;
         config.providers.get_mut("local").expect("provider").quotas[0].kind =
             QuotaKind::CostMicrousd;
-        assert!(config.validate_structure().is_err());
+        assert!(config.validate().is_err());
         config
             .providers
             .get_mut("local")
             .expect("provider")
             .billing_mode = BillingMode::Paid;
-        config
-            .validate_structure()
-            .expect("paid provider cost quota");
+        config.validate().expect("paid provider cost quota");
     }
 
     #[test]
@@ -1599,7 +1577,7 @@ mod tests {
         for model in config.models.values_mut() {
             model.targets[0].provider = "a-b".to_owned();
         }
-        assert!(config.validate_structure().is_err());
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -2005,7 +1983,7 @@ mod tests {
                 }],
             },
         );
-        assert!(config.validate(&SecretResolver::default()).is_err());
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -2013,9 +1991,7 @@ mod tests {
         let mut config = valid_config("http://localhost:11434/v1");
         let model = config.models.remove("local-model").expect("fixture model");
         config.models.insert("local".to_owned(), model);
-        let error = config
-            .validate(&SecretResolver::default())
-            .expect_err("reserved local alias");
+        let error = config.validate().expect_err("reserved local alias");
         assert!(error.to_string().contains("reserved"));
     }
 
@@ -2032,7 +2008,7 @@ mod tests {
             "provider/name".to_owned(),
             provider("http://localhost:11434/v1"),
         );
-        assert!(config.validate(&SecretResolver::default()).is_err());
+        assert!(config.validate().is_err());
 
         let mut config = valid_config("http://localhost:11434/v1");
         config.models.insert(
@@ -2044,7 +2020,7 @@ mod tests {
                 }],
             },
         );
-        assert!(config.validate(&SecretResolver::default()).is_err());
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -2057,7 +2033,7 @@ mod tests {
                 .expect("provider")
                 .extra_headers
                 .insert(header.to_owned(), "metadata".to_owned());
-            assert!(config.validate(&SecretResolver::default()).is_err());
+            assert!(config.validate().is_err());
         }
     }
 
@@ -2083,7 +2059,7 @@ mod tests {
         let config: Config = toml::from_str(include_str!("../gateway.core.example.toml"))
             .expect("CORE provider example must parse");
         config
-            .validate_structure()
+            .validate()
             .expect("CORE provider example must validate");
         assert_eq!(config.providers.len(), 5);
         assert_eq!(config.models.len(), 5);
@@ -2099,9 +2075,7 @@ mod tests {
     fn primary_example_includes_valid_efficiency_policy() {
         let config: Config = toml::from_str(include_str!("../gateway.example.toml"))
             .expect("primary example must parse");
-        config
-            .validate_structure()
-            .expect("primary example must validate");
+        config.validate().expect("primary example must validate");
         let openrouter = &config.providers["openrouter"];
         assert_eq!(openrouter.billing_mode, BillingMode::Paid);
         assert_eq!(
@@ -2122,7 +2096,7 @@ mod tests {
         let config: Config = toml::from_str(include_str!("../gateway.secondary.example.toml"))
             .expect("secondary provider example must parse");
         config
-            .validate_structure()
+            .validate()
             .expect("secondary provider example must validate");
         assert_eq!(config.providers.len(), 5);
         assert_eq!(config.models.len(), 5);
@@ -2138,7 +2112,7 @@ mod tests {
         let config: Config = toml::from_str(include_str!("../gateway.optional.example.toml"))
             .expect("optional provider example must parse");
         config
-            .validate_structure()
+            .validate()
             .expect("optional provider example must validate");
         assert_eq!(config.providers.len(), 7);
         assert_eq!(config.models.len(), 6);
@@ -2157,7 +2131,7 @@ mod tests {
             .get_mut("local")
             .expect("provider")
             .allow_insecure_http = true;
-        assert!(config.validate(&SecretResolver::default()).is_err());
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -2175,7 +2149,7 @@ mod tests {
                 .expect("provider")
                 .allow_insecure_http = true;
             config
-                .validate(&SecretResolver::default())
+                .validate()
                 .unwrap_or_else(|error| panic!("{url} should be allowed: {error}"));
         }
     }
@@ -2187,11 +2161,7 @@ mod tests {
             "https://example.com/v1?api_key=secret",
             "https://example.com/v1#secret",
         ] {
-            assert!(
-                valid_config(url)
-                    .validate(&SecretResolver::default())
-                    .is_err()
-            );
+            assert!(valid_config(url).validate().is_err());
         }
 
         let mut config = valid_config("https://example.com/v1");
@@ -2201,7 +2171,7 @@ mod tests {
             .expect("provider")
             .extra_headers
             .insert("x-api-key".to_owned(), "secret".to_owned());
-        assert!(config.validate(&SecretResolver::default()).is_err());
+        assert!(config.validate().is_err());
     }
 
     #[test]
