@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.18](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.17...v0.14.18) (2026-08-30)
+
+
+### Maintenance
+
+* identity-dedup ([#188](https://github.com/0xPlayerOne/model-gateway/issues/188)) ([5ad72d0](https://github.com/0xPlayerOne/model-gateway/commit/5ad72d05bab126488faff0222401799fbfd87b8c))
+
 ## [0.14.17](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.16...v0.14.17) (2026-08-30)
 
 
