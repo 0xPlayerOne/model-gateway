@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.15](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.14...v0.14.15) (2026-08-30)
+
+
+### Maintenance
+
+* dedupe hex, benchmark grouping and auto-route fallback ([#208](https://github.com/0xPlayerOne/model-gateway/issues/208)) ([822150b](https://github.com/0xPlayerOne/model-gateway/commit/822150b92dd4709a038d59c048e49b6218b878da))
+
 ## [0.14.14](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.13...v0.14.14) (2026-08-29)
 
 
