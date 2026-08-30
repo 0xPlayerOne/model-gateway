@@ -2001,13 +2001,7 @@ async fn load_paid_candidates(
     .map_err(|_| ())?;
 
     let prices = load_effective_prices(state, &offerings).await;
-    let mut benchmark_map = BTreeMap::new();
-    for benchmark in benchmarks {
-        benchmark_map
-            .entry(benchmark.id.clone())
-            .or_insert_with(Vec::new)
-            .push(benchmark);
-    }
+    let benchmark_map = group_benchmarks(benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     Ok(collect_paid_candidates(
         &offerings,
@@ -2042,13 +2036,7 @@ async fn load_free_candidates(
     )
     .map_err(|_| ())?;
 
-    let mut benchmark_map = BTreeMap::new();
-    for benchmark in benchmarks {
-        benchmark_map
-            .entry(benchmark.id.clone())
-            .or_insert_with(Vec::new)
-            .push(benchmark);
-    }
+    let benchmark_map = group_benchmarks(benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let candidates = collect_free_candidates(
         &offerings,
@@ -2159,11 +2147,7 @@ fn catalog_snapshot(
 }
 
 fn digest_hex(digest: impl AsRef<[u8]>) -> String {
-    digest
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::storage::hex(digest.as_ref())
 }
 
 fn catalog_access_name(access: CatalogAccess) -> &'static str {
@@ -2771,6 +2755,35 @@ fn identity_provider_key(provider: &ProviderConfig) -> Option<&str> {
     })
 }
 
+fn group_benchmarks(benchmarks: Vec<BenchmarkModel>) -> BTreeMap<String, Vec<BenchmarkModel>> {
+    let mut map = BTreeMap::new();
+    for benchmark in benchmarks {
+        map.entry(benchmark.id.clone())
+            .or_insert_with(Vec::new)
+            .push(benchmark);
+    }
+    map
+}
+
+fn group_benchmarks_ref(benchmarks: &[BenchmarkModel]) -> BTreeMap<String, Vec<BenchmarkModel>> {
+    let mut map = BTreeMap::new();
+    for benchmark in benchmarks {
+        map.entry(benchmark.id.clone())
+            .or_insert_with(Vec::new)
+            .push(benchmark.clone());
+    }
+    map
+}
+
+fn is_provider_model_allowed(provider: &ProviderConfig, model: &str) -> bool {
+    (provider.model_allowlist.is_empty()
+        || provider
+            .model_allowlist
+            .iter()
+            .any(|allowed| allowed == model))
+        && !provider.model_denylist.iter().any(|denied| denied == model)
+}
+
 fn identity_mapping_indexes(routing: &RoutingStore) -> IdentityMappingIndexes {
     let approved = routing
         .approved_model_mappings()
@@ -3022,14 +3035,7 @@ fn collect_free_candidates(
         let Some(runtime) = context.runtimes.get(&offering.provider) else {
             continue;
         };
-        if !runtime.available
-            || (!provider.model_allowlist.is_empty()
-                && !provider
-                    .model_allowlist
-                    .iter()
-                    .any(|m| m == &offering.model))
-            || provider.model_denylist.iter().any(|m| m == &offering.model)
-        {
+        if !runtime.available || !is_provider_model_allowed(provider, &offering.model) {
             continue;
         }
         if is_model_denied(&offering.model, &offering.provider, context.cfg) {
@@ -3134,12 +3140,7 @@ fn collect_paid_candidates(
                 provider.billing_mode,
                 BillingMode::Paid | BillingMode::Subscription
             )
-            || (!provider.model_allowlist.is_empty()
-                && !provider
-                    .model_allowlist
-                    .iter()
-                    .any(|m| m == &offering.model))
-            || provider.model_denylist.iter().any(|m| m == &offering.model)
+            || !is_provider_model_allowed(provider, &offering.model)
         {
             continue;
         }
@@ -3228,13 +3229,7 @@ async fn list_auto_models(
         }
     };
 
-    let mut benchmark_by_model = BTreeMap::<String, Vec<BenchmarkModel>>::new();
-    for benchmark in &benchmarks {
-        benchmark_by_model
-            .entry(benchmark.id.clone())
-            .or_default()
-            .push(benchmark.clone());
-    }
+    let benchmark_by_model = group_benchmarks_ref(&benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let prices = load_effective_prices(&state, &paid_offerings).await;
 
@@ -4758,13 +4753,7 @@ async fn resolve_auto_free_targets(
         )
     })?;
     let (benchmark_snapshot_id, benchmark_as_of, _) = benchmark_snapshot.unwrap_or((0, 0, None));
-    let mut benchmark_map = BTreeMap::new();
-    for b in &benchmarks {
-        benchmark_map
-            .entry(b.id.clone())
-            .or_insert_with(Vec::new)
-            .push(b.clone());
-    }
+    let benchmark_map = group_benchmarks_ref(&benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let classification = classify(request);
     let requirements = RequestRequirements::from_request(request);
@@ -4780,17 +4769,7 @@ async fn resolve_auto_free_targets(
             }
             offering.access_kind = access_kind;
             let runtime = state.providers.get(&offering.provider)?;
-            if !runtime.available
-                || (!provider.model_allowlist.is_empty()
-                    && !provider
-                        .model_allowlist
-                        .iter()
-                        .any(|model| model == &offering.model))
-                || provider
-                    .model_denylist
-                    .iter()
-                    .any(|model| model == &offering.model)
-            {
+            if !runtime.available || !is_provider_model_allowed(provider, &offering.model) {
                 return None;
             }
             if offering
@@ -4969,27 +4948,8 @@ async fn resolve_auto_efficient_targets(
     request: &Value,
     session_hash: Option<&str>,
 ) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
-    let mut targets =
-        resolve_benchmark_targets(state, request, session_hash, BenchmarkPolicy::Efficient).await?;
-    let selected = targets
-        .iter()
-        .map(|target| (target.provider.clone(), target.model.clone()))
-        .collect::<BTreeSet<_>>();
-    if !state.config.server.auto_free_enabled {
-        return Ok(targets);
-    }
-    match resolve_auto_free_targets(state, request, session_hash).await {
-        Ok(fallbacks) => {
-            for target in fallbacks {
-                if !selected.contains(&(target.provider.clone(), target.model.clone())) {
-                    targets.push(target);
-                }
-            }
-        }
-        Err(error) if targets.is_empty() => return Err(error),
-        Err(_) => {}
-    }
-    Ok(targets)
+    resolve_benchmark_with_free_fallback(state, request, session_hash, BenchmarkPolicy::Efficient)
+        .await
 }
 
 async fn resolve_auto_balanced_targets(
@@ -4997,8 +4957,17 @@ async fn resolve_auto_balanced_targets(
     request: &Value,
     session_hash: Option<&str>,
 ) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
-    let mut targets =
-        resolve_benchmark_targets(state, request, session_hash, BenchmarkPolicy::Balanced).await?;
+    resolve_benchmark_with_free_fallback(state, request, session_hash, BenchmarkPolicy::Balanced)
+        .await
+}
+
+async fn resolve_benchmark_with_free_fallback(
+    state: &AppState,
+    request: &Value,
+    session_hash: Option<&str>,
+    policy: BenchmarkPolicy,
+) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
+    let mut targets = resolve_benchmark_targets(state, request, session_hash, policy).await?;
     let selected = targets
         .iter()
         .map(|target| (target.provider.clone(), target.model.clone()))
@@ -5074,14 +5043,8 @@ async fn resolve_benchmark_targets(
         .get("reasoning_effort")
         .and_then(Value::as_str)
         .filter(|effort| is_reasoning_effort(effort));
-    let mut benchmark_by_model = BTreeMap::<String, Vec<_>>::new();
     let (benchmark_snapshot_id, benchmark_as_of, _) = benchmark_snapshot.unwrap_or((0, 0, None));
-    for benchmark in benchmarks {
-        benchmark_by_model
-            .entry(benchmark.id.clone())
-            .or_default()
-            .push(benchmark);
-    }
+    let benchmark_by_model = group_benchmarks(benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let prices = load_effective_prices(state, &offerings).await;
     let mut candidates = Vec::new();
@@ -5092,16 +5055,7 @@ async fn resolve_benchmark_targets(
         let Some(runtime) = state.providers.get(&offering.provider) else {
             continue;
         };
-        if (!provider.model_allowlist.is_empty()
-            && !provider
-                .model_allowlist
-                .iter()
-                .any(|model| model == &offering.model))
-            || provider
-                .model_denylist
-                .iter()
-                .any(|model| model == &offering.model)
-        {
+        if !is_provider_model_allowed(provider, &offering.model) {
             continue;
         }
         let canonical = canonical_match(provider, &offering.provider, &offering.model, &mappings);
