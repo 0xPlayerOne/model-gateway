@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Model Gateway Catalog API",
-    "version": "0.14.16",
+    "version": "0.14.17",
     "description": "Discovery and metadata resources for models available through Model Gateway."
   },
   "paths": {

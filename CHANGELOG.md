@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.17](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.16...v0.14.17) (2026-08-30)
+
+
+### Maintenance
+
+* **deps:** bump the cargo-dependencies group across 1 directory with 3 updates ([#206](https://github.com/0xPlayerOne/model-gateway/issues/206)) ([cdab6e5](https://github.com/0xPlayerOne/model-gateway/commit/cdab6e539c55fd8bffe497b860ee3529f317d841))
+
 ## [0.14.16](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.15...v0.14.16) (2026-08-30)
 
 
