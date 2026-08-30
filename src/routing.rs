@@ -2057,10 +2057,7 @@ impl RoutingStore {
                     std::process::id(),
                     &connection
                 );
-                let salt = Sha256::digest(seed.as_bytes())
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>();
+                let salt = crate::storage::hex(&Sha256::digest(seed.as_bytes()));
                 connection.execute(
                     "INSERT OR IGNORE INTO routing_meta(key, value) VALUES ('session_salt', ?1)",
                     [&salt],
@@ -2075,11 +2072,7 @@ impl RoutingStore {
         let mut digest = Sha256::new();
         digest.update(salt.as_bytes());
         digest.update(material.as_bytes());
-        Ok(digest
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>())
+        Ok(crate::storage::hex(&digest.finalize()))
     }
 
     pub fn session_pin(
@@ -2744,11 +2737,7 @@ fn fingerprint_lines(mut lines: Vec<String>) -> String {
         digest.update(line.as_bytes());
         digest.update(b"\n");
     }
-    digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::storage::hex(&digest.finalize())
 }
 
 fn opt_u64(value: Option<u64>) -> String {
