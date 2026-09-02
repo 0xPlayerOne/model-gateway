@@ -2766,21 +2766,21 @@ fn identity_provider_key(provider: &ProviderConfig) -> Option<&str> {
 }
 
 fn group_benchmarks(benchmarks: Vec<BenchmarkModel>) -> BTreeMap<String, Vec<BenchmarkModel>> {
+    group_benchmarks_iter(benchmarks)
+}
+
+fn group_benchmarks_ref(benchmarks: &[BenchmarkModel]) -> BTreeMap<String, Vec<BenchmarkModel>> {
+    group_benchmarks_iter(benchmarks.iter().cloned())
+}
+
+fn group_benchmarks_iter(
+    benchmarks: impl IntoIterator<Item = BenchmarkModel>,
+) -> BTreeMap<String, Vec<BenchmarkModel>> {
     let mut map = BTreeMap::new();
     for benchmark in benchmarks {
         map.entry(benchmark.id.clone())
             .or_insert_with(Vec::new)
             .push(benchmark);
-    }
-    map
-}
-
-fn group_benchmarks_ref(benchmarks: &[BenchmarkModel]) -> BTreeMap<String, Vec<BenchmarkModel>> {
-    let mut map = BTreeMap::new();
-    for benchmark in benchmarks {
-        map.entry(benchmark.id.clone())
-            .or_insert_with(Vec::new)
-            .push(benchmark.clone());
     }
     map
 }
@@ -3215,10 +3215,7 @@ async fn list_auto_models(
     let benchmark_max_age = cfg.benchmark_max_age_seconds;
     let catalog_max_age = cfg.catalog_max_age_seconds;
 
-    let (free_offerings, paid_offerings, benchmarks, account_limits) = match tokio::try_join!(
-        routing_operation(state.routing.clone(), move |routing| {
-            routing.all_candidates(catalog_max_age)
-        }),
+    let (all_offerings, benchmarks, account_limits) = match tokio::try_join!(
         routing_operation(state.routing.clone(), move |routing| {
             routing.all_candidates(catalog_max_age)
         }),
@@ -3241,10 +3238,10 @@ async fn list_auto_models(
 
     let benchmark_by_model = group_benchmarks_ref(&benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
-    let prices = load_effective_prices(&state, &paid_offerings).await;
+    let prices = load_effective_prices(&state, &all_offerings).await;
 
     let free_candidates = collect_free_candidates(
-        &free_offerings,
+        &all_offerings,
         &benchmark_by_model,
         FreeCandidateContext {
             providers: &state.config.providers,
@@ -3256,7 +3253,7 @@ async fn list_auto_models(
         },
     );
     let paid_candidates = collect_paid_candidates(
-        &paid_offerings,
+        &all_offerings,
         &benchmark_by_model,
         PaidCandidateContext {
             providers: &state.config.providers,
