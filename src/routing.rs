@@ -1492,7 +1492,7 @@ impl RoutingStore {
         for model in models {
             model
                 .validate()
-                .map_err(|error| RoutingError::Background(error.to_owned()))?;
+                .map_err(RoutingError::Background)?;
             if !identities.insert((
                 model.id.as_str(),
                 model.reasoning_effort.as_deref().unwrap_or(""),
