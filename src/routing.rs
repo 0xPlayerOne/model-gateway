@@ -1490,9 +1490,7 @@ impl RoutingStore {
         }
         let mut identities = BTreeSet::new();
         for model in models {
-            model
-                .validate()
-                .map_err(RoutingError::Background)?;
+            model.validate().map_err(RoutingError::Background)?;
             if !identities.insert((
                 model.id.as_str(),
                 model.reasoning_effort.as_deref().unwrap_or(""),
