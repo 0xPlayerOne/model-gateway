@@ -2618,39 +2618,13 @@ async fn load_catalog_snapshot(
         candidates.retain(|candidate| candidate.offering.access_kind.is_paid_route_eligible());
     }
     let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
-    let benchmark_fetched_at = routing_operation(state.routing.clone(), move |routing| {
-        routing
-            .active_benchmark_snapshot(benchmark_max_age)
-            .map(|snapshot| snapshot.map(|(_, fetched_at, _)| fetched_at))
-    })
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-    let identity_last_modified = routing_operation(state.routing.clone(), |routing| {
-        routing.identity_last_modified()
-    })
-    .await
-    .map_err(|_| ())?;
-    let pricing_last_modified = routing_operation(state.routing.clone(), |routing| {
-        routing.pricing_status().map(|snapshots| {
-            snapshots
-                .into_iter()
-                .map(|snapshot| snapshot.2)
-                .max()
-                .unwrap_or(0)
-        })
-    })
-    .await
-    .map_err(|_| ())?;
-    let benchmark_last_modified = routing_operation(state.routing.clone(), |routing| {
-        routing.benchmark_status().map(|snapshots| {
-            snapshots
-                .into_iter()
-                .map(|snapshot| snapshot.1)
-                .max()
-                .unwrap_or(0)
-        })
+    let (
+        benchmark_fetched_at,
+        identity_last_modified,
+        pricing_last_modified,
+        benchmark_last_modified,
+    ) = routing_operation(state.routing.clone(), move |routing| {
+        routing.catalog_snapshot_timestamps(benchmark_max_age)
     })
     .await
     .map_err(|_| ())?;

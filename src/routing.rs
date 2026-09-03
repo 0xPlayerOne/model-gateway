@@ -1715,6 +1715,75 @@ impl RoutingStore {
             .map_err(RoutingError::from)
     }
 
+    /// Returns the four timestamps that feed the catalog snapshot validator in a
+    /// single lock acquisition. The caller-supplied `benchmark_max_age_seconds`
+    /// filters the active benchmark snapshot to the freshness window; the other
+    /// three timestamps are unconditional maxima so `Last-Modified` advances on
+    /// any pricing or identity mutation.
+    pub fn catalog_snapshot_timestamps(
+        &self,
+        benchmark_max_age_seconds: u64,
+    ) -> Result<(i64, i64, i64, i64), RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let benchmark_fetched_at = {
+            let cutoff = epoch_seconds()
+                .saturating_sub(i64::try_from(benchmark_max_age_seconds).unwrap_or(i64::MAX));
+            connection
+                .query_row(
+                    "SELECT fetched_at FROM benchmark_snapshots
+                     WHERE active = 1 AND fetched_at >= ?1
+                     ORDER BY fetched_at DESC, id DESC LIMIT 1",
+                    [cutoff],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or_default()
+        };
+        let identity_last_modified: Option<i64> = connection.query_row(
+            "SELECT MAX(value) FROM (
+                 SELECT MAX(fetched_at) AS value
+                 FROM identity_snapshots
+                 WHERE active = 1
+                 UNION ALL
+                 SELECT MAX(observed_at) AS value
+                 FROM model_identity_aliases
+                 UNION ALL
+                 SELECT MAX(updated_at) AS value
+                 FROM model_entities
+                 UNION ALL
+                 SELECT MAX(approved_at) AS value
+                 FROM approved_model_mappings
+                 UNION ALL
+                 SELECT MAX(observed_at) AS value
+                 FROM benchmark_identity_links
+                 UNION ALL
+                 SELECT MAX(approved_at) AS value
+                 FROM benchmark_identity_links
+                 UNION ALL
+                 SELECT MAX(approved_at) AS value
+                 FROM approved_entity_aliases
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        let pricing_last_modified: Option<i64> = connection.query_row(
+            "SELECT MAX(fetched_at) FROM pricing_snapshots WHERE active = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let benchmark_last_modified: Option<i64> = connection.query_row(
+            "SELECT MAX(fetched_at) FROM benchmark_snapshots WHERE active = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok((
+            benchmark_fetched_at,
+            identity_last_modified.unwrap_or_default(),
+            pricing_last_modified.unwrap_or_default(),
+            benchmark_last_modified.unwrap_or_default(),
+        ))
+    }
+
     pub fn catalog_summary(&self) -> Result<Vec<(String, u64, i64)>, RoutingError> {
         let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let mut statement = connection.prepare(
