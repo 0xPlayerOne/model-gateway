@@ -34,7 +34,6 @@ use crate::config::{
 use crate::pricing::{
     EffectivePrice, PriceScope, PriceSourceKind, fetch_models_dev, normalize_price_id,
 };
-use crate::providers::BuiltinProvider;
 use crate::providers::ConnectionCheck;
 use crate::providers::prepare_request;
 use crate::providers::{fetch_account_limit, fetch_catalog};
@@ -333,50 +332,46 @@ pub struct PricingCoverageReport {
     pub estimated: Option<bool>,
 }
 
+fn canonical_for<'a>(provider: Option<&'a ProviderConfig>, model: &str) -> Option<&'a str> {
+    provider.and_then(|provider| provider.model_mappings.get(model).map(String::as_str))
+}
+
 pub fn report_pricing_coverage(
     config: &Config,
     routing: &RoutingStore,
     provider_filter: Option<&str>,
 ) -> Result<Vec<PricingCoverageReport>, RoutingError> {
     let offerings = routing.all_candidates(config.server.catalog_max_age_seconds)?;
-    offerings
+    let filtered: Vec<CatalogOffering> = offerings
         .into_iter()
         .filter(|offering| {
             provider_filter.is_none_or(|provider| provider == offering.provider)
                 && !is_provider_auto_route(&offering.model)
         })
+        .collect();
+    if filtered.is_empty() {
+        return Ok(Vec::new());
+    }
+    let queries: Vec<(String, Option<String>, String, Option<String>)> = filtered
+        .iter()
         .map(|offering| {
             let provider_config = config.providers.get(&offering.provider);
-            let profile_key = provider_config.and_then(|provider| {
-                provider
-                    .pricing_profile
-                    .as_deref()
-                    .or_else(|| provider.profile.and_then(BuiltinProvider::models_dev_key))
-            });
-            let canonical = provider_config.and_then(|provider| {
-                provider
-                    .model_mappings
-                    .get(&offering.model)
-                    .map(String::as_str)
-            });
-            let effective = routing.effective_price(
-                &offering.provider,
-                profile_key,
-                &offering.model,
-                canonical,
-                config.server.pricing_max_age_seconds,
-            )?;
-            let incomplete_observation = if effective.is_none() {
-                routing.has_incomplete_price_observation(
-                    &offering.provider,
-                    profile_key,
-                    &offering.model,
-                    canonical,
-                    config.server.pricing_max_age_seconds,
-                )?
-            } else {
-                false
-            };
+            let profile_key = provider_config.and_then(|p| identity_provider_key(p));
+            let canonical = canonical_for(provider_config, &offering.model);
+            (
+                offering.provider.clone(),
+                profile_key.map(ToOwned::to_owned),
+                offering.model.clone(),
+                canonical.map(ToOwned::to_owned),
+            )
+        })
+        .collect();
+    let coverages =
+        routing.batch_price_coverage(&queries, config.server.pricing_max_age_seconds)?;
+    filtered
+        .into_iter()
+        .zip(coverages)
+        .map(|(offering, (effective, incomplete_observation))| {
             let direct_complete = offering.input_price_per_million.is_some()
                 && offering.output_price_per_million.is_some();
             let direct_incomplete = offering.input_price_per_million.is_some()
