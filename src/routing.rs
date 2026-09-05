@@ -1183,6 +1183,50 @@ impl RoutingStore {
         Ok(results)
     }
 
+    /// Batched effective-price lookup: one mutex acquisition and reusable
+    /// prepared statements for all queries. Each query mirrors
+    /// `effective_price` semantics without `N` separate lock/prepare trips.
+    pub fn batch_effective_prices(
+        &self,
+        queries: &[(String, Option<String>, String, Option<String>)],
+        max_age_seconds: u64,
+    ) -> Result<Vec<Option<EffectivePrice>>, RoutingError> {
+        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
+        let now = epoch_seconds();
+        let cutoff = now.saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX));
+        let mut catalog_stmt = connection.prepare(
+            "SELECT input_price_per_million, output_price_per_million, refreshed_at
+             FROM catalog_models WHERE provider = ?1 AND lower(model) = ?2
+               AND refreshed_at >= ?3",
+        )?;
+        let mut effective_stmt = connection.prepare(
+            "SELECT s.source, s.source_kind, o.scope, o.provider_key, o.model_id,
+                    o.input_price, o.output_price, o.cache_read_price, o.cache_write_price,
+                    o.reasoning_price, o.input_audio_price, o.output_audio_price, o.request_price,
+                    o.as_of, o.valid_from, o.valid_until, s.fetched_at
+             FROM price_observations o
+             JOIN pricing_snapshots s ON s.id = o.snapshot_id
+             WHERE s.active = 1 AND (s.source_kind = 'manual' OR s.fetched_at >= ?1)
+               AND lower(o.model_id) = ?2
+               AND (o.valid_from IS NULL OR o.valid_from <= ?3)
+               AND (o.valid_until IS NULL OR o.valid_until > ?3)",
+        )?;
+        let mut results = Vec::with_capacity(queries.len());
+        for (runtime_provider, profile_key, model, canonical_model) in queries {
+            results.push(effective_price_on_connection_with_statements(
+                &mut catalog_stmt,
+                &mut effective_stmt,
+                runtime_provider,
+                profile_key.as_deref(),
+                model,
+                canonical_model.as_deref(),
+                cutoff,
+                now,
+            )?);
+        }
+        Ok(results)
+    }
+
     pub fn replace_catalog(
         &self,
         provider: &str,
@@ -2721,24 +2765,12 @@ fn effective_price_on_connection(
     cutoff: i64,
     now: i64,
 ) -> Result<Option<EffectivePrice>, rusqlite::Error> {
-    let model_id = normalize_price_id(model);
-    let catalog = connection
-        .query_row(
-            "SELECT input_price_per_million, output_price_per_million, refreshed_at
+    let mut catalog_stmt = connection.prepare(
+        "SELECT input_price_per_million, output_price_per_million, refreshed_at
              FROM catalog_models WHERE provider = ?1 AND lower(model) = ?2
                AND refreshed_at >= ?3",
-            params![runtime_provider, model_id, cutoff],
-            |row| {
-                Ok((
-                    row.get::<_, Option<f64>>(0)?,
-                    row.get::<_, Option<f64>>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-    let mut observations = Vec::new();
-    let mut statement = connection.prepare(
+    )?;
+    let mut effective_stmt = connection.prepare(
         "SELECT s.source, s.source_kind, o.scope, o.provider_key, o.model_id,
                 o.input_price, o.output_price, o.cache_read_price, o.cache_write_price,
                 o.reasoning_price, o.input_audio_price, o.output_audio_price, o.request_price,
@@ -2750,93 +2782,16 @@ fn effective_price_on_connection(
            AND (o.valid_from IS NULL OR o.valid_from <= ?3)
            AND (o.valid_until IS NULL OR o.valid_until > ?3)",
     )?;
-    let rows = statement.query_map(params![cutoff, model_id, now], price_observation_from_row)?;
-    for row in rows {
-        observations.push(row?);
-    }
-    let mut target_candidates = observations
-        .into_iter()
-        .filter(|observation| {
-            (observation.scope == PriceScope::RuntimeProvider
-                && observation
-                    .provider_key
-                    .as_deref()
-                    .is_some_and(|key| key.eq_ignore_ascii_case(runtime_provider)))
-                || (observation.scope == PriceScope::ProviderProfile
-                    && profile_key.is_some_and(|key| {
-                        observation
-                            .provider_key
-                            .as_deref()
-                            .is_some_and(|value| value.eq_ignore_ascii_case(key))
-                    }))
-        })
-        .collect::<Vec<_>>();
-    if let Some((Some(input), Some(output), refreshed_at)) = catalog {
-        target_candidates.push(PriceObservation {
-            source: format!("catalog:{runtime_provider}"),
-            source_kind: PriceSourceKind::ProviderCatalog,
-            scope: PriceScope::RuntimeProvider,
-            provider_key: Some(runtime_provider.to_owned()),
-            model_id: model.to_owned(),
-            rates: crate::pricing::PriceRates {
-                input_price_per_million: Some(input),
-                output_price_per_million: Some(output),
-                ..crate::pricing::PriceRates::default()
-            },
-            fetched_at: Some(refreshed_at),
-            as_of: None,
-            valid_from: None,
-            valid_until: None,
-            attribution: None,
-        });
-    }
-    target_candidates.retain(|observation| observation.rates.is_complete());
-    target_candidates.sort_by(|left, right| {
-        let left_target = u8::from(left.scope != PriceScope::RuntimeProvider);
-        let right_target = u8::from(right.scope != PriceScope::RuntimeProvider);
-        left_target
-            .cmp(&right_target)
-            .then_with(|| {
-                left.source_kind
-                    .fallback_priority()
-                    .cmp(&right.source_kind.fallback_priority())
-            })
-            .then_with(|| right.fetched_at.cmp(&left.fetched_at))
-            .then_with(|| left.source.cmp(&right.source))
-    });
-    if let Some(observation) = target_candidates.first() {
-        return Ok(EffectivePrice::from_observation(observation, false));
-    }
-    let Some(canonical_model) = canonical_model else {
-        return Ok(None);
-    };
-    let Some((canonical_provider, canonical_id)) = canonical_model.split_once('/') else {
-        return Ok(None);
-    };
-    let canonical_id = normalize_price_id(canonical_id);
-    let mut canonical_candidates = statement
-        .query_map(
-            params![cutoff, canonical_id, now],
-            price_observation_from_row,
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
-    canonical_candidates.retain(|observation| {
-        observation.rates.is_complete()
-            && observation
-                .provider_key
-                .as_deref()
-                .is_some_and(|key| key.eq_ignore_ascii_case(canonical_provider))
-    });
-    canonical_candidates.sort_by(|left, right| {
-        left.source_kind
-            .fallback_priority()
-            .cmp(&right.source_kind.fallback_priority())
-            .then_with(|| right.fetched_at.cmp(&left.fetched_at))
-            .then_with(|| left.source.cmp(&right.source))
-    });
-    Ok(canonical_candidates
-        .first()
-        .and_then(|observation| EffectivePrice::from_observation(observation, true)))
+    effective_price_on_connection_with_statements(
+        &mut catalog_stmt,
+        &mut effective_stmt,
+        runtime_provider,
+        profile_key,
+        model,
+        canonical_model,
+        cutoff,
+        now,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2960,8 +2915,6 @@ fn has_incomplete_on_connection(
     cutoff: i64,
     now: i64,
 ) -> Result<bool, rusqlite::Error> {
-    let canonical_provider =
-        canonical_model.and_then(|value| value.split_once('/').map(|(provider, _)| provider));
     let mut statement = connection.prepare(
         "SELECT o.scope, o.provider_key, o.input_price, o.output_price
          FROM price_observations o
@@ -2971,48 +2924,15 @@ fn has_incomplete_on_connection(
            AND (o.valid_from IS NULL OR o.valid_from <= ?3)
            AND (o.valid_until IS NULL OR o.valid_until > ?3)",
     )?;
-    let mut has_incomplete = |model_id: &str| -> Result<bool, rusqlite::Error> {
-        let rows = statement.query_map(params![cutoff, model_id, now], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<f64>>(2)?,
-                row.get::<_, Option<f64>>(3)?,
-            ))
-        })?;
-        for row in rows {
-            let (scope, provider_key, input, output) = row?;
-            let applies = match scope.as_str() {
-                "runtime_provider" => provider_key
-                    .as_deref()
-                    .is_some_and(|key| key.eq_ignore_ascii_case(runtime_provider)),
-                "provider_profile" => profile_key.is_some_and(|profile| {
-                    provider_key
-                        .as_deref()
-                        .is_some_and(|key| key.eq_ignore_ascii_case(profile))
-                }),
-                "canonical" => canonical_provider.is_some_and(|provider| {
-                    provider_key
-                        .as_deref()
-                        .is_some_and(|key| key.eq_ignore_ascii_case(provider))
-                }),
-                _ => false,
-            };
-            if applies && (input.is_none() || output.is_none()) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    };
-    if has_incomplete(&normalize_price_id(model))? {
-        return Ok(true);
-    }
-    if let Some((_, canonical_id)) = canonical_model.and_then(|value| value.split_once('/'))
-        && has_incomplete(&normalize_price_id(canonical_id))?
-    {
-        return Ok(true);
-    }
-    Ok(false)
+    has_incomplete_on_connection_with_statements(
+        &mut statement,
+        runtime_provider,
+        profile_key,
+        model,
+        canonical_model,
+        cutoff,
+        now,
+    )
 }
 
 fn has_incomplete_on_connection_with_statements(
