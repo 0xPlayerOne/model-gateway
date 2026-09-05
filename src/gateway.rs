@@ -34,7 +34,6 @@ use crate::config::{
 use crate::pricing::{
     EffectivePrice, PriceScope, PriceSourceKind, fetch_models_dev, normalize_price_id,
 };
-use crate::providers::BuiltinProvider;
 use crate::providers::ConnectionCheck;
 use crate::providers::prepare_request;
 use crate::providers::{fetch_account_limit, fetch_catalog};
@@ -333,50 +332,46 @@ pub struct PricingCoverageReport {
     pub estimated: Option<bool>,
 }
 
+fn canonical_for<'a>(provider: Option<&'a ProviderConfig>, model: &str) -> Option<&'a str> {
+    provider.and_then(|provider| provider.model_mappings.get(model).map(String::as_str))
+}
+
 pub fn report_pricing_coverage(
     config: &Config,
     routing: &RoutingStore,
     provider_filter: Option<&str>,
 ) -> Result<Vec<PricingCoverageReport>, RoutingError> {
     let offerings = routing.all_candidates(config.server.catalog_max_age_seconds)?;
-    offerings
+    let filtered: Vec<CatalogOffering> = offerings
         .into_iter()
         .filter(|offering| {
             provider_filter.is_none_or(|provider| provider == offering.provider)
                 && !is_provider_auto_route(&offering.model)
         })
+        .collect();
+    if filtered.is_empty() {
+        return Ok(Vec::new());
+    }
+    let queries: Vec<(String, Option<String>, String, Option<String>)> = filtered
+        .iter()
         .map(|offering| {
             let provider_config = config.providers.get(&offering.provider);
-            let profile_key = provider_config.and_then(|provider| {
-                provider
-                    .pricing_profile
-                    .as_deref()
-                    .or_else(|| provider.profile.and_then(BuiltinProvider::models_dev_key))
-            });
-            let canonical = provider_config.and_then(|provider| {
-                provider
-                    .model_mappings
-                    .get(&offering.model)
-                    .map(String::as_str)
-            });
-            let effective = routing.effective_price(
-                &offering.provider,
-                profile_key,
-                &offering.model,
-                canonical,
-                config.server.pricing_max_age_seconds,
-            )?;
-            let incomplete_observation = if effective.is_none() {
-                routing.has_incomplete_price_observation(
-                    &offering.provider,
-                    profile_key,
-                    &offering.model,
-                    canonical,
-                    config.server.pricing_max_age_seconds,
-                )?
-            } else {
-                false
-            };
+            let profile_key = provider_config.and_then(|p| identity_provider_key(p));
+            let canonical = canonical_for(provider_config, &offering.model);
+            (
+                offering.provider.clone(),
+                profile_key.map(ToOwned::to_owned),
+                offering.model.clone(),
+                canonical.map(ToOwned::to_owned),
+            )
+        })
+        .collect();
+    let coverages =
+        routing.batch_price_coverage(&queries, config.server.pricing_max_age_seconds)?;
+    filtered
+        .into_iter()
+        .zip(coverages)
+        .map(|(offering, (effective, incomplete_observation))| {
             let direct_complete = offering.input_price_per_million.is_some()
                 && offering.output_price_per_million.is_some();
             let direct_incomplete = offering.input_price_per_million.is_some()
@@ -2618,39 +2613,13 @@ async fn load_catalog_snapshot(
         candidates.retain(|candidate| candidate.offering.access_kind.is_paid_route_eligible());
     }
     let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
-    let benchmark_fetched_at = routing_operation(state.routing.clone(), move |routing| {
-        routing
-            .active_benchmark_snapshot(benchmark_max_age)
-            .map(|snapshot| snapshot.map(|(_, fetched_at, _)| fetched_at))
-    })
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-    let identity_last_modified = routing_operation(state.routing.clone(), |routing| {
-        routing.identity_last_modified()
-    })
-    .await
-    .map_err(|_| ())?;
-    let pricing_last_modified = routing_operation(state.routing.clone(), |routing| {
-        routing.pricing_status().map(|snapshots| {
-            snapshots
-                .into_iter()
-                .map(|snapshot| snapshot.2)
-                .max()
-                .unwrap_or(0)
-        })
-    })
-    .await
-    .map_err(|_| ())?;
-    let benchmark_last_modified = routing_operation(state.routing.clone(), |routing| {
-        routing.benchmark_status().map(|snapshots| {
-            snapshots
-                .into_iter()
-                .map(|snapshot| snapshot.1)
-                .max()
-                .unwrap_or(0)
-        })
+    let (
+        benchmark_fetched_at,
+        identity_last_modified,
+        pricing_last_modified,
+        benchmark_last_modified,
+    ) = routing_operation(state.routing.clone(), move |routing| {
+        routing.catalog_snapshot_timestamps(benchmark_max_age)
     })
     .await
     .map_err(|_| ())?;
@@ -2766,21 +2735,21 @@ fn identity_provider_key(provider: &ProviderConfig) -> Option<&str> {
 }
 
 fn group_benchmarks(benchmarks: Vec<BenchmarkModel>) -> BTreeMap<String, Vec<BenchmarkModel>> {
+    group_benchmarks_iter(benchmarks)
+}
+
+fn group_benchmarks_ref(benchmarks: &[BenchmarkModel]) -> BTreeMap<String, Vec<BenchmarkModel>> {
+    group_benchmarks_iter(benchmarks.iter().cloned())
+}
+
+fn group_benchmarks_iter(
+    benchmarks: impl IntoIterator<Item = BenchmarkModel>,
+) -> BTreeMap<String, Vec<BenchmarkModel>> {
     let mut map = BTreeMap::new();
     for benchmark in benchmarks {
         map.entry(benchmark.id.clone())
             .or_insert_with(Vec::new)
             .push(benchmark);
-    }
-    map
-}
-
-fn group_benchmarks_ref(benchmarks: &[BenchmarkModel]) -> BTreeMap<String, Vec<BenchmarkModel>> {
-    let mut map = BTreeMap::new();
-    for benchmark in benchmarks {
-        map.entry(benchmark.id.clone())
-            .or_insert_with(Vec::new)
-            .push(benchmark.clone());
     }
     map
 }
@@ -2945,31 +2914,27 @@ async fn load_effective_prices(
             let provider = state.config.providers.get(&offering.provider)?;
             Some((
                 offering.provider.clone(),
-                offering.model.clone(),
                 identity_provider_key(provider).map(ToOwned::to_owned),
+                offering.model.clone(),
                 provider.model_mappings.get(&offering.model).cloned(),
             ))
         })
         .collect::<Vec<_>>();
+    if requests.is_empty() {
+        return BTreeMap::new();
+    }
+    let keys: Vec<(String, String)> = requests
+        .iter()
+        .map(|(provider, _, model, _)| (provider.clone(), model.clone()))
+        .collect();
     let pricing_max_age_seconds = state.config.server.pricing_max_age_seconds;
     routing_operation(state.routing.clone(), move |routing| {
-        let mut prices = BTreeMap::new();
-        for (provider, model, profile_key, canonical_model) in requests {
-            if let Some(price) = routing
-                .effective_price(
-                    &provider,
-                    profile_key.as_deref(),
-                    &model,
-                    canonical_model.as_deref(),
-                    pricing_max_age_seconds,
-                )
-                .ok()
-                .flatten()
-            {
-                prices.insert((provider, model), price);
-            }
-        }
-        Ok(prices)
+        Ok(routing
+            .batch_effective_prices(&requests, pricing_max_age_seconds)?
+            .into_iter()
+            .zip(keys)
+            .filter_map(|(price, key)| Some((key, price?)))
+            .collect::<BTreeMap<_, _>>())
     })
     .await
     .unwrap_or_default()
@@ -3215,10 +3180,7 @@ async fn list_auto_models(
     let benchmark_max_age = cfg.benchmark_max_age_seconds;
     let catalog_max_age = cfg.catalog_max_age_seconds;
 
-    let (free_offerings, paid_offerings, benchmarks, account_limits) = match tokio::try_join!(
-        routing_operation(state.routing.clone(), move |routing| {
-            routing.all_candidates(catalog_max_age)
-        }),
+    let (all_offerings, benchmarks, account_limits) = match tokio::try_join!(
         routing_operation(state.routing.clone(), move |routing| {
             routing.all_candidates(catalog_max_age)
         }),
@@ -3241,10 +3203,10 @@ async fn list_auto_models(
 
     let benchmark_by_model = group_benchmarks_ref(&benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
-    let prices = load_effective_prices(&state, &paid_offerings).await;
+    let prices = load_effective_prices(&state, &all_offerings).await;
 
     let free_candidates = collect_free_candidates(
-        &free_offerings,
+        &all_offerings,
         &benchmark_by_model,
         FreeCandidateContext {
             providers: &state.config.providers,
@@ -3256,7 +3218,7 @@ async fn list_auto_models(
         },
     );
     let paid_candidates = collect_paid_candidates(
-        &paid_offerings,
+        &all_offerings,
         &benchmark_by_model,
         PaidCandidateContext {
             providers: &state.config.providers,

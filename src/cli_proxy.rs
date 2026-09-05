@@ -7,7 +7,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::storage::write_atomic;
+use crate::storage::{hex, set_unix_mode, write_atomic};
 
 pub const VERSION: &str = "7.2.103";
 pub const PROVIDER_KEY: &str = "cli-proxy";
@@ -369,16 +369,6 @@ fn release_asset() -> Result<ReleaseAsset, CliProxyError> {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    output
-}
-
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), CliProxyError> {
     write_atomic(path, bytes)?;
     set_private_file(path)?;
@@ -409,40 +399,16 @@ fn random_bytes<const N: usize>() -> Result<[u8; N], CliProxyError> {
     Ok(bytes)
 }
 
-#[cfg(unix)]
 fn set_private_dir(path: &Path) -> Result<(), CliProxyError> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    Ok(())
+    set_unix_mode(path, 0o700).map_err(CliProxyError::from)
 }
 
-#[cfg(not(unix))]
-fn set_private_dir(_path: &Path) -> Result<(), CliProxyError> {
-    Ok(())
-}
-
-#[cfg(unix)]
 fn set_private_file(path: &Path) -> Result<(), CliProxyError> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+    set_unix_mode(path, 0o600).map_err(CliProxyError::from)
 }
 
-#[cfg(not(unix))]
-fn set_private_file(_path: &Path) -> Result<(), CliProxyError> {
-    Ok(())
-}
-
-#[cfg(unix)]
 fn set_executable(path: &Path) -> Result<(), CliProxyError> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> Result<(), CliProxyError> {
-    Ok(())
+    set_unix_mode(path, 0o700).map_err(CliProxyError::from)
 }
 
 #[cfg(test)]
