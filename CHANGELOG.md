@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.14.19](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.18...v0.14.19) (2026-09-05)
+
+
+### Maintenance
+
+* batch effective price lookups and dedupe pricing helpers ([#223](https://github.com/0xPlayerOne/model-gateway/issues/223)) ([8a334b8](https://github.com/0xPlayerOne/model-gateway/commit/8a334b84f4959238fec8d277211b3dfa2ea435aa))
+* batch pricing coverage queries and dedupe helpers ([#220](https://github.com/0xPlayerOne/model-gateway/issues/220)) ([755e290](https://github.com/0xPlayerOne/model-gateway/commit/755e290e6e593ad1a199d6bcbb2a9be6c105d73c))
+* dedupe benchmark grouping and eliminate duplicate catalog query ([#214](https://github.com/0xPlayerOne/model-gateway/issues/214)) ([ea1073c](https://github.com/0xPlayerOne/model-gateway/commit/ea1073c21b75bb613c6f54dd93c3a731be78b928))
+* dedupe hex/permission helpers and batch catalog timestamps ([#217](https://github.com/0xPlayerOne/model-gateway/issues/217)) ([49bad5d](https://github.com/0xPlayerOne/model-gateway/commit/49bad5d5669dae5ba1e31f692fb9cdb94cb185a1))
+* **deps:** weekly update ([f260cce](https://github.com/0xPlayerOne/model-gateway/commit/f260ccee7ab213e5570744ae15043e59af43422b))
+* **sync:** adopt code-foundry v0.40.3 baseline ([1f98a00](https://github.com/0xPlayerOne/model-gateway/commit/1f98a00390b78577e58c3a8cd9b36287eaa5a690))
+
 ## [0.14.18](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.17...v0.14.18) (2026-08-30)
 
 
