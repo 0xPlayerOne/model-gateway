@@ -33,12 +33,18 @@ jobs:
     outputs:
       mode: ${{ steps.classify.outputs.mode }}
     steps:
+      # The runtime classifies policy from the consumer repository's config.
+      # Keep this checkout before the isolated runtime checkout below.
+      - name: Checkout consumer repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Checkout runtime
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           repository: 0xPlayerOne/code-foundry
-          ref: v0.39.0
+          ref: v1.0.0
           path: .github/.code-foundry
           sparse-checkout: |
             src/lib
@@ -66,11 +72,11 @@ jobs:
       contents: read
       packages: read
       security-events: write
-    uses: 0xPlayerOne/code-foundry/.github/workflows/validation.yml@v0.39.0
+    uses: 0xPlayerOne/code-foundry/.github/workflows/validation.yml@v1.0.0
     with:
       mode: ${{ needs.mode.outputs.mode }}
       runtime-repository: 0xPlayerOne/code-foundry
-      runtime-ref: v0.39.0
+      runtime-ref: v1.0.0
       ci-runner: ubuntu-latest
       test-runner: ubuntu-latest
       unit-runner: ubuntu-latest
