@@ -2914,31 +2914,27 @@ async fn load_effective_prices(
             let provider = state.config.providers.get(&offering.provider)?;
             Some((
                 offering.provider.clone(),
-                offering.model.clone(),
                 identity_provider_key(provider).map(ToOwned::to_owned),
+                offering.model.clone(),
                 provider.model_mappings.get(&offering.model).cloned(),
             ))
         })
         .collect::<Vec<_>>();
+    if requests.is_empty() {
+        return BTreeMap::new();
+    }
+    let keys: Vec<(String, String)> = requests
+        .iter()
+        .map(|(provider, _, model, _)| (provider.clone(), model.clone()))
+        .collect();
     let pricing_max_age_seconds = state.config.server.pricing_max_age_seconds;
     routing_operation(state.routing.clone(), move |routing| {
-        let mut prices = BTreeMap::new();
-        for (provider, model, profile_key, canonical_model) in requests {
-            if let Some(price) = routing
-                .effective_price(
-                    &provider,
-                    profile_key.as_deref(),
-                    &model,
-                    canonical_model.as_deref(),
-                    pricing_max_age_seconds,
-                )
-                .ok()
-                .flatten()
-            {
-                prices.insert((provider, model), price);
-            }
-        }
-        Ok(prices)
+        Ok(routing
+            .batch_effective_prices(&requests, pricing_max_age_seconds)?
+            .into_iter()
+            .zip(keys)
+            .filter_map(|(price, key)| Some((key, price?)))
+            .collect::<BTreeMap<_, _>>())
     })
     .await
     .unwrap_or_default()
