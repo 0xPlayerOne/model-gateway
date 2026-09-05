@@ -44,7 +44,7 @@ jobs:
     with:
       # This is the scanner checkout ref, not the consumer PR ref. The
       # reusable workflow already checks out the consumer repository.
-      source_ref: b3dce823322672b285fbe99b870ea984c01826cb
+      source_ref: 137698ef3545204af8fad00fc8bd64d663c8122e
       runner: ubuntu-latest
       model: opencode-go/muse-spark-1.2-contributor
       mode: standard
