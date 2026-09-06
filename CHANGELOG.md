@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.22](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.21...v0.14.22) (2026-09-06)
+
+
+### Maintenance
+
+* dedupe fingerprint helpers and number formatters ([#233](https://github.com/0xPlayerOne/model-gateway/issues/233)) ([67d2f10](https://github.com/0xPlayerOne/model-gateway/commit/67d2f10f5b7ae865f24b8b176df86a02545481cd))
+
 ## [0.14.21](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.20...v0.14.21) (2026-09-06)
 
 
