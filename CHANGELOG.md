@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.23](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.22...v0.14.23) (2026-09-06)
+
+
+### Maintenance
+
+* **deps:** bump toml ([#227](https://github.com/0xPlayerOne/model-gateway/issues/227)) ([1723952](https://github.com/0xPlayerOne/model-gateway/commit/1723952e0ad7c51c726fbdd4042ce14beb742910))
+
 ## [0.14.22](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.21...v0.14.22) (2026-09-06)
 
 
