@@ -46,7 +46,7 @@ jobs:
       # reusable workflow already checks out the consumer repository.
       source_ref: 137698ef3545204af8fad00fc8bd64d663c8122e
       runner: ubuntu-latest
-      model: opencode-go/muse-spark-1.2-contributor
+      model: opencode-go/muse-spark-1.3-contributor
       mode: standard
       fail_on_severity: high
       max_cost_usd: 1
