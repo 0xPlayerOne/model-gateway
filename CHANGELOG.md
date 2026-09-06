@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.24](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.23...v0.14.24) (2026-09-06)
+
+
+### Maintenance
+
+* sync opencode-security scanner model to muse-spark-1.3 ([#236](https://github.com/0xPlayerOne/model-gateway/issues/236)) ([c54f568](https://github.com/0xPlayerOne/model-gateway/commit/c54f568c2c4e2516e18c1e31b23e1dabe1ed9b9e))
+
 ## [0.14.23](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.22...v0.14.23) (2026-09-06)
 
 
