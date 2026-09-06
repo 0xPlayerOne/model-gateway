@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.21](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.20...v0.14.21) (2026-09-06)
+
+
+### Maintenance
+
+* **sync:** adopt code-foundry v1.0.4 baseline ([1d147a0](https://github.com/0xPlayerOne/model-gateway/commit/1d147a04648d7d27f02d9a4cc2d2c0dc68f4ea6a))
+
 ## [0.14.20](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.19...v0.14.20) (2026-09-06)
 
 
