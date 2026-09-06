@@ -84,6 +84,17 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     output
 }
 
+pub(crate) fn fingerprint_lines(mut lines: Vec<String>) -> String {
+    use sha2::Digest;
+    lines.sort();
+    let mut digest = sha2::Sha256::new();
+    for line in &lines {
+        digest.update(line.as_bytes());
+        digest.update(b"\n");
+    }
+    hex(&digest.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

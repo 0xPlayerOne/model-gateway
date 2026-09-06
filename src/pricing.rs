@@ -4,7 +4,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::Digest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -166,7 +165,7 @@ pub fn summarize_pricing(observations: &[PriceObservation]) -> PricingCoverageSu
 /// in-place revisions (a changed rate, cache rate, or source as-of changes the
 /// fingerprint).
 pub fn fingerprint_price_observations(observations: &[PriceObservation]) -> String {
-    let mut lines = observations
+    let lines = observations
         .iter()
         .map(|observation| {
             let rates = &observation.rates;
@@ -194,13 +193,7 @@ pub fn fingerprint_price_observations(observations: &[PriceObservation]) -> Stri
             )
         })
         .collect::<Vec<_>>();
-    lines.sort();
-    let mut digest = sha2::Sha256::new();
-    for line in lines {
-        digest.update(line.as_bytes());
-        digest.update(b"\n");
-    }
-    crate::storage::hex(&digest.finalize())
+    crate::storage::fingerprint_lines(lines)
 }
 
 pub(crate) fn fmt_number(value: Option<f64>) -> String {

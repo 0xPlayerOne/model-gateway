@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::Digest;
 
 use crate::pricing::fmt_number;
 
@@ -634,7 +633,7 @@ fn aa_reasoning_effort(item: &Value) -> Option<String> {
 /// when the source published no new revision, while any score, price, effort,
 /// or provenance change alters the fingerprint.
 pub fn fingerprint_benchmark_models(models: &[BenchmarkModel]) -> String {
-    let mut lines = models
+    let lines = models
         .iter()
         .map(|model| {
             format!(
@@ -663,13 +662,7 @@ pub fn fingerprint_benchmark_models(models: &[BenchmarkModel]) -> String {
             )
         })
         .collect::<Vec<_>>();
-    lines.sort();
-    let mut digest = sha2::Sha256::new();
-    for line in lines {
-        digest.update(line.as_bytes());
-        digest.update(b"\n");
-    }
-    crate::storage::hex(&digest.finalize())
+    crate::storage::fingerprint_lines(lines)
 }
 
 fn fmt_score(value: Option<f64>) -> String {
