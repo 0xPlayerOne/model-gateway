@@ -3010,37 +3010,19 @@ pub(crate) fn catalog_records_fingerprint(records: &[CatalogRecord]) -> String {
                 "{}|{}|{}|{}|{}|{}|{}|{}",
                 record.model,
                 record.access_kind.as_str(),
-                opt_u64(record.context_length),
-                opt_bool(record.supports_tools),
-                opt_bool(record.supports_vision),
-                opt_bool(record.supports_structured_output),
-                opt_f64(record.input_price_per_million),
-                opt_f64(record.output_price_per_million),
+                opt_value(record.context_length),
+                opt_value(record.supports_tools),
+                opt_value(record.supports_vision),
+                opt_value(record.supports_structured_output),
+                crate::pricing::fmt_number(record.input_price_per_million),
+                crate::pricing::fmt_number(record.output_price_per_million),
             )
         })
         .collect::<Vec<_>>();
-    fingerprint_lines(lines)
+    crate::storage::fingerprint_lines(lines)
 }
 
-fn fingerprint_lines(mut lines: Vec<String>) -> String {
-    lines.sort();
-    let mut digest = Sha256::new();
-    for line in lines {
-        digest.update(line.as_bytes());
-        digest.update(b"\n");
-    }
-    crate::storage::hex(&digest.finalize())
-}
-
-fn opt_u64(value: Option<u64>) -> String {
-    value.map_or_else(String::new, |value| value.to_string())
-}
-
-fn opt_f64(value: Option<f64>) -> String {
-    value.map_or_else(String::new, |value| value.to_string())
-}
-
-fn opt_bool(value: Option<bool>) -> String {
+fn opt_value<T: ToString>(value: Option<T>) -> String {
     value.map_or_else(String::new, |value| value.to_string())
 }
 
