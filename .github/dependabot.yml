@@ -17,25 +17,6 @@ updates:
       github-actions:
         applies-to: version-updates
         patterns: ['*']
-  - package-ecosystem: npm
-    directory: /
-    target-branch: main
-    schedule:
-      interval: weekly
-      day: sunday
-    open-pull-requests-limit: 99
-    groups:
-      npm-dependencies:
-        applies-to: version-updates
-        patterns: ['*']
-    ignore:
-      # TypeScript 7 cannot resolve node: builtins in this toolchain
-      # (verified); revisit when the TS/eslint toolchain supports TS 7.
-      - dependency-name: 'typescript'
-        versions: ['>=7.0.0']
-      # Held with TypeScript 5.9 above.
-      - dependency-name: '@types/node'
-        versions: ['>=23']
   - package-ecosystem: cargo
     directory: /
     target-branch: main
@@ -45,16 +26,5 @@ updates:
     open-pull-requests-limit: 99
     groups:
       cargo-dependencies:
-        applies-to: version-updates
-        patterns: ['*']
-  - package-ecosystem: pip
-    directory: /
-    target-branch: main
-    schedule:
-      interval: weekly
-      day: sunday
-    open-pull-requests-limit: 99
-    groups:
-      python-dependencies:
         applies-to: version-updates
         patterns: ['*']
