@@ -28,10 +28,18 @@ jobs:
         id: detect
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_SECURITY_OVERRIDE: ${{ vars.OPENCODE_SECURITY }}
         run: |
           enabled=false
           token=false
-          if grep -Eq '^opencode_security:\s*(true|auto)\s*$' .github/code-foundry.yml 2>/dev/null; then enabled=true; fi
+          # The OPENCODE_SECURITY repository variable overrides the
+          # configuration: true opts a repository in, false opts it out, and
+          # an unset value falls back to the code-foundry configuration.
+          if [ "$OPENCODE_SECURITY_OVERRIDE" = "true" ]; then
+            enabled=true
+          elif [ "$OPENCODE_SECURITY_OVERRIDE" = "false" ]; then
+            enabled=false
+          elif grep -Eq '^opencode_security:\s*(true|auto)\s*$' .github/code-foundry.yml 2>/dev/null; then enabled=true; fi
           if [ -n "$OPENCODE_API_KEY" ]; then token=true; fi
           echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
           echo "token=$token" >> "$GITHUB_OUTPUT"
