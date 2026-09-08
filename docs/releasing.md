@@ -2,8 +2,8 @@
 
 ## Normal release
 
-1. Merge the validated `staging` branch into `main` through the release pull request.
-2. Let the Code Foundry release workflow create the versioned GitHub release.
+1. Squash-merge the validated feature or fix pull request directly into `main`.
+2. Let Code Foundry open and automatically squash-merge the Release Please pull request, then create the versioned GitHub release.
 3. When the release is published, `Release Artifacts` builds the native archives and the container image automatically.
 4. Check the GitHub release page for the three archives, their SHA-256 files, and the published container tag.
 

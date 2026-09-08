@@ -3,6 +3,7 @@ name: Release PR Guard
 on:
   pull_request:
     branches: [main]
+    types: [ready_for_review]
 
 permissions:
   contents: read
@@ -10,16 +11,20 @@ permissions:
 jobs:
   generated-body:
     name: Generated Release Body
-    if: >-
-      startsWith(github.event.pull_request.title, 'chore(main): release ') &&
-      startsWith(github.event.pull_request.head.ref, 'release-please--branches--main')
     runs-on: ubuntu-slim
     env:
       RELEASE_PR_BODY: ${{ github.event.pull_request.body }}
+      RELEASE_PR_HEAD: ${{ github.event.pull_request.head.ref }}
+      RELEASE_PR_TITLE: ${{ github.event.pull_request.title }}
     steps:
       - name: Require the Release Please body marker
         run: |
           set -euo pipefail
+          if [[ "$RELEASE_PR_TITLE" != 'chore(main): release '* ]] ||
+             [[ "$RELEASE_PR_HEAD" != release-please--branches--main* ]]; then
+            echo 'This is not a Release Please pull request; no release-body validation is required.'
+            exit 0
+          fi
           if ! printf '%s' "$RELEASE_PR_BODY" | grep -Fq 'This PR was generated with [Release Please]'; then
             echo 'The generated Release Please body marker is missing.' >&2
             echo 'Restore the generated body instead of replacing it with manual release notes.' >&2

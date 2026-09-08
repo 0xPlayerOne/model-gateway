@@ -4,7 +4,10 @@ languages: rust
 features: all
 package_manager: none
 runtime_repository: 0xPlayerOne/code-foundry
-runtime_ref: v1.5.1
+runtime_ref: v1.9.11
+performance_runner: ubuntu-latest
+performance: true
+performance_command: '[["python3","-m","unittest","discover","-s","tests","-p","test_performance_audit.py"],["python3","scripts/performance_audit.py","--check","--output","performance-results.json"]]'
 runner: ubuntu-latest
 unit_runner: ubuntu-latest
 ci_runner: ubuntu-latest
@@ -22,19 +25,19 @@ release_type: rust
 npm_publish: false
 license: agpl-3.0-or-later
 git_workflow: direct
-merge_strategy: rebase
+merge_strategy: squash
 codeql: auto
 dependency_review: auto
 toolchain: auto
 post_release: false
 post_release_workflow:
 post_release_mode: auto
-opencode_security: true
 sync_mode: overlay
 custom_workflows: preserve
 codeql_rust_shards: '["all"]'
 codeql_rust_threads: 1
 codeql_rust_max_parallel: 1
-release_merge_strategy: rebase
+release_merge_strategy: squash
 opencode_security_model:
-staging_validation_mode: fast
+performance_profile:
+performance_budget_file: performance-package-budgets.json

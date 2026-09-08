@@ -1519,6 +1519,7 @@ fn credentials(command: CredentialCommand) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::{Read, Write};
 
     use model_gateway::config::{Config, ModelConfig, ProviderConfig, TargetConfig};
     use model_gateway::secrets::SecretResolver;
@@ -1526,9 +1527,90 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        Cli, apply_pending_secrets, config_diff, parse_manual_price_imports, rollback_secrets,
-        validate_provider_filter,
+        Cli, apply_pending_secrets, combined_update_error, config_diff, healthcheck,
+        parse_manual_price_imports, rollback_secrets, validate_provider_filter,
     };
+
+    fn health_response(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn spawn_health_stub(responses: Vec<String>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub bind");
+        let address = listener.local_addr().expect("stub address");
+        std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[test]
+    fn healthcheck_accepts_ready_responses_and_trims_trailing_slashes() {
+        let endpoint = spawn_health_stub(vec![health_response("200 OK", r#"{"status":"ready"}"#)]);
+
+        healthcheck(&format!("{endpoint}///")).expect("ready gateway should pass");
+    }
+
+    #[test]
+    fn healthcheck_prefers_diagnostics_when_ready_returns_an_error() {
+        let endpoint = spawn_health_stub(vec![
+            health_response("503 Service Unavailable", r#"{"status":"not_ready"}"#),
+            health_response("200 OK", r#"{"provider":"fixture","credential":"missing"}"#),
+        ]);
+
+        let error = healthcheck(&endpoint).expect_err("not-ready gateway should fail");
+        let error = error.to_string();
+        assert!(error.contains("gateway health check failed (503 Service Unavailable)"));
+        assert!(error.contains("credential"));
+        assert!(error.contains("missing"));
+    }
+
+    #[test]
+    fn healthcheck_falls_back_to_ready_body_when_diagnostics_are_unavailable() {
+        let endpoint = spawn_health_stub(vec![health_response(
+            "503 Service Unavailable",
+            r#"{"status":"not_ready","reason":"catalog unavailable"}"#,
+        )]);
+
+        let error = healthcheck(&endpoint).expect_err("not-ready gateway should fail");
+        let error = error.to_string();
+        assert!(error.contains("catalog unavailable"));
+        assert!(!error.contains("no diagnostic response body"));
+    }
+
+    #[test]
+    fn healthcheck_reports_a_safe_message_when_bodies_are_empty() {
+        let endpoint = spawn_health_stub(vec![health_response("503 Service Unavailable", "")]);
+
+        let error = healthcheck(&endpoint).expect_err("not-ready gateway should fail");
+        assert!(error.to_string().contains("no diagnostic response body"));
+    }
+
+    #[test]
+    fn combined_update_error_preserves_primary_and_reports_rollback_failures() {
+        assert_eq!(
+            combined_update_error("configuration update", "primary error", None::<&str>),
+            "primary error"
+        );
+        assert_eq!(
+            combined_update_error(
+                "configuration update",
+                "primary error",
+                Some("rollback error"),
+            ),
+            "configuration update failed; rollback also failed: primary error; rollback error"
+        );
+    }
 
     #[test]
     fn config_diff_contains_no_secret_values() {
