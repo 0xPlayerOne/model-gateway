@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.14.27](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.26...v0.14.27) (2026-09-08)
+
+
+### Bug Fixes
+
+* **ci:** pin generated callers to the adopted v1.4.1 runtime ([#246](https://github.com/0xPlayerOne/model-gateway/issues/246)) ([cb1b5f7](https://github.com/0xPlayerOne/model-gateway/commit/cb1b5f7401a897947eafd34f0e0bf36c4362955d))
+
+
+### Performance
+
+* add build and runtime regression audit ([#249](https://github.com/0xPlayerOne/model-gateway/issues/249)) ([3797bb6](https://github.com/0xPlayerOne/model-gateway/commit/3797bb61aabd94f05ecde93c2c050ebdd65c6d4c))
+
+
+### Maintenance
+
+* **code-foundry:** upgrade runtime to v1.4.1 ([#243](https://github.com/0xPlayerOne/model-gateway/issues/243)) ([177ce98](https://github.com/0xPlayerOne/model-gateway/commit/177ce9841d9eefb04456982adb4ad04012a89ae0))
+* **code-foundry:** upgrade to v1.5.0 ([#248](https://github.com/0xPlayerOne/model-gateway/issues/248)) ([17ef8d2](https://github.com/0xPlayerOne/model-gateway/commit/17ef8d238abaf191dbfff7b08becb8851628f76d))
+
 ## [0.14.26](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.25...v0.14.26) (2026-09-07)
 
 
