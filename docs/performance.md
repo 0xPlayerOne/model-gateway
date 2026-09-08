@@ -43,9 +43,11 @@ resolution, exact provider/model lookup, SQLite-backed effective-price lookup,
 proxying, response validation, and gateway response headers. It excludes the
 mock provider's own measured latency by using the direct path as the control.
 
-The `Performance / Audit` workflow runs for runtime, dependency, harness, and
-threshold changes, weekly, and on manual dispatch. Its JSON result is uploaded
-as a workflow artifact so regressions can be compared without copying log text.
+Code Foundry's shared `Validation / Test / Performance` job runs the audit on
+pull requests and scheduled or manual validation. Its ordered command contract
+first tests the audit calculations, then enforces the thresholds. Its JSON result
+and shared summary are uploaded as workflow artifacts so regressions can be
+compared without copying log text.
 
 ## Baseline and findings
 
