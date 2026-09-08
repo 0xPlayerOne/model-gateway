@@ -1,0 +1,57 @@
+name: Performance
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/performance.yml
+      - Cargo.lock
+      - Cargo.toml
+      - performance/**
+      - scripts/mock_provider.py
+      - scripts/performance_audit.py
+      - src/**
+      - tests/test_performance_audit.py
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/performance.yml
+      - Cargo.lock
+      - Cargo.toml
+      - performance/**
+      - scripts/mock_provider.py
+      - scripts/performance_audit.py
+      - src/**
+      - tests/test_performance_audit.py
+  schedule:
+    - cron: '17 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.event_name }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825a76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Test audit calculations
+        run: python3 -m unittest discover -s tests -p 'test_performance_audit.py'
+      - name: Measure and enforce performance thresholds
+        run: python3 scripts/performance_audit.py --check --output performance-results.json
+      - name: Upload audit result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: performance-results
+          path: performance-results.json
+          if-no-files-found: warn
