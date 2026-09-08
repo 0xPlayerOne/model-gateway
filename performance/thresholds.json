@@ -1,0 +1,9 @@
+{
+  "debug_build_seconds": 600.0,
+  "release_build_seconds": 900.0,
+  "startup_ready_ms": 5000.0,
+  "gateway_request_p95_ms": 100.0,
+  "provider_routing_overhead_p50_ms": 25.0,
+  "resident_memory_mib": 128.0,
+  "release_binary_mib": 32.0
+}

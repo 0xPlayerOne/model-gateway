@@ -183,7 +183,11 @@ cargo test                          # run all tests
 cargo fmt --check                   # formatting
 cargo clippy -- -D warnings         # lint
 cargo run -- --help                 # CLI help
+python3 scripts/performance_audit.py --check  # cold-build + runtime regression gate
 ```
+
+See [Performance audit](docs/performance.md) for metric definitions, thresholds,
+baseline methodology, and the fast runtime-only mode.
 
 ## Installation
 
