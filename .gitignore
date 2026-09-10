@@ -46,7 +46,7 @@ cache/
 !.github/actions/cache/action.yml
 typechain/
 coverage.json
-performance-results/
+.code-foundry/
 tests/.bin/
 **/.app/
 
