@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.29](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.28...v0.14.29) (2026-09-10)
+
+
+### Maintenance
+
+* **ci:** upgrade Code Foundry to v1.28.2 ([#253](https://github.com/0xPlayerOne/model-gateway/issues/253)) ([a9db7ab](https://github.com/0xPlayerOne/model-gateway/commit/a9db7abd5444ea5e077e7cff11a3ff543869ff7d))
+* **code-foundry:** upgrade runtime to v1.28.4 ([f538b7a](https://github.com/0xPlayerOne/model-gateway/commit/f538b7ac9f2e29b5351c0ec2d17900767b44fd1b))
+
 ## [0.14.28](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.27...v0.14.28) (2026-09-08)
 
 
