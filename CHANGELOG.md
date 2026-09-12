@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.32](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.31...v0.14.32) (2026-09-12)
+
+
+### Performance
+
+* index benchmark matches during routing ([#260](https://github.com/0xPlayerOne/model-gateway/issues/260)) ([983f8a1](https://github.com/0xPlayerOne/model-gateway/commit/983f8a1086bc02970843408fcae954afdc0a6626))
+
 ## [0.14.31](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.30...v0.14.31) (2026-09-11)
 
 
