@@ -586,6 +586,13 @@ fn find_exact_matching_benchmarks_indexed<'a>(
     }
 }
 
+fn find_benchmark_indexed<'a>(
+    benchmarks: &'a BenchmarkIdentityIndex,
+    model: &str,
+) -> Option<&'a BenchmarkModel> {
+    best_benchmark(find_exact_matching_benchmarks_indexed(benchmarks, model))
+}
+
 fn resolve_benchmark_identity_indexed<'a>(
     benchmarks: &'a BenchmarkIdentityIndex,
     model: &str,
@@ -636,6 +643,7 @@ fn resolve_benchmark_identity_indexed<'a>(
     BenchmarkResolution::Unmatched
 }
 
+#[cfg(test)]
 fn find_benchmark<'a>(
     benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
     model: &str,
@@ -674,6 +682,7 @@ fn find_all_matching_benchmarks<'a>(
     }
 }
 
+#[cfg(test)]
 fn find_exact_matching_benchmarks<'a>(
     benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
     model: &str,
@@ -686,6 +695,7 @@ fn find_exact_matching_benchmarks<'a>(
     }
 }
 
+#[cfg(test)]
 fn resolve_benchmark_identity<'a>(
     benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
     model: &str,
@@ -2006,11 +2016,11 @@ async fn load_paid_candidates(
     .map_err(|_| ())?;
 
     let prices = load_effective_prices(state, &offerings).await;
-    let benchmark_map = group_benchmarks(benchmarks);
+    let benchmark_index = BenchmarkIdentityIndex::new(benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     Ok(collect_paid_candidates(
         &offerings,
-        &benchmark_map,
+        &benchmark_index,
         PaidCandidateContext {
             providers: &state.config.providers,
             runtimes: &state.providers,
@@ -2041,11 +2051,11 @@ async fn load_free_candidates(
     )
     .map_err(|_| ())?;
 
-    let benchmark_map = group_benchmarks(benchmarks);
+    let benchmark_index = BenchmarkIdentityIndex::new(benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let candidates = collect_free_candidates(
         &offerings,
-        &benchmark_map,
+        &benchmark_index,
         FreeCandidateContext {
             providers: &state.config.providers,
             runtimes: &state.providers,
@@ -2734,26 +2744,6 @@ fn identity_provider_key(provider: &ProviderConfig) -> Option<&str> {
     })
 }
 
-fn group_benchmarks(benchmarks: Vec<BenchmarkModel>) -> BTreeMap<String, Vec<BenchmarkModel>> {
-    group_benchmarks_iter(benchmarks)
-}
-
-fn group_benchmarks_ref(benchmarks: &[BenchmarkModel]) -> BTreeMap<String, Vec<BenchmarkModel>> {
-    group_benchmarks_iter(benchmarks.iter().cloned())
-}
-
-fn group_benchmarks_iter(
-    benchmarks: impl IntoIterator<Item = BenchmarkModel>,
-) -> BTreeMap<String, Vec<BenchmarkModel>> {
-    let mut map = BTreeMap::new();
-    for benchmark in benchmarks {
-        map.entry(benchmark.id.clone())
-            .or_insert_with(Vec::new)
-            .push(benchmark);
-    }
-    map
-}
-
 fn is_provider_model_allowed(provider: &ProviderConfig, model: &str) -> bool {
     (provider.model_allowlist.is_empty()
         || provider
@@ -2982,7 +2972,7 @@ fn account_allows_free_access(
 
 fn collect_free_candidates(
     offerings: &[CatalogOffering],
-    benchmark_by_model: &BTreeMap<String, Vec<BenchmarkModel>>,
+    benchmark_index: &BenchmarkIdentityIndex,
     context: FreeCandidateContext<'_>,
 ) -> Vec<ModelCandidate> {
     let mut candidates = Vec::new();
@@ -3023,7 +3013,7 @@ fn collect_free_candidates(
             context.mappings,
         );
         let matching =
-            find_exact_matching_benchmarks(benchmark_by_model, &canonical.benchmark_model);
+            find_exact_matching_benchmarks_indexed(benchmark_index, &canonical.benchmark_model);
         if matching.is_empty() {
             if context.cfg.free_models_quality.passes(
                 None,
@@ -3091,7 +3081,7 @@ fn collect_free_candidates(
 
 fn collect_paid_candidates(
     offerings: &[CatalogOffering],
-    benchmark_by_model: &BTreeMap<String, Vec<BenchmarkModel>>,
+    benchmark_index: &BenchmarkIdentityIndex,
     context: PaidCandidateContext<'_>,
 ) -> Vec<ModelCandidate> {
     let mut candidates = Vec::new();
@@ -3135,7 +3125,7 @@ fn collect_paid_candidates(
             .get(&(offering.provider.clone(), offering.model.clone()))
             .cloned();
         let matching =
-            find_exact_matching_benchmarks(benchmark_by_model, &canonical.benchmark_model);
+            find_exact_matching_benchmarks_indexed(benchmark_index, &canonical.benchmark_model);
         if matching.is_empty() {
             candidates.push(ModelCandidate {
                 quality: None,
@@ -3201,13 +3191,13 @@ async fn list_auto_models(
         }
     };
 
-    let benchmark_by_model = group_benchmarks_ref(&benchmarks);
+    let benchmark_index = BenchmarkIdentityIndex::new(benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let prices = load_effective_prices(&state, &all_offerings).await;
 
     let free_candidates = collect_free_candidates(
         &all_offerings,
-        &benchmark_by_model,
+        &benchmark_index,
         FreeCandidateContext {
             providers: &state.config.providers,
             runtimes: &state.providers,
@@ -3219,7 +3209,7 @@ async fn list_auto_models(
     );
     let paid_candidates = collect_paid_candidates(
         &all_offerings,
-        &benchmark_by_model,
+        &benchmark_index,
         PaidCandidateContext {
             providers: &state.config.providers,
             runtimes: &state.providers,
@@ -4725,7 +4715,7 @@ async fn resolve_auto_free_targets(
         )
     })?;
     let (benchmark_snapshot_id, benchmark_as_of, _) = benchmark_snapshot.unwrap_or((0, 0, None));
-    let benchmark_map = group_benchmarks_ref(&benchmarks);
+    let benchmark_index = BenchmarkIdentityIndex::new(benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let classification = classify(request);
     let requirements = RequestRequirements::from_request(request);
@@ -4759,7 +4749,7 @@ async fn resolve_auto_free_targets(
             let reference = quota_reference(provider, &offering.model);
             let canonical =
                 canonical_match(provider, &offering.provider, &offering.model, &mappings);
-            let benchmark = find_benchmark(&benchmark_map, &canonical.benchmark_model);
+            let benchmark = find_benchmark_indexed(&benchmark_index, &canonical.benchmark_model);
             let quality = benchmark.and_then(composite_quality);
             let effective_input = offering
                 .input_price_per_million
@@ -5016,7 +5006,7 @@ async fn resolve_benchmark_targets(
         .and_then(Value::as_str)
         .filter(|effort| is_reasoning_effort(effort));
     let (benchmark_snapshot_id, benchmark_as_of, _) = benchmark_snapshot.unwrap_or((0, 0, None));
-    let benchmark_by_model = group_benchmarks(benchmarks);
+    let benchmark_index = BenchmarkIdentityIndex::new(benchmarks);
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let prices = load_effective_prices(state, &offerings).await;
     let mut candidates = Vec::new();
@@ -5032,7 +5022,7 @@ async fn resolve_benchmark_targets(
         }
         let canonical = canonical_match(provider, &offering.provider, &offering.model, &mappings);
         let model_benchmarks = benchmarks_for_effort(
-            find_exact_matching_benchmarks(&benchmark_by_model, &canonical.benchmark_model),
+            find_exact_matching_benchmarks_indexed(&benchmark_index, &canonical.benchmark_model),
             requested_effort,
         );
         if model_benchmarks.is_empty() {
