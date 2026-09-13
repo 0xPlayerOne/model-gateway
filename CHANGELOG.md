@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.33](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.32...v0.14.33) (2026-09-13)
+
+
+### Maintenance
+
+* **gateway:** deduplicate benchmark resolution and cache token computations ([#263](https://github.com/0xPlayerOne/model-gateway/issues/263)) ([1bbab1e](https://github.com/0xPlayerOne/model-gateway/commit/1bbab1e8e56eea806980f3274a052e3d21dbc387))
+
 ## [0.14.32](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.31...v0.14.32) (2026-09-12)
 
 
