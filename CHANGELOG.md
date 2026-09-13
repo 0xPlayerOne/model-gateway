@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.34](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.33...v0.14.34) (2026-09-13)
+
+
+### Maintenance
+
+* **deps:** bump reqwest ([#262](https://github.com/0xPlayerOne/model-gateway/issues/262)) ([702a299](https://github.com/0xPlayerOne/model-gateway/commit/702a29904d77eaed8f3f764ddb42ef742caa678a))
+
 ## [0.14.33](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.32...v0.14.33) (2026-09-13)
 
 
