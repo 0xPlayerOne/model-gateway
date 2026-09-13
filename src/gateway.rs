@@ -622,25 +622,7 @@ fn resolve_benchmark_identity_indexed<'a>(
         return BenchmarkResolution::Unmatched;
     }
 
-    for lookup in &lookups {
-        let mut groups = BTreeMap::<String, Vec<&BenchmarkModel>>::new();
-        for benchmark in &benchmarks.models {
-            let identity = benchmark_identity_id(benchmark);
-            if benchmark_ids_match(lookup, &identity) {
-                groups
-                    .entry(normalize_identifier(&identity))
-                    .or_default()
-                    .push(benchmark);
-            }
-        }
-        if groups.len() == 1 {
-            return BenchmarkResolution::Suggested(groups.into_values().next().unwrap_or_default());
-        }
-        if groups.len() > 1 {
-            return BenchmarkResolution::Ambiguous(groups.into_keys().collect());
-        }
-    }
-    BenchmarkResolution::Unmatched
+    resolve_benchmark_groups(&lookups, || benchmarks.models.iter())
 }
 
 #[cfg(test)]
@@ -695,6 +677,34 @@ fn find_exact_matching_benchmarks<'a>(
     }
 }
 
+fn resolve_benchmark_groups<'a, I>(
+    lookups: &[String],
+    mut benchmarks: impl FnMut() -> I,
+) -> BenchmarkResolution<'a>
+where
+    I: Iterator<Item = &'a BenchmarkModel>,
+{
+    for lookup in lookups {
+        let mut groups = BTreeMap::<String, Vec<&BenchmarkModel>>::new();
+        for benchmark in benchmarks() {
+            let identity = benchmark_identity_id(benchmark);
+            if benchmark_ids_match(lookup, &identity) {
+                groups
+                    .entry(normalize_identifier(&identity))
+                    .or_default()
+                    .push(benchmark);
+            }
+        }
+        if groups.len() == 1 {
+            return BenchmarkResolution::Suggested(groups.into_values().next().unwrap_or_default());
+        }
+        if groups.len() > 1 {
+            return BenchmarkResolution::Ambiguous(groups.into_keys().collect());
+        }
+    }
+    BenchmarkResolution::Unmatched
+}
+
 #[cfg(test)]
 fn resolve_benchmark_identity<'a>(
     benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
@@ -737,27 +747,8 @@ fn resolve_benchmark_identity<'a>(
         return BenchmarkResolution::Unmatched;
     }
 
-    for lookup in &lookups {
-        let mut groups = BTreeMap::<String, Vec<&BenchmarkModel>>::new();
-        for models in benchmarks.values() {
-            for benchmark in models {
-                let identity = benchmark_identity_id(benchmark);
-                if benchmark_ids_match(lookup, &identity) {
-                    groups
-                        .entry(normalize_identifier(&identity))
-                        .or_default()
-                        .push(benchmark);
-                }
-            }
-        }
-        if groups.len() == 1 {
-            return BenchmarkResolution::Suggested(groups.into_values().next().unwrap_or_default());
-        }
-        if groups.len() > 1 {
-            return BenchmarkResolution::Ambiguous(groups.into_keys().collect());
-        }
-    }
-    BenchmarkResolution::Unmatched
+    let all_benchmarks: Vec<&BenchmarkModel> = benchmarks.values().flatten().collect();
+    resolve_benchmark_groups(&lookups, || all_benchmarks.iter().copied())
 }
 
 fn benchmarks_for_effort<'a>(
@@ -923,9 +914,21 @@ fn strip_model_noise(model: &str) -> String {
 fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
     let catalog_variants = normalized_identifier_variants(catalog_id);
     let benchmark_variants = normalized_identifier_variants(benchmark_id);
-    for catalog in &catalog_variants {
-        for benchmark in &benchmark_variants {
-            if identity_variant_tokens(catalog) != identity_variant_tokens(benchmark) {
+
+    // Pre-compute identity_variant_tokens for all variants to avoid
+    // redundant recomputation in the O(n×m) nested loops below.
+    let catalog_token_sets: Vec<BTreeSet<&str>> = catalog_variants
+        .iter()
+        .map(|v| identity_variant_tokens(v))
+        .collect();
+    let benchmark_token_sets: Vec<BTreeSet<&str>> = benchmark_variants
+        .iter()
+        .map(|v| identity_variant_tokens(v))
+        .collect();
+
+    for (ci, catalog) in catalog_variants.iter().enumerate() {
+        for (bi, benchmark) in benchmark_variants.iter().enumerate() {
+            if catalog_token_sets[ci] != benchmark_token_sets[bi] {
                 continue;
             }
             if catalog == benchmark {
@@ -947,10 +950,10 @@ fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
 
     // Permit one creator/provider prefix, but never scan arbitrary suffixes:
     // that can cross families such as Nemotron and Qwen Omni.
-    for catalog in &catalog_variants {
+    for (ci, catalog) in catalog_variants.iter().enumerate() {
         let cat_tokens: Vec<&str> = catalog.split('-').collect();
-        for benchmark in &benchmark_variants {
-            if identity_variant_tokens(catalog) != identity_variant_tokens(benchmark) {
+        for (bi, benchmark) in benchmark_variants.iter().enumerate() {
+            if catalog_token_sets[ci] != benchmark_token_sets[bi] {
                 continue;
             }
             let bench_tokens: Vec<&str> = benchmark.split('-').collect();
