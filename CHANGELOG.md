@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.35](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.34...v0.14.35) (2026-09-14)
+
+
+### Maintenance
+
+* **deps:** weekly update ([#266](https://github.com/0xPlayerOne/model-gateway/issues/266)) ([6834c78](https://github.com/0xPlayerOne/model-gateway/commit/6834c78fa558e53de1aba924224386ab2371eab7))
+
 ## [0.14.34](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.33...v0.14.34) (2026-09-13)
 
 
