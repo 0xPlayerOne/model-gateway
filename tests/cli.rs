@@ -372,6 +372,92 @@ model = "fixture"
 }
 
 #[test]
+fn benchmark_delete_removes_active_snapshot() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let config_path = directory.path().join("config.toml");
+    let state_path = directory.path().join("routing.sqlite3");
+    let import_path = directory.path().join("benchmarks.json");
+    std::fs::write(
+        &config_path,
+        r#"
+[providers.local]
+adapter = "openai_chat"
+base_url = "http://localhost:8000/v1"
+
+[models.fixture]
+[[models.fixture.targets]]
+provider = "local"
+model = "fixture"
+"#,
+    )
+    .expect("write config");
+    std::fs::write(
+        &import_path,
+        r#"{
+  "source": "artificial-analysis",
+  "attribution": "Artificial Analysis",
+  "models": [{
+    "id": "delable-model",
+    "intelligence": 60.0,
+    "input_price_per_million": 1.0,
+    "output_price_per_million": 2.0
+  }]
+}"#,
+    )
+    .expect("write benchmark import");
+    let environment = |command: &mut Command| {
+        command
+            .env("MODEL_GATEWAY_CONFIG", &config_path)
+            .env("MODEL_GATEWAY_STATE_PATH", &state_path)
+            .env("MODEL_GATEWAY_SECRET_STORE", "environment");
+    };
+
+    // Import a benchmark snapshot so there is something to delete.
+    let mut import = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    import.args(["benchmarks", "import", "--file", import_path.to_str().expect("path")]);
+    environment(&mut import);
+    let output = import.output().expect("run benchmark import");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Imported artificial-analysis"));
+
+    // Verify snapshot exists via status.
+    let mut status = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    status.args(["benchmarks", "status"]);
+    environment(&mut status);
+    let output = status.output().expect("run benchmark status");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains("artificial-analysis"));
+
+    // Delete the snapshot via CLI.
+    let mut delete = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    delete.args(["benchmarks", "delete", "artificial-analysis"]);
+    environment(&mut delete);
+    let output = delete.output().expect("run benchmark delete");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Deleted benchmark snapshot"));
+
+    // Verify snapshot is gone.
+    let mut status = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
+    status.args(["benchmarks", "status"]);
+    environment(&mut status);
+    let output = status.output().expect("run benchmark status after delete");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout"),
+        "No active benchmark snapshots\n"
+    );
+}
+
+#[test]
 fn pricing_import_and_explain_use_provider_scoped_overrides() {
     let directory = tempfile::tempdir().expect("tempdir");
     let config_path = directory.path().join("config.toml");
