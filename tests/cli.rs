@@ -414,7 +414,12 @@ model = "fixture"
 
     // Import a benchmark snapshot so there is something to delete.
     let mut import = Command::new(env!("CARGO_BIN_EXE_model-gateway"));
-    import.args(["benchmarks", "import", "--file", import_path.to_str().expect("path")]);
+    import.args([
+        "benchmarks",
+        "import",
+        "--file",
+        import_path.to_str().expect("path"),
+    ]);
     environment(&mut import);
     let output = import.output().expect("run benchmark import");
     assert!(
