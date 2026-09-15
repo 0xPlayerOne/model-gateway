@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.37](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.36...v0.14.37) (2026-09-15)
+
+
+### Bug Fixes
+
+* format benchmark delete test args ([#270](https://github.com/0xPlayerOne/model-gateway/issues/270)) ([3160bec](https://github.com/0xPlayerOne/model-gateway/commit/3160beca1b2a09ceb7521c0e5f5d1eb68fe97c1b))
+
 ## [0.14.36](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.35...v0.14.36) (2026-09-15)
 
 
