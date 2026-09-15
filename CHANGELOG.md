@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.36](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.35...v0.14.36) (2026-09-15)
+
+
+### Tests
+
+* **cli:** add benchmark delete CLI coverage for main.rs ([#268](https://github.com/0xPlayerOne/model-gateway/issues/268)) ([a2f3c33](https://github.com/0xPlayerOne/model-gateway/commit/a2f3c33c394dbd173adf744482e532099491015a))
+
 ## [0.14.35](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.34...v0.14.35) (2026-09-14)
 
 
