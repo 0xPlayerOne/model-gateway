@@ -34,9 +34,9 @@ use crate::config::{
 use crate::pricing::{
     EffectivePrice, PriceScope, PriceSourceKind, fetch_models_dev, normalize_price_id,
 };
-use crate::providers::ConnectionCheck;
-use crate::providers::prepare_request;
-use crate::providers::{fetch_account_limit, fetch_catalog};
+use crate::providers::{
+    ConnectionCheck, build_http_client, fetch_account_limit, fetch_catalog, prepare_request,
+};
 use crate::routing::{
     AccessKind, AccountLimitSnapshot, CatalogOffering, CatalogRecord, IdentityAliasEvidence,
     ReservationOutcome, ReservationRelease, ReservationToken, RoutingError, RoutingStore,
@@ -6499,12 +6499,7 @@ async fn auto_refresh_benchmarks(
 }
 
 async fn fetch_aa_benchmarks(routing: Arc<RoutingStore>, api_key: &str) -> Result<usize, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!("model-gateway/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = build_http_client(Duration::from_secs(30))?;
 
     let mut all_models = Vec::new();
     let mut page = 1u64;

@@ -668,10 +668,10 @@ impl RoutingStore {
                  SELECT MAX(approved_at) AS value
                  FROM approved_model_mappings
                  UNION ALL
-                 SELECT MAX(observed_at) AS value
-                 FROM benchmark_identity_links
-                 UNION ALL
-                 SELECT MAX(approved_at) AS value
+                 SELECT MAX(
+                     COALESCE(MAX(observed_at), 0),
+                     COALESCE(MAX(approved_at), 0)
+                 ) AS value
                  FROM benchmark_identity_links
                  UNION ALL
                  SELECT MAX(approved_at) AS value
@@ -1707,10 +1707,10 @@ impl RoutingStore {
                  SELECT MAX(approved_at) AS value
                  FROM approved_model_mappings
                  UNION ALL
-                 SELECT MAX(observed_at) AS value
-                 FROM benchmark_identity_links
-                 UNION ALL
-                 SELECT MAX(approved_at) AS value
+                 SELECT MAX(
+                     COALESCE(MAX(observed_at), 0),
+                     COALESCE(MAX(approved_at), 0)
+                 ) AS value
                  FROM benchmark_identity_links
                  UNION ALL
                  SELECT MAX(approved_at) AS value
@@ -3678,6 +3678,60 @@ mod tests {
             .approve_model_mapping("provider-a", "catalog-model", "benchmark-v1")
             .expect("approve mapping");
         assert!(store.identity_last_modified().expect("updated timestamp") > 0);
+    }
+
+    #[test]
+    fn identity_last_modified_handles_partial_benchmark_identity_timestamps() {
+        let directory = tempfile::tempdir().expect("state directory");
+        let path = directory.path().join("routing.sqlite3");
+        let store = RoutingStore::open(Some(&path)).expect("store");
+        let connection = rusqlite::Connection::open(&path).expect("second connection");
+        connection
+            .execute(
+                "INSERT INTO model_entities(
+                    id, creator, family, version, variant, release_date, hugging_face_id, updated_at
+                 ) VALUES (?1, NULL, NULL, NULL, NULL, NULL, NULL, 0)",
+                ["entity-a"],
+            )
+            .expect("entity");
+        connection
+            .execute(
+                "INSERT INTO benchmark_identity_links(
+                    entity_id, benchmark_source, benchmark_id, reasoning_effort,
+                    confidence, provenance_url, observed_at, approved_at
+                 ) VALUES (?1, ?2, ?3, '', 'observed', '', ?4, NULL)",
+                rusqlite::params!["entity-a", "fixture", "benchmark-a", 123_i64],
+            )
+            .expect("observed benchmark link");
+        drop(connection);
+
+        assert_eq!(
+            store.identity_last_modified().expect("identity timestamp"),
+            123
+        );
+        let (_, identity_timestamp, _, _) = store
+            .catalog_snapshot_timestamps(300)
+            .expect("catalog timestamps");
+        assert_eq!(identity_timestamp, 123);
+
+        let connection = rusqlite::Connection::open(&path).expect("second connection");
+        connection
+            .execute(
+                "UPDATE benchmark_identity_links SET approved_at = 456
+                 WHERE entity_id = 'entity-a'",
+                [],
+            )
+            .expect("approved benchmark link");
+        drop(connection);
+
+        assert_eq!(
+            store.identity_last_modified().expect("approved timestamp"),
+            456
+        );
+        let (_, identity_timestamp, _, _) = store
+            .catalog_snapshot_timestamps(300)
+            .expect("updated catalog timestamps");
+        assert_eq!(identity_timestamp, 456);
     }
 
     #[test]

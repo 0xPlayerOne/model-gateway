@@ -395,6 +395,19 @@ fn client(provider: &ProviderConfig) -> Result<Client, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Builds a generic async HTTP client with sensible defaults: request
+/// timeout, no redirect following, and the gateway user-agent. Used for
+/// outbound API calls that should not follow redirects (benchmark
+/// fetches, etc.).
+pub fn build_http_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("model-gateway/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| error.to_string())
+}
+
 fn validate_openrouter_key(provider: &ProviderConfig, api_key: Option<&str>) -> Result<(), String> {
     fetch_account_limit(provider, api_key)?
         .map(|_| ())
