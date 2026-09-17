@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.38](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.37...v0.14.38) (2026-09-17)
+
+
+### Maintenance
+
+* extract HTTP client and optimize SQL timestamps ([#272](https://github.com/0xPlayerOne/model-gateway/issues/272)) ([328a7d8](https://github.com/0xPlayerOne/model-gateway/commit/328a7d831d261327ddbadc6a3fe280dd1e1fc706))
+
 ## [0.14.37](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.36...v0.14.37) (2026-09-15)
 
 
