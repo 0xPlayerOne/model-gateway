@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.41](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.40...v0.14.41) (2026-09-17)
+
+
+### Maintenance
+
+* adopt Code Foundry runtime v1.30.0 ([#279](https://github.com/0xPlayerOne/model-gateway/issues/279)) ([ca57167](https://github.com/0xPlayerOne/model-gateway/commit/ca57167582f858fed5edf635189380b4b8158b27))
+
 ## [0.14.40](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.39...v0.14.40) (2026-09-17)
 
 
