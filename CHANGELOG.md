@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.40](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.39...v0.14.40) (2026-09-17)
+
+
+### Maintenance
+
+* point config runtime_ref at v1.29.1 ([#277](https://github.com/0xPlayerOne/model-gateway/issues/277)) ([7dbd437](https://github.com/0xPlayerOne/model-gateway/commit/7dbd437eed8f0955d8f4f358b2e07799e5e2f2c1))
+
 ## [0.14.39](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.38...v0.14.39) (2026-09-17)
 
 
