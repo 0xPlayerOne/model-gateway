@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.39](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.38...v0.14.39) (2026-09-17)
+
+
+### Maintenance
+
+* bump Code Foundry runtime ref to v1.29.1 ([#275](https://github.com/0xPlayerOne/model-gateway/issues/275)) ([ce78f70](https://github.com/0xPlayerOne/model-gateway/commit/ce78f7082f32414f733f682b014fda3dad1f4975))
+
 ## [0.14.38](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.37...v0.14.38) (2026-09-17)
 
 
