@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.42](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.41...v0.14.42) (2026-09-18)
+
+
+### Performance
+
+* **routing:** add indexes for catalog lookups ([#282](https://github.com/0xPlayerOne/model-gateway/issues/282)) ([7f4b30d](https://github.com/0xPlayerOne/model-gateway/commit/7f4b30d08861711b638bd3a1f97d580c267e894d))
+
 ## [0.14.41](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.40...v0.14.41) (2026-09-17)
 
 
