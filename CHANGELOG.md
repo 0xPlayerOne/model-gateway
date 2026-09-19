@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.43](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.42...v0.14.43) (2026-09-19)
+
+
+### Performance
+
+* cache quality bar timestamp per selection pass ([#284](https://github.com/0xPlayerOne/model-gateway/issues/284)) ([97558de](https://github.com/0xPlayerOne/model-gateway/commit/97558dea62ea3d3c220835165a04723d17c6f44d))
+
 ## [0.14.42](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.41...v0.14.42) (2026-09-18)
 
 
