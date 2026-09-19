@@ -139,12 +139,33 @@ impl FreeModelsQualityBar {
         context_length: Option<u64>,
         model_id: &str,
     ) -> bool {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now_seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-            .unwrap_or(i64::MAX);
+        self.passes_at(
+            benchmark,
+            refreshed_at,
+            effective_input_price,
+            effective_output_price,
+            context_length,
+            model_id,
+            crate::routing::epoch_seconds(),
+        )
+    }
 
+    /// Applies the quality bar using a caller-provided timestamp.
+    ///
+    /// Listing a catalog can evaluate hundreds of models. Keeping the time
+    /// sample outside that loop avoids a system clock read for every candidate
+    /// while preserving the existing `passes` convenience API.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn passes_at(
+        &self,
+        benchmark: Option<&crate::benchmarks::BenchmarkModel>,
+        refreshed_at: i64,
+        effective_input_price: Option<f64>,
+        effective_output_price: Option<f64>,
+        context_length: Option<u64>,
+        model_id: &str,
+        now_seconds: i64,
+    ) -> bool {
         // Quality filter: skip if benchmark exists but composite score is below threshold
         if let Some(benchmark) = benchmark
             && let Some(score) = crate::benchmarks::composite_quality(benchmark)
@@ -1655,6 +1676,22 @@ mod tests {
     }
 
     #[test]
+    fn free_models_quality_bar_uses_supplied_timestamp() {
+        let quality = super::FreeModelsQualityBar {
+            min_composite_quality: 0.0,
+            min_context_length: 0,
+            min_model_size_b: 0,
+            max_age_months: 1,
+            max_input_price_per_million: 0.0,
+            max_output_price_per_million: 0.0,
+            max_quality_regret: 8.0,
+        };
+        let refreshed_at = 1_000_000;
+        assert!(quality.passes_at(None, refreshed_at, None, None, None, "test", refreshed_at));
+        assert!(!quality.passes_at(None, refreshed_at, None, None, None, "test", 90 * 86_400,));
+    }
+
+    #[test]
     fn free_models_quality_bar_filters_low_quality_benchmarked_models() {
         use crate::benchmarks::BenchmarkModel;
         let quality = super::FreeModelsQualityBar {
@@ -1756,11 +1793,7 @@ mod tests {
     #[test]
     fn free_models_quality_bar_uses_refreshed_at_fallback() {
         use crate::benchmarks::BenchmarkModel;
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = crate::routing::epoch_seconds();
 
         let quality = super::FreeModelsQualityBar {
             min_composite_quality: 0.0,
@@ -1921,11 +1954,7 @@ mod tests {
     #[test]
     fn release_date_takes_precedence_over_refreshed_at() {
         use crate::benchmarks::BenchmarkModel;
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = crate::routing::epoch_seconds();
 
         let bar = super::FreeModelsQualityBar {
             min_composite_quality: 0.0,

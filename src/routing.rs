@@ -2998,7 +2998,11 @@ fn has_incomplete_on_connection_with_statements(
     Ok(false)
 }
 
-pub(crate) fn epoch_seconds() -> i64 {
+/// Return the current Unix timestamp in whole seconds.
+///
+/// Clock values before the Unix epoch and values outside `i64` are handled
+/// defensively so callers receive a stable sentinel instead of an error.
+pub fn epoch_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
