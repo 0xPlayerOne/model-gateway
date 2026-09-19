@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -51,12 +51,8 @@ pub struct IdentityImport {
     pub aliases: Vec<IdentityAliasRecord>,
 }
 
-fn now_seconds() -> Result<i64, String> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_secs();
-    i64::try_from(seconds).map_err(|error| error.to_string())
+fn now_seconds() -> i64 {
+    crate::routing::epoch_seconds()
 }
 
 fn normalized_reference(value: &str) -> String {
@@ -339,7 +335,7 @@ pub fn fetch_identity_sources() -> Result<Vec<IdentityImport>, String> {
     const CANONICAL_URL: &str = "https://models.dev/models.json";
     const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/models";
 
-    let observed_at = now_seconds()?;
+    let observed_at = now_seconds();
     let client = http_client()?;
     let (models_dev, canonical, openrouter) = std::thread::scope(|scope| {
         let models_dev = scope.spawn(|| fetch_json(&client, MODELS_DEV_URL));

@@ -2066,6 +2066,7 @@ async fn load_free_candidates(
             provider_filter,
             mappings: &mappings,
             account_limits: &account_limits,
+            now_seconds: crate::routing::epoch_seconds(),
         },
     );
     Ok((candidates, account_limits))
@@ -2871,6 +2872,7 @@ struct FreeCandidateContext<'a> {
     provider_filter: Option<&'a str>,
     mappings: &'a IdentityMappingIndexes,
     account_limits: &'a BTreeMap<String, AccountLimitSnapshot>,
+    now_seconds: i64,
 }
 
 type EffectivePriceIndex = BTreeMap<(String, String), EffectivePrice>;
@@ -3018,13 +3020,14 @@ fn collect_free_candidates(
         let matching =
             find_exact_matching_benchmarks_indexed(benchmark_index, &canonical.benchmark_model);
         if matching.is_empty() {
-            if context.cfg.free_models_quality.passes(
+            if context.cfg.free_models_quality.passes_at(
                 None,
                 offering.refreshed_at,
                 offering.input_price_per_million,
                 offering.output_price_per_million,
                 offering.context_length,
                 &canonical.benchmark_model,
+                context.now_seconds,
             ) {
                 candidates.push(ModelCandidate {
                     quality: None,
@@ -3041,13 +3044,14 @@ fn collect_free_candidates(
                     continue;
                 };
                 has_quality = true;
-                if !context.cfg.free_models_quality.passes(
+                if !context.cfg.free_models_quality.passes_at(
                     Some(benchmark),
                     offering.refreshed_at,
                     offering.input_price_per_million,
                     offering.output_price_per_million,
                     offering.context_length,
                     &canonical.benchmark_model,
+                    context.now_seconds,
                 ) {
                     continue;
                 }
@@ -3060,13 +3064,14 @@ fn collect_free_candidates(
                 });
             }
             if !has_quality
-                && context.cfg.free_models_quality.passes(
+                && context.cfg.free_models_quality.passes_at(
                     None,
                     offering.refreshed_at,
                     offering.input_price_per_million,
                     offering.output_price_per_million,
                     offering.context_length,
                     &canonical.benchmark_model,
+                    context.now_seconds,
                 )
             {
                 candidates.push(ModelCandidate {
@@ -3208,6 +3213,7 @@ async fn list_auto_models(
             provider_filter: None,
             mappings: &mappings,
             account_limits: &account_limits,
+            now_seconds: crate::routing::epoch_seconds(),
         },
     );
     let paid_candidates = collect_paid_candidates(
@@ -4722,6 +4728,7 @@ async fn resolve_auto_free_targets(
     let mappings = identity_mapping_indexes_operation(state.routing.clone()).await;
     let classification = classify(request);
     let requirements = RequestRequirements::from_request(request);
+    let now_seconds = crate::routing::epoch_seconds();
     let candidates = offerings
         .into_iter()
         .filter_map(|mut offering| {
@@ -4760,13 +4767,14 @@ async fn resolve_auto_free_targets(
             let effective_output = offering
                 .output_price_per_million
                 .or_else(|| benchmark.and_then(|b| b.output_price_per_million));
-            if !state.config.server.free_models_quality.passes(
+            if !state.config.server.free_models_quality.passes_at(
                 benchmark,
                 offering.refreshed_at,
                 effective_input,
                 effective_output,
                 offering.context_length,
                 &canonical.benchmark_model,
+                now_seconds,
             ) {
                 return None;
             }
