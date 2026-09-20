@@ -567,7 +567,11 @@ impl RoutingStore {
              CREATE INDEX IF NOT EXISTS idx_catalog_models_access_kind
                  ON catalog_models(access_kind, refreshed_at, provider, model);
              CREATE INDEX IF NOT EXISTS idx_catalog_models_provider_lower_model
-                 ON catalog_models(provider, lower(model));",
+                 ON catalog_models(provider, lower(model));
+             CREATE INDEX IF NOT EXISTS idx_pricing_snapshots_active_source_fetched
+                 ON pricing_snapshots(active, source_kind, fetched_at, id);
+             CREATE INDEX IF NOT EXISTS idx_price_observations_lower_model_snapshot
+                 ON price_observations(lower(model_id), snapshot_id);",
         )?;
         connection.execute(
             "UPDATE catalog_models
@@ -3202,6 +3206,31 @@ mod tests {
                 "idx_catalog_models_access_kind",
                 "idx_catalog_models_provider_lower_model",
                 "idx_catalog_models_refreshed",
+            ]
+        );
+    }
+
+    #[test]
+    fn pricing_lookup_indexes_are_created() {
+        let store = RoutingStore::open(None).expect("store");
+        let connection = store.connection.lock().expect("connection lock");
+        let indexes = connection
+            .prepare(
+                "SELECT name
+                 FROM sqlite_master
+                 WHERE type = 'index' AND name LIKE 'idx_pric%'
+                 ORDER BY name",
+            )
+            .expect("index query")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("index rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("index names");
+        assert_eq!(
+            indexes,
+            vec![
+                "idx_price_observations_lower_model_snapshot",
+                "idx_pricing_snapshots_active_source_fetched",
             ]
         );
     }
