@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.44](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.43...v0.14.44) (2026-09-20)
+
+
+### Maintenance
+
+* **deps:** bump clap in the cargo-dependencies group ([#287](https://github.com/0xPlayerOne/model-gateway/issues/287)) ([63e96c6](https://github.com/0xPlayerOne/model-gateway/commit/63e96c6ea5e1a87736cb52c84ca9786455968627))
+
 ## [0.14.43](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.42...v0.14.43) (2026-09-19)
 
 
