@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.45](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.44...v0.14.45) (2026-09-20)
+
+
+### Maintenance
+
+* **deps:** bump docker/setup-buildx-action from 4.3.0 to 4.4.1 in the github-actions group ([#286](https://github.com/0xPlayerOne/model-gateway/issues/286)) ([fb8ddd9](https://github.com/0xPlayerOne/model-gateway/commit/fb8ddd9583208690e22885dde1bed87317515174))
+
 ## [0.14.44](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.43...v0.14.44) (2026-09-20)
 
 
