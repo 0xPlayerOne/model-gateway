@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.47](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.46...v0.14.47) (2026-09-21)
+
+
+### Maintenance
+
+* **license:** allow project license in deny policy ([#293](https://github.com/0xPlayerOne/model-gateway/issues/293)) ([126692e](https://github.com/0xPlayerOne/model-gateway/commit/126692e3ebca0d8b4007afe570634df4c9e6984b))
+
 ## [0.14.46](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.45...v0.14.46) (2026-09-20)
 
 
