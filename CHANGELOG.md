@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.50](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.49...v0.14.50) (2026-09-23)
+
+
+### Maintenance
+
+* **identity:** remove unnecessary now_seconds() wrapper, fix formatting ([#297](https://github.com/0xPlayerOne/model-gateway/issues/297)) ([126abd7](https://github.com/0xPlayerOne/model-gateway/commit/126abd78b42c228a7922d3013a144d60a56e2dfa))
+
 ## [0.14.49](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.48...v0.14.49) (2026-09-23)
 
 
