@@ -51,10 +51,6 @@ pub struct IdentityImport {
     pub aliases: Vec<IdentityAliasRecord>,
 }
 
-fn now_seconds() -> i64 {
-    crate::routing::epoch_seconds()
-}
-
 fn normalized_reference(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
@@ -335,7 +331,7 @@ pub fn fetch_identity_sources() -> Result<Vec<IdentityImport>, String> {
     const CANONICAL_URL: &str = "https://models.dev/models.json";
     const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/models";
 
-    let observed_at = now_seconds();
+    let observed_at = crate::routing::epoch_seconds();
     let client = http_client()?;
     let (models_dev, canonical, openrouter) = std::thread::scope(|scope| {
         let models_dev = scope.spawn(|| fetch_json(&client, MODELS_DEV_URL));
