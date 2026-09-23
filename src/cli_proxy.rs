@@ -417,10 +417,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::{
-        base_url, CliProxyError, CliProxyPaths, DEFAULT_PORT, OAuthProvider, VERSION,
-        configured_port, ensure_private_dir, generate_api_key, generated_config, hex,
-        initialize, install, login, login_command, random_bytes, release_asset, serve,
-        set_executable, set_private_dir, set_private_file, validate_paths, write_private_file,
+        CliProxyError, CliProxyPaths, DEFAULT_PORT, OAuthProvider, VERSION, base_url,
+        configured_port, ensure_private_dir, generate_api_key, generated_config, hex, initialize,
+        install, login, login_command, random_bytes, release_asset, serve, set_executable,
+        set_private_dir, set_private_file, validate_paths, write_private_file,
     };
     use std::path::Path;
 
@@ -770,10 +770,7 @@ mod tests {
             std::env::set_var("MODEL_GATEWAY_CLI_PROXY_PORT", "18317");
         }
         assert_eq!(configured_port().expect("custom port"), 18317);
-        assert_eq!(
-            base_url().expect("custom url"),
-            "http://127.0.0.1:18317/v1"
-        );
+        assert_eq!(base_url().expect("custom url"), "http://127.0.0.1:18317/v1");
         unsafe {
             std::env::remove_var("MODEL_GATEWAY_CLI_PROXY_PORT");
         }
