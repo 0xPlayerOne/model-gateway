@@ -417,9 +417,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::{
-        CliProxyError, CliProxyPaths, OAuthProvider, VERSION, ensure_private_dir, generate_api_key,
-        generated_config, hex, initialize, install, login_command, random_bytes, release_asset,
-        set_executable, set_private_dir, set_private_file, validate_paths, write_private_file,
+        CliProxyError, CliProxyPaths, DEFAULT_PORT, OAuthProvider, VERSION, base_url,
+        configured_port, ensure_private_dir, generate_api_key, generated_config, hex, initialize,
+        install, login, login_command, random_bytes, release_asset, serve, set_executable,
+        set_private_dir, set_private_file, validate_paths, write_private_file,
     };
     use std::path::Path;
 
@@ -750,5 +751,115 @@ mod tests {
         assert_eq!(hex(&[0x01]), "01");
         assert_eq!(hex(&[0xff]), "ff");
         assert_eq!(hex(&[0xab, 0xcd, 0xef]), "abcdef");
+    }
+
+    #[test]
+    fn configured_port_and_base_url_env_var_scenarios() {
+        // Default when unset
+        unsafe {
+            std::env::remove_var("MODEL_GATEWAY_CLI_PROXY_PORT");
+        }
+        assert_eq!(configured_port().expect("default"), DEFAULT_PORT);
+        assert_eq!(
+            base_url().expect("default url"),
+            format!("http://127.0.0.1:{}/v1", DEFAULT_PORT)
+        );
+
+        // Valid custom port
+        unsafe {
+            std::env::set_var("MODEL_GATEWAY_CLI_PROXY_PORT", "18317");
+        }
+        assert_eq!(configured_port().expect("custom port"), 18317);
+        assert_eq!(base_url().expect("custom url"), "http://127.0.0.1:18317/v1");
+        unsafe {
+            std::env::remove_var("MODEL_GATEWAY_CLI_PROXY_PORT");
+        }
+
+        // Zero port rejected
+        unsafe {
+            std::env::set_var("MODEL_GATEWAY_CLI_PROXY_PORT", "0");
+        }
+        assert!(configured_port().is_err());
+        unsafe {
+            std::env::remove_var("MODEL_GATEWAY_CLI_PROXY_PORT");
+        }
+
+        // Out-of-range port rejected
+        unsafe {
+            std::env::set_var("MODEL_GATEWAY_CLI_PROXY_PORT", "70000");
+        }
+        assert!(configured_port().is_err());
+        unsafe {
+            std::env::remove_var("MODEL_GATEWAY_CLI_PROXY_PORT");
+        }
+
+        // Non-numeric port rejected
+        unsafe {
+            std::env::set_var("MODEL_GATEWAY_CLI_PROXY_PORT", "not-a-port");
+        }
+        assert!(configured_port().is_err());
+        assert!(base_url().is_err());
+        unsafe {
+            std::env::remove_var("MODEL_GATEWAY_CLI_PROXY_PORT");
+        }
+
+        // Non-Unicode port rejected
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = OsString::from_vec(vec![0xFF, 0xFE]);
+        unsafe {
+            std::env::set_var("MODEL_GATEWAY_CLI_PROXY_PORT", invalid);
+        }
+        assert!(configured_port().is_err());
+        unsafe {
+            std::env::remove_var("MODEL_GATEWAY_CLI_PROXY_PORT");
+        }
+    }
+
+    #[test]
+    fn login_rejects_missing_binary() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let paths = CliProxyPaths {
+            root: directory.path().to_path_buf(),
+            binary: directory.path().join("missing-cli-proxy-api"),
+            config: directory.path().join("config.yaml"),
+            auth_dir: directory.path().join("auth"),
+        };
+        assert!(matches!(
+            login(&paths, OAuthProvider::Claude, false, true),
+            Err(CliProxyError::BinaryMissing(_))
+        ));
+    }
+
+    #[test]
+    fn login_rejects_missing_config() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary_path = directory.path().join("cli-proxy-api");
+        std::fs::write(&binary_path, b"binary").expect("write binary");
+        let paths = CliProxyPaths {
+            root: directory.path().to_path_buf(),
+            binary: binary_path,
+            config: directory.path().join("missing-config.yaml"),
+            auth_dir: directory.path().join("auth"),
+        };
+        assert!(matches!(
+            login(&paths, OAuthProvider::Codex, false, false),
+            Err(CliProxyError::ConfigMissing(_))
+        ));
+    }
+
+    #[test]
+    fn serve_rejects_missing_binary() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let paths = CliProxyPaths {
+            root: directory.path().to_path_buf(),
+            binary: directory.path().join("missing-cli-proxy-api"),
+            config: directory.path().join("config.yaml"),
+            auth_dir: directory.path().join("auth"),
+        };
+        assert!(matches!(
+            serve(&paths),
+            Err(CliProxyError::BinaryMissing(_))
+        ));
     }
 }
