@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.49](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.48...v0.14.49) (2026-09-23)
+
+
+### Tests
+
+* **cli-proxy:** add coverage for configured_port, base_url, login, serve ([#296](https://github.com/0xPlayerOne/model-gateway/issues/296)) ([3533832](https://github.com/0xPlayerOne/model-gateway/commit/35338328a11541f2e1776300b41b5782a6f8e013))
+
 ## [0.14.48](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.47...v0.14.48) (2026-09-21)
 
 
