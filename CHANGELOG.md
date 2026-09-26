@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.51](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.50...v0.14.51) (2026-09-26)
+
+
+### Maintenance
+
+* **routing:** remove dead has_incomplete_price_observation and has_incomplete_on_connection helpers ([#303](https://github.com/0xPlayerOne/model-gateway/issues/303)) ([abb535d](https://github.com/0xPlayerOne/model-gateway/commit/abb535ddd8e4c3309649ee4ec0e443b935023145))
+
 ## [0.14.50](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.49...v0.14.50) (2026-09-23)
 
 
