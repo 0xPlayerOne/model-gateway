@@ -2418,7 +2418,10 @@ fn cached_json_response(
 /// materialize (single model detail resources).
 fn body_hash_etag(value: &Value) -> String {
     let body = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
-    format!("\"{}\"", crate::storage::hex(Sha256::digest(&body).as_ref()))
+    format!(
+        "\"{}\"",
+        crate::storage::hex(Sha256::digest(&body).as_ref())
+    )
 }
 
 /// GET/HEAD If-None-Match uses weak comparison. Accepting weak validators and
