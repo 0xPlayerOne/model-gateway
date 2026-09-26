@@ -1105,32 +1105,6 @@ impl RoutingStore {
         .map_err(RoutingError::from)
     }
 
-    pub fn has_incomplete_price_observation(
-        &self,
-        runtime_provider: &str,
-        profile_key: Option<&str>,
-        model: &str,
-        canonical_model: Option<&str>,
-        max_age_seconds: u64,
-    ) -> Result<bool, RoutingError> {
-        let connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
-        let now = epoch_seconds();
-        let cutoff = now.saturating_sub(i64::try_from(max_age_seconds).unwrap_or(i64::MAX));
-        has_incomplete_on_connection(
-            &connection,
-            runtime_provider,
-            profile_key,
-            model,
-            canonical_model,
-            cutoff,
-            now,
-        )
-        .map_err(RoutingError::from)
-    }
-
-    /// Batched pricing coverage: one mutex acquisition for all queries and
-    /// reusable prepared statements. Returns `(effective_price, has_incomplete)`
-    /// per query without `N` separate lock/prepare round-trips.
     pub fn batch_price_coverage(
         &self,
         queries: &[(String, Option<String>, String, Option<String>)],
@@ -2916,35 +2890,6 @@ fn effective_price_on_connection_with_statements(
     Ok(canonical_candidates
         .first()
         .and_then(|observation| EffectivePrice::from_observation(observation, true)))
-}
-
-fn has_incomplete_on_connection(
-    connection: &Connection,
-    runtime_provider: &str,
-    profile_key: Option<&str>,
-    model: &str,
-    canonical_model: Option<&str>,
-    cutoff: i64,
-    now: i64,
-) -> Result<bool, rusqlite::Error> {
-    let mut statement = connection.prepare(
-        "SELECT o.scope, o.provider_key, o.input_price, o.output_price
-         FROM price_observations o
-         JOIN pricing_snapshots s ON s.id = o.snapshot_id
-         WHERE s.active = 1 AND (s.source_kind = 'manual' OR s.fetched_at >= ?1)
-           AND lower(o.model_id) = ?2
-           AND (o.valid_from IS NULL OR o.valid_from <= ?3)
-           AND (o.valid_until IS NULL OR o.valid_until > ?3)",
-    )?;
-    has_incomplete_on_connection_with_statements(
-        &mut statement,
-        runtime_provider,
-        profile_key,
-        model,
-        canonical_model,
-        cutoff,
-        now,
-    )
 }
 
 fn has_incomplete_on_connection_with_statements(

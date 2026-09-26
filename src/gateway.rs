@@ -2149,7 +2149,7 @@ fn catalog_snapshot(
             last_modified = last_modified.max(price.fetched_at.unwrap_or_default());
         }
     }
-    let token = digest_hex(hasher.finalize());
+    let token = crate::storage::hex(hasher.finalize().as_ref());
     for account in account_limits.values() {
         last_modified = last_modified.max(account.fetched_at);
     }
@@ -2163,10 +2163,6 @@ fn catalog_snapshot(
         token,
         last_modified,
     }
-}
-
-fn digest_hex(digest: impl AsRef<[u8]>) -> String {
-    crate::storage::hex(digest.as_ref())
 }
 
 fn catalog_access_name(access: CatalogAccess) -> &'static str {
@@ -2342,7 +2338,7 @@ fn catalog_representation_validator(
     hasher.update(representation.offset.to_string().as_bytes());
     hasher.update(b":limit=");
     hasher.update(representation.limit.to_string().as_bytes());
-    digest_hex(hasher.finalize())
+    crate::storage::hex(hasher.finalize().as_ref())
 }
 
 fn http_last_modified(last_modified: i64) -> String {
@@ -2422,7 +2418,10 @@ fn cached_json_response(
 /// materialize (single model detail resources).
 fn body_hash_etag(value: &Value) -> String {
     let body = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
-    format!("\"{}\"", digest_hex(Sha256::digest(&body)))
+    format!(
+        "\"{}\"",
+        crate::storage::hex(Sha256::digest(&body).as_ref())
+    )
 }
 
 /// GET/HEAD If-None-Match uses weak comparison. Accepting weak validators and
