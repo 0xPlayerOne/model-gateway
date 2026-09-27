@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.52](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.51...v0.14.52) (2026-09-27)
+
+
+### Maintenance
+
+* **deps:** bump thiserror in the cargo-dependencies group ([#305](https://github.com/0xPlayerOne/model-gateway/issues/305)) ([016bd8f](https://github.com/0xPlayerOne/model-gateway/commit/016bd8f9fabfd897b2ba2e1fb3ebfe1cb533bce6))
+* **routing:** remove dead is_verified_free wrapper ([#306](https://github.com/0xPlayerOne/model-gateway/issues/306)) ([3f21229](https://github.com/0xPlayerOne/model-gateway/commit/3f2122991376b6520af3327e5eae8bca7b5479ac))
+
 ## [0.14.51](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.50...v0.14.51) (2026-09-26)
 
 
