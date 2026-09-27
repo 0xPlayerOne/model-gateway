@@ -2227,10 +2227,6 @@ const fn non_free_access(provider: &ProviderConfig) -> AccessKind {
     }
 }
 
-pub fn is_verified_free(provider: &ProviderConfig, model: &str, zero_priced: bool) -> bool {
-    classify_access(provider, model, zero_priced).is_free()
-}
-
 pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaReference> {
     if !provider.quotas.is_empty() {
         return Some(QuotaReference {
@@ -3494,20 +3490,16 @@ mod tests {
             billing_mode: BillingMode::Paid,
             ..ProviderConfig::default()
         };
-        assert!(!super::is_verified_free(
-            &provider,
-            "provider/preview",
-            true
-        ));
-        assert!(super::is_verified_free(&provider, "provider/free", false));
+        assert!(!super::classify_access(&provider, "provider/preview", true).is_free());
+        assert!(super::classify_access(&provider, "provider/free", false).is_free());
 
         provider.profile = Some(ProviderProfileId::OpenCode);
-        assert!(super::is_verified_free(&provider, "big-pickle", false));
-        assert!(super::is_verified_free(&provider, "mimo-v2.5-free", false));
+        assert!(super::classify_access(&provider, "big-pickle", false).is_free());
+        assert!(super::classify_access(&provider, "mimo-v2.5-free", false).is_free());
 
         provider.profile = Some(ProviderProfileId::OpenCodeGo);
-        assert!(!super::is_verified_free(&provider, "mimo-v2.5", true));
-        assert!(!super::is_verified_free(&provider, "mimo-v2.5-free", false));
+        assert!(!super::classify_access(&provider, "mimo-v2.5", true).is_free());
+        assert!(!super::classify_access(&provider, "mimo-v2.5-free", false).is_free());
 
         provider.profile = Some(ProviderProfileId::Mistral);
         provider.billing_mode = BillingMode::Free;
@@ -3523,7 +3515,7 @@ mod tests {
 
         provider.profile = Some(ProviderProfileId::Zai);
         provider.billing_mode = BillingMode::Free;
-        assert!(!super::is_verified_free(&provider, "glm-flash", false));
+        assert!(!super::classify_access(&provider, "glm-flash", false).is_free());
     }
 
     fn catalog(model: &str, is_free: bool) -> CatalogRecord {
@@ -4175,8 +4167,8 @@ mod tests {
             billing_mode: crate::config::BillingMode::Paid,
             ..ProviderConfig::default()
         };
-        assert!(super::is_verified_free(&provider, "zero-price", true));
-        assert!(!super::is_verified_free(&provider, "unknown-price", false));
+        assert!(super::classify_access(&provider, "zero-price", true).is_free());
+        assert!(!super::classify_access(&provider, "unknown-price", false).is_free());
     }
 
     #[test]
