@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.53](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.52...v0.14.53) (2026-09-29)
+
+
+### Maintenance
+
+* **code-foundry:** upgrade runtime to v1.35.0 ([#310](https://github.com/0xPlayerOne/model-gateway/issues/310)) ([ecdb75e](https://github.com/0xPlayerOne/model-gateway/commit/ecdb75e56b54cf47692044372e88063b79877dea))
+
 ## [0.14.52](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.51...v0.14.52) (2026-09-27)
 
 
