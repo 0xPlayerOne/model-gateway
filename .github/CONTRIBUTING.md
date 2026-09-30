@@ -36,6 +36,8 @@ Agents must not:
 - Claim completion when tests, deployment checks, or required reviews are still pending.
 
 <!-- /code-foundry-managed: agent-operating-contract -->
+<!-- code-foundry-managed: pull-request-policy -->
+
 ### Pull request readiness (mandatory)
 
 This repository uses the `direct` workflow. Topic pull requests target `main`.
