@@ -71,6 +71,13 @@ jobs:
       - name: Install repository Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
 
+      # Releases fire per version bump (several per week), and a cold
+      # `cargo build --release` of the whole workspace dominated the release
+      # tail. The cache keys on Cargo.lock, so dep-bump releases only rebuild
+      # the changed crates.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
       - name: Build release binary
         run: cargo build --release --locked
 
