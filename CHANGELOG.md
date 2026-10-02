@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.58](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.57...v0.14.58) (2026-10-02)
+
+
+### Maintenance
+
+* cache Rust builds in the native release legs ([#319](https://github.com/0xPlayerOne/model-gateway/issues/319)) ([8ff8752](https://github.com/0xPlayerOne/model-gateway/commit/8ff8752d9931f38968c9c0e30a26166809476a66))
+
 ## [0.14.57](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.56...v0.14.57) (2026-09-30)
 
 
