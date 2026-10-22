@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.63](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.62...v0.14.63) (2026-10-22)
+
+
+### Maintenance
+
+* code-foundry-1.48.4-cloud ([#331](https://github.com/0xPlayerOne/model-gateway/issues/331)) ([28a3d43](https://github.com/0xPlayerOne/model-gateway/commit/28a3d433fd129d3a6b1d7cccb62f17b127c7a9f8))
+
 ## [0.14.62](https://github.com/0xPlayerOne/model-gateway/compare/v0.14.61...v0.14.62) (2026-10-08)
 
 
