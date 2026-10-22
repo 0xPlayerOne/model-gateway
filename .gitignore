@@ -83,3 +83,4 @@ mise.local.lock
 # committed pre-commit gate is tracked.
 .githooks/*
 !.githooks/pre-commit
+.fleet-wt/
