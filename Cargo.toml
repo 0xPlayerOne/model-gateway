@@ -27,7 +27,7 @@ getrandom = "0.4"
 httpdate = "1"
 keyring = "4"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "stream"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
